@@ -1,0 +1,16 @@
+id = "pi.herdr.deck"
+name = "Pi Deck"
+version = "0.1.0"
+min_herdr_version = "0.7.2"
+description = "Mouse-first side deck for a running Pi agent pane"
+platforms = ["linux"]
+
+[[build]]
+command = ["npm", "run", "build"]
+platforms = ["linux"]
+
+[[panes]]
+id = "deck"
+title = "Pi Deck"
+placement = "split"
+command = ["./bin/pi-herdr-deck"]
