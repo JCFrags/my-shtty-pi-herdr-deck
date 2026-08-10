@@ -410,14 +410,50 @@ export class Broker {
                     "Session key does not match the broker socket.",
                   );
                 if (item.value.client.kind === "pi_child") {
-                  if (item.value.auth.kind !== "agent_token" || !item.value.auth.agentId || !item.value.auth.generation || !item.value.auth.piSessionId)
-                    throw new OrchestratorError("AUTH_FAILED", "Managed agent authentication is invalid.");
-                  const resource = this.store.state.herdrResources?.[item.value.auth.agentId];
-                  const credential = resource?.tokenDigest && resource.sessionId ? { agentId: item.value.auth.agentId, generation: resource.generation ?? 0, tokenHash: resource.tokenDigest, piSessionId: resource.sessionId, ...(resource.parentAgentId ? { parentAgentId: resource.parentAgentId } : {}) } : undefined;
-                  client.principal = authenticate(this.#secret, "", item.value.client.kind, credential, item.value.auth.token, item.value.auth.generation, item.value.auth.piSessionId);
+                  if (
+                    item.value.auth.kind !== "agent_token" ||
+                    !item.value.auth.agentId ||
+                    !item.value.auth.generation ||
+                    !item.value.auth.piSessionId
+                  )
+                    throw new OrchestratorError(
+                      "AUTH_FAILED",
+                      "Managed agent authentication is invalid.",
+                    );
+                  const resource =
+                    this.store.state.herdrResources?.[item.value.auth.agentId];
+                  const credential =
+                    resource?.tokenDigest && resource.sessionId
+                      ? {
+                          agentId: item.value.auth.agentId,
+                          generation: resource.generation ?? 0,
+                          tokenHash: resource.tokenDigest,
+                          piSessionId: resource.sessionId,
+                          ...(resource.parentAgentId
+                            ? { parentAgentId: resource.parentAgentId }
+                            : {}),
+                        }
+                      : undefined;
+                  client.principal = authenticate(
+                    this.#secret,
+                    "",
+                    item.value.client.kind,
+                    credential,
+                    item.value.auth.token,
+                    item.value.auth.generation,
+                    item.value.auth.piSessionId,
+                  );
                 } else {
-                  if (item.value.auth.kind !== "client_secret") throw new OrchestratorError("AUTH_FAILED", "Authentication kind does not match client kind.");
-                  client.principal = authenticate(this.#secret, item.value.auth.secret ?? "", item.value.client.kind);
+                  if (item.value.auth.kind !== "client_secret")
+                    throw new OrchestratorError(
+                      "AUTH_FAILED",
+                      "Authentication kind does not match client kind.",
+                    );
+                  client.principal = authenticate(
+                    this.#secret,
+                    item.value.auth.secret ?? "",
+                    item.value.client.kind,
+                  );
                 }
                 clearTimeout(authenticationTimer);
                 this.#writeFrame(client, {
@@ -827,43 +863,177 @@ export class Broker {
         delete client.subscriptionId;
         delete client.eventFilter;
         result = { unsubscribed: true };
-      } else if (request.method === "agent.register_adopted" || request.method === "agent.register_managed") {
-        if (request.method === "agent.register_managed") requirePermission(principal, "manage:self");
-        else if (principal.kind !== "pi_parent") throw new OrchestratorError("PERMISSION_DENIED", "Only a Pi adapter may register.");
+      } else if (
+        request.method === "agent.register_adopted" ||
+        request.method === "agent.register_managed"
+      ) {
+        if (request.method === "agent.register_managed")
+          requirePermission(principal, "manage:self");
+        else if (principal.kind !== "pi_parent")
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "Only a Pi adapter may register.",
+          );
         const p = request.params;
-        if (!safeText(p.adapterVersion, 64) || !p.herdr || typeof p.herdr !== "object" || !p.pi || typeof p.pi !== "object") throw new OrchestratorError("INVALID_REQUEST", "Pi registration payload is invalid.");
-        const herdr = p.herdr as Record<string, unknown>, pi = p.pi as Record<string, unknown>;
-        const agentId = request.method === "agent.register_managed" ? (principal.agentId ?? p.agentId) : createId("agt");
-        if (!safeText(agentId) || !safeText(herdr.paneId) || !safeText(pi.sessionId)) throw new OrchestratorError("INVALID_REQUEST", "Pi identity is invalid.");
+        if (
+          !safeText(p.adapterVersion, 64) ||
+          !p.herdr ||
+          typeof p.herdr !== "object" ||
+          !p.pi ||
+          typeof p.pi !== "object"
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Pi registration payload is invalid.",
+          );
+        const herdr = p.herdr as Record<string, unknown>,
+          pi = p.pi as Record<string, unknown>;
+        const agentId =
+          request.method === "agent.register_managed"
+            ? (principal.agentId ?? p.agentId)
+            : createId("agt");
+        if (
+          !safeText(agentId) ||
+          !safeText(herdr.paneId) ||
+          !safeText(pi.sessionId)
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Pi identity is invalid.",
+          );
         const existing = this.store.state.agents[agentId];
-        if (existing && existing.piSessionId !== pi.sessionId) throw new OrchestratorError("AGENT_REPLACED", "Pi session does not match the current agent generation.");
+        if (existing && existing.piSessionId !== pi.sessionId)
+          throw new OrchestratorError(
+            "AGENT_REPLACED",
+            "Pi session does not match the current agent generation.",
+          );
         if (!existing) {
-          const event = await this.store.append({ type: "agent.registered", actor: { principalId: principal.id, kind: principal.kind }, entityRefs: { agentId }, payload: { agentId, managed: request.method === "agent.register_managed", generation: Number(p.generation ?? 1), paneId: herdr.paneId, ...(safeText(herdr.terminalId) ? { terminalId: herdr.terminalId } : {}), piSessionId: pi.sessionId, ...(safeText(p.profileId) ? { profileId: p.profileId } : {}), ...(safeText(p.parentAgentId) ? { parentAgentId: p.parentAgentId } : {}) } });
+          const event = await this.store.append({
+            type: "agent.registered",
+            actor: { principalId: principal.id, kind: principal.kind },
+            entityRefs: { agentId },
+            payload: {
+              agentId,
+              managed: request.method === "agent.register_managed",
+              generation: Number(p.generation ?? 1),
+              paneId: herdr.paneId,
+              ...(safeText(herdr.terminalId)
+                ? { terminalId: herdr.terminalId }
+                : {}),
+              piSessionId: pi.sessionId,
+              ...(safeText(p.profileId) ? { profileId: p.profileId } : {}),
+              ...(safeText(p.parentAgentId)
+                ? { parentAgentId: p.parentAgentId }
+                : {}),
+            },
+          });
           committedEvent = event;
         }
-        result = { agentId, generation: this.store.state.agents[agentId]?.generation ?? 1, connectionGeneration: (this.store.state.agents[agentId]?.connectionGeneration ?? 0) + 1, heartbeatMs: 5_000, permissions: principal.permissions };
+        result = {
+          agentId,
+          generation: this.store.state.agents[agentId]?.generation ?? 1,
+          connectionGeneration:
+            (this.store.state.agents[agentId]?.connectionGeneration ?? 0) + 1,
+          heartbeatMs: 5_000,
+          permissions: principal.permissions,
+        };
       } else if (request.method === "agent.heartbeat") {
         requirePermission(principal, "manage:self");
-        const agentId = principal.agentId; if (!agentId || !this.store.state.agents[agentId]) throw new OrchestratorError("AGENT_NOT_FOUND", "Agent was not found.");
-        const p = request.params, state = p.state && typeof p.state === "object" ? p.state as Record<string, unknown> : {};
-        committedEvent = await this.store.append({ type: "agent.heartbeat", actor: { principalId: principal.id, kind: principal.kind }, entityRefs: { agentId }, payload: { agentId, ...(safeText(state.sessionId) ? { piSessionId: state.sessionId } : {}), ...(safeText(state.activity) ? { state: state.activity } : {}), connectionGeneration: this.store.state.agents[agentId]!.connectionGeneration ?? 1 } });
+        const agentId = principal.agentId;
+        if (!agentId || !this.store.state.agents[agentId])
+          throw new OrchestratorError(
+            "AGENT_NOT_FOUND",
+            "Agent was not found.",
+          );
+        const p = request.params,
+          state =
+            p.state && typeof p.state === "object"
+              ? (p.state as Record<string, unknown>)
+              : {};
+        committedEvent = await this.store.append({
+          type: "agent.heartbeat",
+          actor: { principalId: principal.id, kind: principal.kind },
+          entityRefs: { agentId },
+          payload: {
+            agentId,
+            ...(safeText(state.sessionId)
+              ? { piSessionId: state.sessionId }
+              : {}),
+            ...(safeText(state.activity) ? { state: state.activity } : {}),
+            connectionGeneration:
+              this.store.state.agents[agentId]!.connectionGeneration ?? 1,
+          },
+        });
         result = { accepted: true };
       } else if (request.method === "agent.list") {
         requirePermission(principal, "read:state");
-        const items = Object.values(this.store.state.agents).map((agent) => ({ ...agent, tokenDigest: undefined }));
-        result = { items, nextCursor: null, snapshotSeq: this.store.state.lastEventSeq };
+        const items = Object.values(this.store.state.agents).map((agent) => ({
+          ...agent,
+          tokenDigest: undefined,
+        }));
+        result = {
+          items,
+          nextCursor: null,
+          snapshotSeq: this.store.state.lastEventSeq,
+        };
       } else if (request.method === "agent.get") {
         requirePermission(principal, "read:state");
-        if (!safeText(request.params.agentId)) throw new OrchestratorError("INVALID_REQUEST", "Agent ID is invalid.");
-        const agent = this.store.state.agents[request.params.agentId]; if (!agent) throw new OrchestratorError("AGENT_NOT_FOUND", "Agent was not found.");
+        if (!safeText(request.params.agentId))
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Agent ID is invalid.",
+          );
+        const agent = this.store.state.agents[request.params.agentId];
+        if (!agent)
+          throw new OrchestratorError(
+            "AGENT_NOT_FOUND",
+            "Agent was not found.",
+          );
         result = { ...agent, tokenDigest: undefined };
-      } else if (request.method === "agent.prompt" || request.method === "agent.steer" || request.method === "agent.follow_up" || request.method === "agent.abort" || request.method === "agent.compact" || request.method === "agent.set_model" || request.method === "agent.set_thinking" || request.method === "agent.set_tools") {
+      } else if (
+        request.method === "agent.prompt" ||
+        request.method === "agent.steer" ||
+        request.method === "agent.follow_up" ||
+        request.method === "agent.abort" ||
+        request.method === "agent.compact" ||
+        request.method === "agent.set_model" ||
+        request.method === "agent.set_thinking" ||
+        request.method === "agent.set_tools"
+      ) {
         requirePermission(principal, "manage:all");
-        throw new OrchestratorError("AGENT_DISCONNECTED", "Pi control is available only through a connected adapter.", { retryable: true });
+        throw new OrchestratorError(
+          "AGENT_DISCONNECTED",
+          "Pi control is available only through a connected adapter.",
+          { retryable: true },
+        );
       } else if (request.method === "task.create_m3") {
         requirePermission(principal, "delegate");
-        const p = request.params; if (!safeText(p.title, 256) || !safeText(p.objective, 65_536)) throw new OrchestratorError("INVALID_REQUEST", "Task fields are invalid.");
-        const taskId = createId("tsk"); committedEvent = await this.store.append({ type: "task.created_m3", actor: { principalId: principal.id, kind: principal.kind }, entityRefs: { taskId }, payload: { taskId, title: p.title, objective: p.objective, createdAt: new Date().toISOString(), ...(safeText(p.parentAgentId) ? { parentAgentId: p.parentAgentId } : {}), ...(safeText(p.profileId) ? { profileId: p.profileId } : {}), ...(Array.isArray(p.dependencies) ? { dependencies: p.dependencies } : {}), ...(safeText(p.timeoutAt) ? { timeoutAt: p.timeoutAt } : {}) } });
+        const p = request.params;
+        if (!safeText(p.title, 256) || !safeText(p.objective, 65_536))
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Task fields are invalid.",
+          );
+        const taskId = createId("tsk");
+        committedEvent = await this.store.append({
+          type: "task.created_m3",
+          actor: { principalId: principal.id, kind: principal.kind },
+          entityRefs: { taskId },
+          payload: {
+            taskId,
+            title: p.title,
+            objective: p.objective,
+            createdAt: new Date().toISOString(),
+            ...(safeText(p.parentAgentId)
+              ? { parentAgentId: p.parentAgentId }
+              : {}),
+            ...(safeText(p.profileId) ? { profileId: p.profileId } : {}),
+            ...(Array.isArray(p.dependencies)
+              ? { dependencies: p.dependencies }
+              : {}),
+            ...(safeText(p.timeoutAt) ? { timeoutAt: p.timeoutAt } : {}),
+          },
+        });
         result = { taskId, state: "queued" };
       } else if (request.method === "task.list") {
         requirePermission(principal, "read:state");

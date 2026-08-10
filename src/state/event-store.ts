@@ -560,12 +560,29 @@ export class EventStore {
           ].every(
             (key) => Number.isSafeInteger(p[key]) && Number(p[key]) >= 0,
           ));
-    } else if ([
-      "agent.registered", "agent.heartbeat", "agent.moved", "agent.state_changed", "agent.replaced",
-      "task.created_m3", "run.created", "assignment.delivered", "assignment.accepted", "run.pi_started", "run.pi_settled", "run.state_changed", "task.cancel_requested"
-    ].includes(event.type)) {
+    } else if (
+      [
+        "agent.registered",
+        "agent.heartbeat",
+        "agent.moved",
+        "agent.state_changed",
+        "agent.replaced",
+        "task.created_m3",
+        "run.created",
+        "assignment.delivered",
+        "assignment.accepted",
+        "run.pi_started",
+        "run.pi_settled",
+        "run.state_changed",
+        "task.cancel_requested",
+      ].includes(event.type)
+    ) {
       const refId = refs.agentId ?? refs.taskId ?? refs.runId;
-      valid = typeof refId === "string" && Object.keys(p).every((key) => key.length <= 64 && !/[\\u0000-\\u001f\\u007f]/u.test(key));
+      valid =
+        typeof refId === "string" &&
+        Object.keys(p).every(
+          (key) => key.length <= 64 && !/[\\u0000-\\u001f\\u007f]/u.test(key),
+        );
     } else if (
       event.type === "audit.action" ||
       event.type === "audit.authorization_denied"

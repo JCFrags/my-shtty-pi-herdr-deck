@@ -3,10 +3,7 @@ import type { SchedulerTask } from "../scheduler/types.js";
 import type { WorkflowPlan } from "../scheduler/workflows.js";
 
 export type M5BrokerMethod =
-  | "scheduler.admit"
-  | "scheduler.block"
-  | "workflow.plan"
-  | "task.cancel";
+  "scheduler.admit" | "scheduler.block" | "workflow.plan" | "task.cancel";
 
 export interface M5BrokerCommand {
   readonly method: M5BrokerMethod;
@@ -27,7 +24,10 @@ function commandId(method: M5BrokerMethod, id: string): string {
   return `m5:${method}:${id}`;
 }
 
-function requireMatchingAdmission(admission: Admission, task: SchedulerTask): void {
+function requireMatchingAdmission(
+  admission: Admission,
+  task: SchedulerTask,
+): void {
   if (admission.taskId !== task.id) throw new Error("ADMISSION_TASK_MISMATCH");
 }
 
@@ -88,7 +88,8 @@ export class M5BrokerIntegrationAdapter {
 
   prepareCancellation(taskId: string, reason = "cancelled"): M5BrokerCommand {
     if (!taskId) throw new Error("TASK_ID_REQUIRED");
-    if (!reason || reason.length > 256) throw new Error("CANCELLATION_REASON_INVALID");
+    if (!reason || reason.length > 256)
+      throw new Error("CANCELLATION_REASON_INVALID");
     return {
       method: "task.cancel",
       params: { taskId, reason },
@@ -96,9 +97,12 @@ export class M5BrokerIntegrationAdapter {
     };
   }
 
-  async dispatch(commands: readonly M5BrokerCommand[]): Promise<readonly M5DispatchResult[]> {
+  async dispatch(
+    commands: readonly M5BrokerCommand[],
+  ): Promise<readonly M5DispatchResult[]> {
     const results: M5DispatchResult[] = [];
-    for (const command of commands) results.push({ command, result: await this.#transport.send(command) });
+    for (const command of commands)
+      results.push({ command, result: await this.#transport.send(command) });
     return results;
   }
 }
