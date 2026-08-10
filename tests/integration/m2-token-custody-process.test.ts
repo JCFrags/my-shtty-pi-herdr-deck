@@ -42,7 +42,7 @@ async function child(
     } : undefined;
     const result = process.env.MODE === "verify"
       ? await m.verifyManagedTokenFile(process.env.PATH, process.env.DIGEST, identity, hooks)
-      : await m.deletePromptFile(process.env.PATH, identity, hooks);
+      : await m.retainManagedFileForCleanup(process.env.PATH, identity, hooks);
     process.stdout.write(JSON.stringify(result));
   `;
   const result = await run(
@@ -73,8 +73,11 @@ test("M2 claimed token inode survives a separate Node process restart", async ()
     await child(modulePath, "verify", path, token.digest, identity),
     "true",
   );
-  await child(modulePath, "delete", path, token.digest, identity);
-  assert.equal(await readFile(path, "utf8"), "");
+  assert.equal(
+    await child(modulePath, "delete", path, token.digest, identity),
+    JSON.stringify("retained"),
+  );
+  assert.equal(await readFile(path, "utf8"), token.token + "\n");
 });
 
 test("M2 separate process refuses hard-link sentinel custody attacks", async () => {

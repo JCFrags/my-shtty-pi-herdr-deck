@@ -287,7 +287,8 @@ export class HerdrService {
         );
         throw new Error("HERDR_REGISTRATION_IDENTITY_MISMATCH");
       }
-      await this.#provisioner.cleanupRegistration(result);
+      const cleanupOutcome =
+        await this.#provisioner.cleanupRegistration(result);
       await this.#store.append({
         type: "herdr.provision.outcome",
         actor: this.#actor,
@@ -301,6 +302,7 @@ export class HerdrService {
           generation: result.token.generation,
           tokenDigest: result.token.digest,
           registrationDeadline: undefined,
+          cleanupOutcome,
         },
       });
       this.#pending.delete(agentId);
@@ -446,16 +448,11 @@ export class HerdrService {
       void this.withAgentLock(agentId, async () => {
         const current = this.resources[agentId];
         if (current?.state !== "pending") return;
-        await this.#provisioner
+        const cleanupOutcome = await this.#provisioner
           .cleanupRegistration(result)
-          .catch(() => undefined);
+          .catch(() => "retained_registration_files" as const);
         this.#pending.delete(agentId);
-        await this.recordLifecycle(
-          agentId,
-          "timed_out",
-          "registration_deadline_cleanup",
-          true,
-        );
+        await this.recordLifecycle(agentId, "timed_out", cleanupOutcome, true);
       }).catch(() => undefined);
     }, delay);
     timer.unref?.();
@@ -501,16 +498,11 @@ export class HerdrService {
         resource?.registrationDeadline &&
         Date.parse(resource.registrationDeadline) <= Date.now()
       ) {
-        await this.#provisioner
+        const cleanupOutcome = await this.#provisioner
           .cleanupRegistration(result)
-          .catch(() => undefined);
+          .catch(() => "retained_registration_files" as const);
         this.#pending.delete(agentId);
-        await this.recordLifecycle(
-          agentId,
-          "timed_out",
-          "registration_deadline_cleanup",
-          true,
-        );
+        await this.recordLifecycle(agentId, "timed_out", cleanupOutcome, true);
       }
     }
     const current = snapshot ?? (await this.#cli.snapshot());

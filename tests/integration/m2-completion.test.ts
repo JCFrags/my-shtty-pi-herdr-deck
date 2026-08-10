@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readdir } from "node:fs/promises";
+import { mkdtemp, readFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -69,7 +69,16 @@ test("M2 fake registration retains files until verified and records lifecycle", 
     generation: 1,
   });
   assert.equal(store.state.herdrResources?.["agent-1"]?.state, "registered");
+  assert.equal(
+    store.state.herdrResources?.["agent-1"]?.cleanupOutcome,
+    "retained_registration_files",
+  );
   assert.equal((await readdir(prompts)).length, 2);
+  assert.equal(await readFile(result.promptPath!, "utf8"), "fake prompt");
+  assert.equal(
+    await readFile(result.tokenFilePath!, "utf8"),
+    result.token.token + "\n",
+  );
   await service.close({
     paneId: "pane-1",
     terminalId: "terminal-1",

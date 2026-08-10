@@ -14,7 +14,7 @@ import {
   createManagedToken,
   createManagedTokenFile,
   verifyManagedTokenFile,
-  deletePromptFile,
+  retainManagedFileForCleanup,
 } from "../../src/herdr/token-files.js";
 import {
   projectCapabilities,
@@ -51,37 +51,37 @@ test("token verification rejects replacement text", async () => {
   await writeFile(path, "wrong\n");
   assert.equal(await verifyManagedTokenFile(path, token.digest), false);
 });
-test("token cleanup wipes the claimed inode and rejects a replacement symlink", async () => {
+test("token cleanup retains claimed bytes and rejects replacements", async () => {
   const root = await mkdtemp(join(tmpdir(), "m2-token-clean-"));
   const token = createManagedToken();
   const path = await createManagedTokenFile(root, agentId(), token);
   const saved = join(root, "saved");
   await rename(path, saved);
   await writeFile(path, "replacement\n");
-  await deletePromptFile(path);
+  await retainManagedFileForCleanup(path);
   assert.equal(await readFile(path, "utf8"), "replacement\n");
   assert.equal(await readFile(saved, "utf8"), token.token + "\n");
   await rename(path, join(root, "replacement-saved"));
   await rename(saved, path);
-  await deletePromptFile(path);
-  assert.equal(await readFile(path, "utf8"), "");
+  assert.equal(await retainManagedFileForCleanup(path), "retained");
+  assert.equal(await readFile(path, "utf8"), token.token + "\n");
   const target = join(root, "sentinel");
   await writeFile(target, "keep\n");
   await symlink(target, path + ".link");
   await assert.rejects(
-    () => deletePromptFile(path + ".link"),
+    () => retainManagedFileForCleanup(path + ".link"),
     /ELOOP|symbolic/,
   );
   assert.equal(await readFile(target, "utf8"), "keep\n");
-  await deletePromptFile(path);
-  assert.equal(await readFile(path, "utf8"), "");
+  assert.equal(await retainManagedFileForCleanup(path), "retained");
+  assert.equal(await readFile(path, "utf8"), token.token + "\n");
 });
 
 test("token cleanup is idempotent for a missing path", async () => {
   const root = await mkdtemp(join(tmpdir(), "m2-token-clean-missing-"));
   const path = join(root, "missing");
-  await deletePromptFile(path);
-  await deletePromptFile(path);
+  assert.equal(await retainManagedFileForCleanup(path), "missing");
+  assert.equal(await retainManagedFileForCleanup(path), "missing");
   assert.deepEqual(await readdir(root), []);
 });
 test("capability projection fails closed for schema drift", () => {

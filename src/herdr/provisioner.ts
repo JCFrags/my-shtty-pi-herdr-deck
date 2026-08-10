@@ -7,7 +7,7 @@ import {
   createManagedToken,
   createManagedTokenFile,
   createPromptFile,
-  deletePromptFile,
+  retainManagedFileForCleanup,
   verifyManagedTokenFile,
   type ManagedToken,
   type FileIdentity,
@@ -163,8 +163,10 @@ export class HerdrProvisioner {
         await this.cli.closeTab(unusedTabId);
       }
       if (!this.retainRegistrationFiles) {
-        if (prompt) await deletePromptFile(prompt, promptFileIdentity);
-        if (tokenFile) await deletePromptFile(tokenFile, tokenFileIdentity);
+        if (prompt)
+          await retainManagedFileForCleanup(prompt, promptFileIdentity);
+        if (tokenFile)
+          await retainManagedFileForCleanup(tokenFile, tokenFileIdentity);
       }
       return {
         name,
@@ -185,11 +187,11 @@ export class HerdrProvisioner {
       };
     } catch (error) {
       if (prompt)
-        await deletePromptFile(prompt, promptFileIdentity).catch(
+        await retainManagedFileForCleanup(prompt, promptFileIdentity).catch(
           () => undefined,
         );
       if (tokenFile)
-        await deletePromptFile(tokenFile, tokenFileIdentity).catch(
+        await retainManagedFileForCleanup(tokenFile, tokenFileIdentity).catch(
           () => undefined,
         );
       // Herdr has no compare-and-remove operation. Retain every worktree;
@@ -344,11 +346,27 @@ export class HerdrProvisioner {
         : {}),
     };
   }
-  async cleanupRegistration(result: ProvisionResult): Promise<void> {
+  async cleanupRegistration(
+    result: ProvisionResult,
+  ): Promise<"retained_registration_files" | "registration_files_missing"> {
+    const outcomes = [];
     if (result.promptPath)
-      await deletePromptFile(result.promptPath, result.promptFileIdentity);
+      outcomes.push(
+        await retainManagedFileForCleanup(
+          result.promptPath,
+          result.promptFileIdentity,
+        ),
+      );
     if (result.tokenFilePath)
-      await deletePromptFile(result.tokenFilePath, result.tokenFileIdentity);
+      outcomes.push(
+        await retainManagedFileForCleanup(
+          result.tokenFilePath,
+          result.tokenFileIdentity,
+        ),
+      );
+    return outcomes.includes("retained")
+      ? "retained_registration_files"
+      : "registration_files_missing";
   }
   async verifyRegistration(
     result: ProvisionResult,
@@ -380,8 +398,14 @@ export class HerdrProvisioner {
       throw new Error("HERDR_REGISTRATION_IDENTITY_MISMATCH");
     if (cleanup) {
       if (result.promptPath)
-        await deletePromptFile(result.promptPath, result.promptFileIdentity);
-      await deletePromptFile(result.tokenFilePath, result.tokenFileIdentity);
+        await retainManagedFileForCleanup(
+          result.promptPath,
+          result.promptFileIdentity,
+        );
+      await retainManagedFileForCleanup(
+        result.tokenFilePath,
+        result.tokenFileIdentity,
+      );
     }
   }
 }

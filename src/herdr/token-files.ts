@@ -13,7 +13,7 @@ export interface FileIdentity {
   ino: number;
 }
 interface FileClaim extends FileIdentity {}
-export type ManagedFileCleanupResult = "wiped" | "retained" | "missing";
+export type ManagedFileCleanupResult = "retained" | "missing";
 interface ManagedFileHooks {
   /** Test-only synchronization point after open and the first stat. */
   afterOpen?: () => Promise<void>;
@@ -107,6 +107,15 @@ export async function verifyManagedTokenFile(
     )
       return false;
     const value = (await handle.readFile("utf8")).trimEnd();
+    // Reading does not change this inode. Recheck after the read so an alias
+    // observed during verification fails registration.
+    const afterRead = await handle.stat();
+    if (
+      !isSafeManagedStat(afterRead) ||
+      !sameIdentity(afterRead, beforeRead) ||
+      (expectedIdentity === undefined && !isClaimed(path, afterRead))
+    )
+      return false;
     const actual = Buffer.from(tokenDigest(value), "utf8");
     const expected = Buffer.from(expectedDigest, "utf8");
     return (
@@ -151,54 +160,35 @@ export async function createPromptFile(
   }
   return path;
 }
-export async function deletePromptFile(
+export async function retainManagedFileForCleanup(
   path: string,
   expectedIdentity?: FileIdentity,
   hooks?: ManagedFileHooks,
 ): Promise<ManagedFileCleanupResult> {
   let handle;
   try {
-    // This is a claimed-inode wipe. There is no safe compare-and-unlink API
-    // here, so never unlink a pathname that may now name a replacement.
-    handle = await open(path, constants.O_WRONLY | constants.O_NOFOLLOW);
+    // Inspect the claimed inode without mutation. There is no safe
+    // compare-and-remove API here, so retain it instead of changing a shared
+    // inode or unlinking a pathname that may now name a replacement.
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     const stat = await handle.stat();
     if (!isSafeManagedStat(stat)) return "retained";
     if (!sameIdentity(stat, expectedIdentity)) return "retained";
     if (expectedIdentity === undefined && !isClaimed(path, stat))
       return "retained";
     await hooks?.afterOpen?.();
-    // Revalidate after the last await and before changing private bytes. There
-    // is no compare-and-remove primitive, so an ambiguous file is retained.
-    const beforeWipe = await handle.stat();
+    // Node and Herdr provide no atomic compare-and-remove operation. Another
+    // same-UID process can add a hard link after any stat. Never write,
+    // truncate, or unlink this inode. Retain the owner-only file and expose the
+    // result to durable lifecycle state instead of reporting false cleanup.
+    const beforeRetention = await handle.stat();
     if (
-      !isSafeManagedStat(beforeWipe) ||
-      !sameIdentity(beforeWipe, stat) ||
-      (expectedIdentity === undefined && !isClaimed(path, beforeWipe))
+      !isSafeManagedStat(beforeRetention) ||
+      !sameIdentity(beforeRetention, stat) ||
+      (expectedIdentity === undefined && !isClaimed(path, beforeRetention))
     )
       return "retained";
-    for (let offset = 0; offset < beforeWipe.size;) {
-      const current = await handle.stat();
-      if (
-        !isSafeManagedStat(current) ||
-        !sameIdentity(current, beforeWipe) ||
-        (expectedIdentity === undefined && !isClaimed(path, current))
-      )
-        return "retained";
-      const length = Math.min(64 * 1024, beforeWipe.size - offset);
-      await handle.write(Buffer.alloc(length), 0, length, offset);
-      offset += length;
-    }
-    const beforeTruncate = await handle.stat();
-    if (
-      !isSafeManagedStat(beforeTruncate) ||
-      !sameIdentity(beforeTruncate, beforeWipe) ||
-      (expectedIdentity === undefined && !isClaimed(path, beforeTruncate))
-    )
-      return "retained";
-    await handle.truncate(0);
-    await handle.sync();
-    fileClaims.delete(path);
-    return "wiped";
+    return "retained";
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing";
     throw error;
