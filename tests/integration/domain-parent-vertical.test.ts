@@ -628,7 +628,6 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
     );
     ok(
       await send(child.socket, "agent.heartbeat", {
-        agentId: childId,
         adapterSeq: 7,
         state: { sessionId: "child-session", activity: "idle" },
       }),
