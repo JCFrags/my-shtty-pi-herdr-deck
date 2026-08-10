@@ -5,12 +5,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { Broker } from "../../src/broker/broker.js";
+import { digest } from "../../src/broker/authentication.js";
+import type { EventStore } from "../../src/state/event-store.js";
 import { resolvePaths, sessionKey } from "../../src/shared/paths.js";
 import { createId } from "../../src/shared/ids.js";
 import { encodeFrame, NdjsonDecoder } from "../../src/shared/protocol/codec.js";
 
 type Frame = {
   type?: string;
+  method?: string;
+  params?: any;
   ok?: boolean;
   result?: any;
   error?: any;
@@ -39,6 +43,72 @@ const question = {
   defaultOptionId: "yes",
   timeoutMs: 10_000,
 };
+
+class DomainHerdr {
+  readonly tokens = new Map<string, string>();
+  count = 0;
+  constructor(readonly store: EventStore) {}
+  async startupReconcile() {
+    return [];
+  }
+  async verifyRoot(identity: any) {
+    return {
+      paneId: identity.paneId,
+      terminalId: identity.terminalId,
+      workspaceId: "w",
+      cwd: "/fake",
+    };
+  }
+  async provision(input: any) {
+    const token = `token-${++this.count}`;
+    this.tokens.set(input.agentId, token);
+    await this.store.append({
+      type: "herdr.provision.intent",
+      actor: { principalId: "prn_00000000000000000000000000", kind: "system" },
+      entityRefs: { agentId: input.agentId },
+      payload: { agentId: input.agentId },
+    });
+    await this.store.append({
+      type: "herdr.provision.outcome",
+      actor: { principalId: "prn_00000000000000000000000000", kind: "system" },
+      entityRefs: { agentId: input.agentId },
+      payload: {
+        agentId: input.agentId,
+        state: "pending",
+        paneId: `pane-${this.count}`,
+        terminalId: `term-${this.count}`,
+        tokenDigest: digest(token),
+        generation: 1,
+        parentAgentId: input.parentAgentId,
+        ownerId: input.agentId,
+      },
+    });
+    return {
+      name: `child-${this.count}`,
+      token: { token, digest: digest(token), generation: 1 },
+      paneId: `pane-${this.count}`,
+    };
+  }
+  async register(agentId: string, identity: any) {
+    const resource = this.store.state.herdrResources?.[agentId];
+    await this.store.append({
+      type: "herdr.provision.outcome",
+      actor: { principalId: "prn_00000000000000000000000000", kind: "system" },
+      entityRefs: { agentId },
+      payload: {
+        agentId,
+        state: "registered",
+        paneId: identity.paneId,
+        terminalId: identity.terminalId,
+        sessionId: identity.sessionId,
+        generation: identity.generation,
+        tokenDigest: resource?.tokenDigest,
+        parentAgentId: resource?.parentAgentId,
+        ownerId: agentId,
+      },
+    });
+  }
+}
 
 function request(
   socket: Socket,
@@ -105,6 +175,56 @@ async function connect(
   });
   return socket;
 }
+async function connectManaged(
+  paths: ReturnType<typeof resolvePaths>,
+  token: string,
+  agentId: string,
+  session: string,
+  onServer: (frame: Frame, socket: Socket) => void,
+): Promise<Socket> {
+  const socket = createConnection(paths.socket);
+  await new Promise<void>((resolve, reject) => {
+    socket.once("connect", resolve);
+    socket.once("error", reject);
+  });
+  const decoder = new NdjsonDecoder<Frame>((value) => value as Frame);
+  let resolveHello!: () => void;
+  const hello = new Promise<void>((resolve) => {
+    resolveHello = resolve;
+  });
+  socket.on("data", (chunk) => {
+    for (const item of decoder.push(chunk)) {
+      if (!item.ok) continue;
+      const frame = item.value;
+      if (frame.type === "hello_result") resolveHello();
+      else if (frame.type === "server_request") onServer(frame, socket);
+    }
+  });
+  socket.write(
+    encodeFrame({
+      v: 1,
+      type: "hello",
+      id: createId("evt"),
+      client: {
+        kind: "pi_child",
+        name: "strict-child",
+        version: "0.1.0",
+        capabilities: ["pi.lifecycle"],
+      },
+      sessionKey: sessionKey(paths.socket),
+      auth: {
+        kind: "agent_token",
+        token,
+        agentId,
+        generation: 1,
+        piSessionId: session,
+      },
+    }),
+  );
+  await hello;
+  return socket;
+}
+
 function resultOf(frame: Frame): any {
   assert.equal(frame.ok, true, JSON.stringify(frame.error));
   return frame.result;
@@ -438,13 +558,19 @@ test("production broker restarts an open question from its durable absolute dead
     clock += 9_000;
     broker = makeBroker();
     await broker.start();
+    socket = await connect(paths, secret);
     assert.equal(
       broker.store.state.questions![opened.questionId]!.state,
       "open",
     );
     assert.equal(timers.at(-1)!.delay, 1_000);
     clock += 1_000;
+    const answerRace = request(socket, "question.answer", {
+      questionId: opened.questionId,
+      answer: { optionId: "yes", text: null },
+    });
     timers.at(-1)!.callback();
+    await answerRace;
     for (
       let attempt = 0;
       attempt < 20 &&
@@ -452,11 +578,24 @@ test("production broker restarts an open question from its durable absolute dead
       attempt++
     )
       await new Promise((resolve) => setTimeout(resolve, 5));
+    const raceQuestion = broker.store.state.questions![opened.questionId]!;
+    assert.ok(["answered", "timed_out"].includes(raceQuestion.state));
     assert.equal(
-      broker.store.state.questions![opened.questionId]!.state,
-      "timed_out",
+      Object.values(broker.store.events).filter(
+        (event) =>
+          event.entityRefs?.questionId === opened.questionId &&
+          [
+            "question.answered",
+            "question.timed_out",
+            "question.cancelled",
+          ].includes(event.type),
+      ).length,
+      1,
     );
-    assert.equal(broker.store.state.runs[run.runId]!.state, "failed");
+    assert.equal(
+      broker.store.state.runs[run.runId]!.state,
+      raceQuestion.state === "answered" ? "working" : "failed",
+    );
     socket = await connect(paths, secret);
     const registeredExpired = resultOf(
       await request(socket, "agent.register_adopted", {
@@ -797,6 +936,446 @@ test("production broker task cancellation terminalizes an open question durably"
     assert.equal(broker.store.state.runs[run.runId]!.state, "failed");
   } finally {
     socket?.destroy();
+    await broker.stop().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+    await rm(runtime, { recursive: true, force: true });
+  }
+});
+
+test("production strict child receives durable cancellation delivery after task.cancel", async () => {
+  const root = await mkdtemp(join(tmpdir(), "domain-cancel-delivery-"));
+  const runtime = await mkdtemp(
+    join(tmpdir(), "domain-cancel-delivery-runtime-"),
+  );
+  const paths = {
+    ...resolvePaths(join(runtime, "herdr.sock")),
+    root,
+    runtime,
+    events: join(root, "events.jsonl"),
+    snapshot: join(root, "snapshot.json"),
+    lock: join(runtime, "lock"),
+    socket: join(runtime, "broker.sock"),
+    secret: join(runtime, "secret"),
+  };
+  let herdr!: DomainHerdr;
+  const broker = new Broker(paths, {
+    herdrFactory: async (store) => (herdr = new DomainHerdr(store)) as any,
+  });
+  await broker.start();
+  let parent: Socket | undefined;
+  let child: Socket | undefined;
+  try {
+    const secret = (await readFile(paths.secret, "utf8")).trim();
+    parent = await connect(paths, secret);
+    const parentRegistration = resultOf(
+      await request(parent, "agent.register_adopted", {
+        adapterVersion: "0.1.0",
+        herdr: {
+          paneId: "root-pane",
+          terminalId: "root-term",
+          detectedKind: "pi",
+          name: "parent",
+        },
+        pi: {
+          sessionId: "parent-session",
+          sessionName: "parent",
+          capabilities: {},
+          state: {},
+        },
+      }),
+    );
+    assert.ok(parentRegistration.agentId);
+    const delegated = resultOf(
+      await request(parent, "delegate.execute", {
+        mode: "single",
+        title: "cancel",
+        steps: [
+          {
+            key: "one",
+            profileId: "scout",
+            title: "One",
+            objective: "cancel",
+            dependsOn: [],
+          },
+        ],
+        wait: false,
+        waitUntil: [],
+        timeoutMs: 10_000,
+        failureMode: "collect_all",
+        dryRun: false,
+      }),
+    );
+    const item = delegated.tasks[0];
+    const agent = broker.store.state.agents[item.agentId];
+    assert.ok(agent);
+    let resolveDelivery!: () => void;
+    const delivery = new Promise<void>((resolve) => {
+      resolveDelivery = resolve;
+    });
+    child = await connectManaged(
+      paths,
+      herdr.tokens.get(item.agentId)!,
+      item.agentId,
+      "strict-child",
+      (frame, socket) => {
+        if (frame.method === "assignment.deliver") {
+          socket.write(
+            encodeFrame({
+              v: 1,
+              type: "server_response",
+              id: frame.id,
+              ok: true,
+              result: { status: "accepted" },
+            }),
+          );
+          return;
+        }
+        assert.equal(frame.method, "question.deliver_answer");
+        assert.deepEqual(Object.keys(frame.params).sort(), [
+          "expected",
+          "questionId",
+          "runId",
+          "state",
+          "toolCallId",
+        ]);
+        assert.equal(frame.params.state, "cancelled");
+        assert.equal(frame.params.expected.assignmentGeneration, 1);
+        assert.equal(frame.params.expected.runId, item.runId);
+        assert.equal(
+          broker.store.state.questions?.[frame.params.questionId]?.state,
+          "cancelled",
+        );
+        assert.equal(broker.store.state.runs[item.runId]?.state, "cancelled");
+        assert.equal(broker.store.state.tasks[item.taskId]?.state, "cancelled");
+        socket.write(
+          encodeFrame({
+            v: 1,
+            type: "server_response",
+            id: frame.id,
+            ok: true,
+            result: { accepted: true },
+          }),
+        );
+        resolveDelivery();
+      },
+    );
+    const registered = resultOf(
+      await request(child, "agent.register_managed", {
+        agentId: item.agentId,
+        generation: 1,
+        adapterVersion: "0.1.0",
+        herdr: {
+          paneId: "pane-1",
+          terminalId: "term-1",
+          detectedKind: "pi",
+          name: "strict-child",
+        },
+        pi: {
+          sessionId: "strict-child",
+          sessionName: "strict-child",
+          capabilities: {},
+          state: {},
+        },
+      }),
+    );
+    const run = broker.store.state.runs[item.runId]!;
+    for (
+      let attempt = 0;
+      attempt < 20 &&
+      broker.store.state.runs[item.runId]?.assignmentDeliveryState !==
+        "accepted";
+      attempt++
+    )
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(
+      broker.store.state.runs[item.runId]?.assignmentDeliveryState,
+      "accepted",
+    );
+    assert.equal(registered.agentId, item.agentId);
+    resultOf(
+      await request(child, "agent.lifecycle_event", {
+        agentId: item.agentId,
+        connectionGeneration: registered.connectionGeneration,
+        adapterSeq: 1,
+        event: "turn_start",
+        piSessionId: "strict-child",
+        turnIndex: 1,
+        agentCycleId: "cancel-cycle",
+        assignment: {
+          assignmentId: run.assignmentId,
+          generation: run.assignmentGeneration,
+        },
+        safeData: { toolName: null, contextPercent: 0 },
+      }),
+    );
+    const questionAck = resultOf(
+      await request(child, "question.open", {
+        agentId: item.agentId,
+        taskId: item.taskId,
+        runId: item.runId,
+        assignmentGeneration: run.assignmentGeneration,
+        toolCallId: "cancel-tool",
+        question: {
+          schemaVersion: 1,
+          prompt: "Cancel",
+          context: null,
+          options: [{ id: "a", label: "A", description: null }],
+          allowFreeform: false,
+          defaultOptionId: "a",
+          timeoutMs: 10_000,
+        },
+      }),
+    );
+    assert.equal(questionAck.toolCallId, "cancel-tool");
+    const terminalBefore = broker.store.state.lastEventSeq;
+    assert.equal(
+      (
+        await request(parent, "task.cancel", {
+          taskId: item.taskId,
+          reason: "test_cancel",
+          cascade: true,
+        })
+      ).ok,
+      true,
+    );
+    await Promise.race([
+      delivery,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("delivery timeout")), 2_000),
+      ),
+    ]);
+    assert.equal(
+      Object.values(broker.store.state.questions ?? {}).filter(
+        (q) =>
+          q.runId === item.runId &&
+          ["answered", "cancelled", "timed_out"].includes(q.state),
+      ).length,
+      1,
+    );
+    assert.ok(broker.store.state.lastEventSeq > terminalBefore);
+  } finally {
+    child?.destroy();
+    parent?.destroy();
+    await broker.stop().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+    await rm(runtime, { recursive: true, force: true });
+  }
+});
+
+test("production strict child receives durable timeout delivery after durable timeout request", async () => {
+  const root = await mkdtemp(join(tmpdir(), "domain-cancel-delivery-"));
+  const runtime = await mkdtemp(
+    join(tmpdir(), "domain-cancel-delivery-runtime-"),
+  );
+  const paths = {
+    ...resolvePaths(join(runtime, "herdr.sock")),
+    root,
+    runtime,
+    events: join(root, "events.jsonl"),
+    snapshot: join(root, "snapshot.json"),
+    lock: join(runtime, "lock"),
+    socket: join(runtime, "broker.sock"),
+    secret: join(runtime, "secret"),
+  };
+  let herdr!: DomainHerdr;
+  const broker = new Broker(paths, {
+    herdrFactory: async (store) => (herdr = new DomainHerdr(store)) as any,
+  });
+  await broker.start();
+  let parent: Socket | undefined;
+  let child: Socket | undefined;
+  try {
+    const secret = (await readFile(paths.secret, "utf8")).trim();
+    parent = await connect(paths, secret);
+    const parentRegistration = resultOf(
+      await request(parent, "agent.register_adopted", {
+        adapterVersion: "0.1.0",
+        herdr: {
+          paneId: "root-pane",
+          terminalId: "root-term",
+          detectedKind: "pi",
+          name: "parent",
+        },
+        pi: {
+          sessionId: "parent-session",
+          sessionName: "parent",
+          capabilities: {},
+          state: {},
+        },
+      }),
+    );
+    assert.ok(parentRegistration.agentId);
+    const delegated = resultOf(
+      await request(parent, "delegate.execute", {
+        mode: "single",
+        title: "cancel",
+        steps: [
+          {
+            key: "one",
+            profileId: "scout",
+            title: "One",
+            objective: "cancel",
+            dependsOn: [],
+          },
+        ],
+        wait: false,
+        waitUntil: [],
+        timeoutMs: 10_000,
+        failureMode: "collect_all",
+        dryRun: false,
+      }),
+    );
+    const item = delegated.tasks[0];
+    const agent = broker.store.state.agents[item.agentId];
+    assert.ok(agent);
+    let resolveDelivery!: () => void;
+    const delivery = new Promise<void>((resolve) => {
+      resolveDelivery = resolve;
+    });
+    child = await connectManaged(
+      paths,
+      herdr.tokens.get(item.agentId)!,
+      item.agentId,
+      "strict-child",
+      (frame, socket) => {
+        if (frame.method === "assignment.deliver") {
+          socket.write(
+            encodeFrame({
+              v: 1,
+              type: "server_response",
+              id: frame.id,
+              ok: true,
+              result: { status: "accepted" },
+            }),
+          );
+          return;
+        }
+        assert.equal(frame.method, "question.deliver_answer");
+        assert.deepEqual(Object.keys(frame.params).sort(), [
+          "expected",
+          "questionId",
+          "runId",
+          "state",
+          "toolCallId",
+        ]);
+        assert.equal(frame.params.state, "timed_out");
+        assert.equal(frame.params.expected.assignmentGeneration, 1);
+        assert.equal(frame.params.expected.runId, item.runId);
+        assert.equal(
+          broker.store.state.questions?.[frame.params.questionId]?.state,
+          "timed_out",
+        );
+        assert.equal(broker.store.state.runs[item.runId]?.state, "failed");
+        assert.equal(broker.store.state.tasks[item.taskId]?.state, "failed");
+        socket.write(
+          encodeFrame({
+            v: 1,
+            type: "server_response",
+            id: frame.id,
+            ok: true,
+            result: { accepted: true },
+          }),
+        );
+        resolveDelivery();
+      },
+    );
+    const registered = resultOf(
+      await request(child, "agent.register_managed", {
+        agentId: item.agentId,
+        generation: 1,
+        adapterVersion: "0.1.0",
+        herdr: {
+          paneId: "pane-1",
+          terminalId: "term-1",
+          detectedKind: "pi",
+          name: "strict-child",
+        },
+        pi: {
+          sessionId: "strict-child",
+          sessionName: "strict-child",
+          capabilities: {},
+          state: {},
+        },
+      }),
+    );
+    const run = broker.store.state.runs[item.runId]!;
+    for (
+      let attempt = 0;
+      attempt < 20 &&
+      broker.store.state.runs[item.runId]?.assignmentDeliveryState !==
+        "accepted";
+      attempt++
+    )
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(
+      broker.store.state.runs[item.runId]?.assignmentDeliveryState,
+      "accepted",
+    );
+    assert.equal(registered.agentId, item.agentId);
+    resultOf(
+      await request(child, "agent.lifecycle_event", {
+        agentId: item.agentId,
+        connectionGeneration: registered.connectionGeneration,
+        adapterSeq: 1,
+        event: "turn_start",
+        piSessionId: "strict-child",
+        turnIndex: 1,
+        agentCycleId: "cancel-cycle",
+        assignment: {
+          assignmentId: run.assignmentId,
+          generation: run.assignmentGeneration,
+        },
+        safeData: { toolName: null, contextPercent: 0 },
+      }),
+    );
+    const questionAck = resultOf(
+      await request(child, "question.open", {
+        agentId: item.agentId,
+        taskId: item.taskId,
+        runId: item.runId,
+        assignmentGeneration: run.assignmentGeneration,
+        toolCallId: "cancel-tool",
+        question: {
+          schemaVersion: 1,
+          prompt: "Cancel",
+          context: null,
+          options: [{ id: "a", label: "A", description: null }],
+          allowFreeform: false,
+          defaultOptionId: "a",
+          timeoutMs: 10_000,
+        },
+      }),
+    );
+    assert.equal(questionAck.toolCallId, "cancel-tool");
+    const terminalBefore = broker.store.state.lastEventSeq;
+    const operator = await connect(paths, secret, "human");
+    assert.equal(
+      (
+        await request(operator, "question.timeout", {
+          questionId: questionAck.questionId,
+        })
+      ).ok,
+      true,
+    );
+    operator.destroy();
+    await Promise.race([
+      delivery,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("delivery timeout")), 2_000),
+      ),
+    ]);
+    assert.equal(
+      Object.values(broker.store.state.questions ?? {}).filter(
+        (q) =>
+          q.runId === item.runId &&
+          ["answered", "cancelled", "timed_out"].includes(q.state),
+      ).length,
+      1,
+    );
+    assert.ok(broker.store.state.lastEventSeq > terminalBefore);
+  } finally {
+    child?.destroy();
+    parent?.destroy();
     await broker.stop().catch(() => undefined);
     await rm(root, { recursive: true, force: true });
     await rm(runtime, { recursive: true, force: true });
