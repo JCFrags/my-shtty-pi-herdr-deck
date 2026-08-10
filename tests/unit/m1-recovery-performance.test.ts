@@ -92,6 +92,7 @@ test("valid snapshot selects state and replays its disk suffix", async () => {
   await recovered.open(await snapshot.read());
   assert.equal(recovered.state.tasks[id]?.title, "snapshot");
   assert.equal(recovered.state.lastEventSeq, 2);
+  assert.equal(recovered.replayReductionCount, 1);
 });
 
 test("disk history remains available below the replay ring floor", async () => {
@@ -120,39 +121,29 @@ test("snapshots verify their checksum and state cursor", async () => {
   assert.equal((await snapshot.read())?.lastEventSeq, 0);
 });
 
-test("snapshot state must match its event-chain cursor", async () => {
+test("snapshot cursor must match its event chain", async () => {
   const root = await mkdtemp(join(tmpdir(), "orch-snapshot-chain-"));
   const path = join(root, "events.jsonl");
   const store = new EventStore(path);
   await store.open();
-  const id = "tsk_00000000000000000000000000";
   await store.append({
-    type: "task.created",
+    type: "audit.action",
     actor: {
       principalId: "prn_00000000000000000000000001",
       kind: "human",
     },
-    entityRefs: { taskId: id },
-    payload: {
-      id,
-      title: "canonical",
-      objective: "snapshot",
-      createdAt: "2026-01-01T00:00:00.000Z",
-    },
+    payload: { action: "canonical" },
   });
   const snapshots = new SnapshotStore(join(root, "snapshot.json"));
-  const forged = {
+  const mismatched = {
     ...store.state,
-    tasks: {
-      ...store.state.tasks,
-      [id]: { ...store.state.tasks[id]!, title: "forged" },
-    },
+    lastEventHash: "f".repeat(64),
   };
-  await snapshots.write(forged);
+  await snapshots.write(mismatched);
   const recovered = new EventStore(path);
   await recovered.open(await snapshots.read());
   assert.equal(recovered.readOnly, true);
-  assert.match(recovered.corruption ?? "", /Snapshot state/);
+  assert.match(recovered.corruption ?? "", /Snapshot cursor/);
 
   await unlink(path);
   const missing = new EventStore(path);
@@ -231,7 +222,7 @@ test("replays a 100000-event snapshot plus suffix under 5 seconds and 256 MiB RS
       "--expose-gc",
       "--input-type=module",
       "-e",
-      `import { EventStore } from './dist/src/state/event-store.js'; import { SnapshotStore } from './dist/src/state/snapshot-store.js'; const start = performance.now(); const store = new EventStore(process.argv[1]); await store.open(await new SnapshotStore(process.argv[2]).read()); global.gc?.(); console.log(JSON.stringify({ elapsed: performance.now() - start, events: store.events.length, seq: store.state.lastEventSeq, tasks: Object.keys(store.state.tasks).length, rss: process.memoryUsage().rss }));`,
+      `import { EventStore } from './dist/src/state/event-store.js'; import { SnapshotStore } from './dist/src/state/snapshot-store.js'; const start = performance.now(); const store = new EventStore(process.argv[1]); await store.open(await new SnapshotStore(process.argv[2]).read()); global.gc?.(); console.log(JSON.stringify({ elapsed: performance.now() - start, events: store.events.length, seq: store.state.lastEventSeq, tasks: Object.keys(store.state.tasks).length, reductions: store.replayReductionCount, rss: process.memoryUsage().rss }));`,
       path,
       snapshotPath,
     ],
@@ -243,11 +234,13 @@ test("replays a 100000-event snapshot plus suffix under 5 seconds and 256 MiB RS
     events: number;
     seq: number;
     tasks: number;
+    reductions: number;
     rss: number;
   };
   assert.equal(evidence.events, 1_000);
   assert.equal(evidence.seq, 100_000);
   assert.equal(evidence.tasks, 1_000);
+  assert.equal(evidence.reductions, 1_000);
   assert.ok(evidence.elapsed < 5_000, `replay took ${evidence.elapsed}ms`);
   assert.ok(
     evidence.rss < 256 * 1024 * 1024,

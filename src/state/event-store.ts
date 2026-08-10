@@ -74,6 +74,7 @@ export class EventStore {
   #fileIdentity: FileIdentity | undefined;
   readonly #actor: { principalId: string; kind: string };
   readonly #appendBoundary: (() => Promise<void>) | undefined;
+  #replayReductionCount = 0;
   readOnly = false;
   corruption: string | undefined;
   constructor(
@@ -89,33 +90,33 @@ export class EventStore {
     this.#appendBoundary = appendBoundary;
   }
   async open(snapshot?: Snapshot): Promise<void> {
+    this.#replayReductionCount = 0;
     await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
     try {
       let index = 0;
       let previous: StoredEvent | undefined;
       let openedFile: FileIdentity | undefined;
-      let snapshotValidationState = emptyState();
       if (snapshot) {
         if (
           snapshot.schemaVersion !== 1 ||
           snapshot.lastEventSeq < 0 ||
-          snapshot.lastEventHash.length !== 64
+          snapshot.lastEventHash.length !== 64 ||
+          snapshot.state.lastEventSeq !== snapshot.lastEventSeq ||
+          snapshot.state.lastEventHash !== snapshot.lastEventHash
         )
           throw new OrchestratorError(
             "STATE_CORRUPT",
-            "Snapshot schema is invalid.",
+            "Snapshot schema or cursor is invalid.",
           );
-        if (snapshot.lastEventSeq === 0) {
-          if (
-            canonicalJson(snapshot.state) !==
-            canonicalJson(snapshotValidationState)
-          )
-            throw new OrchestratorError(
-              "STATE_CORRUPT",
-              "Genesis snapshot state does not match the event chain.",
-            );
-          this.#state = snapshot.state;
-        }
+        if (
+          snapshot.lastEventSeq === 0 &&
+          canonicalJson(snapshot.state) !== canonicalJson(emptyState())
+        )
+          throw new OrchestratorError(
+            "STATE_CORRUPT",
+            "Genesis snapshot state does not match the event chain.",
+          );
+        this.#state = snapshot.state;
       }
       for await (const line of readPrivateLines(this.path, (stat) => {
         openedFile = this.#identityFrom(stat);
@@ -141,23 +142,17 @@ export class EventStore {
         if (this.#events.length > MAX_RETAINED_EVENTS) this.#events.shift();
         this.#lastSeq = event.seq;
         this.#lastHash = event.hash;
-        if (!snapshot || event.seq > snapshot.lastEventSeq)
+        if (!snapshot || event.seq > snapshot.lastEventSeq) {
+          this.#replayReductionCount++;
           this.#state = reduce(this.#state, event);
-        else {
-          snapshotValidationState = reduce(snapshotValidationState, event);
-          if (event.seq === snapshot.lastEventSeq) {
-            if (
-              event.hash !== snapshot.lastEventHash ||
-              canonicalJson(snapshotValidationState) !==
-                canonicalJson(snapshot.state)
-            )
-              throw new OrchestratorError(
-                "STATE_CORRUPT",
-                "Snapshot state or cursor does not match the event chain.",
-              );
-            this.#state = snapshot.state;
-          }
-        }
+        } else if (
+          event.seq === snapshot.lastEventSeq &&
+          event.hash !== snapshot.lastEventHash
+        )
+          throw new OrchestratorError(
+            "STATE_CORRUPT",
+            "Snapshot cursor does not match the event chain.",
+          );
       }
       if (snapshot && this.#lastSeq < snapshot.lastEventSeq)
         throw new OrchestratorError(
@@ -209,6 +204,9 @@ export class EventStore {
   }
   get events(): readonly StoredEvent[] {
     return this.#events;
+  }
+  get replayReductionCount(): number {
+    return this.#replayReductionCount;
   }
   #identityFrom(stat: Stats): FileIdentity {
     if (
