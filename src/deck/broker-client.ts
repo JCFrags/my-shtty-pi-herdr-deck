@@ -60,6 +60,38 @@ export class BrokerClient {
     listener(this.#status);
     return () => this.#listeners.delete(listener);
   }
+  waitForReady(timeoutMs = 10_000): Promise<void> {
+    if (this.#status === "connected") return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(
+          new Error(
+            "Broker authentication or snapshot subscription timed out.",
+          ),
+        );
+      }, timeoutMs);
+      timer.unref?.();
+      const listener = (status: BrokerStatus): void => {
+        if (status === "connected") {
+          cleanup();
+          resolve();
+        } else if (status === "disconnected" && this.#stopped) {
+          cleanup();
+          reject(
+            new Error(
+              "Broker connection closed before authenticated startup completed.",
+            ),
+          );
+        }
+      };
+      const cleanup = (): void => {
+        clearTimeout(timer);
+        this.#listeners.delete(listener);
+      };
+      this.#listeners.add(listener);
+    });
+  }
   async start(): Promise<void> {
     if (!this.#secret)
       this.#secret = await readPrivateRegular(`${this.socketPath}.secret`);

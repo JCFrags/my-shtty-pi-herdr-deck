@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { BrokerClient } from "../../src/deck/broker-client.js";
+import { BrokerDeckApp } from "../../src/deck/broker-app.js";
+import { resolveBrokerSocketPath } from "../../src/deck/socket.js";
 import { DeckActions } from "../../src/deck/actions.js";
 import { renderNotifications, renderTaskDetail } from "../../src/deck/views.js";
-import { PressReleaseTracker, type HitBox } from "../../src/deck/components/controls.js";
+import {
+  PressReleaseTracker,
+  type HitBox,
+} from "../../src/deck/components/controls.js";
 import {
   FakeDeckBroker,
   agentTarget,
@@ -11,6 +16,34 @@ import {
   taskTarget,
   waitForM6,
 } from "../helpers/m6-deck-fixtures.js";
+
+test("production deck entry binds to an authenticated fake broker snapshot", async () => {
+  const broker = new FakeDeckBroker();
+  const client = new BrokerClient({
+    socketPath: "/tmp/production-entry.sock",
+    secret: "fixture-secret",
+    socketFactory: () => broker.createSocket(),
+  });
+  client.start();
+  await client.waitForReady();
+  const app = new BrokerDeckApp({
+    client,
+    requestRender: () => undefined,
+    getHeight: () => 40,
+  });
+  const output = app.render(120).join("\\n");
+  assert.match(output, /Pi Herdr Deck/);
+  assert.match(output, /Alpha/);
+  assert.match(output, /Build deck/);
+  assert.equal(
+    resolveBrokerSocketPath({
+      PI_HERDR_ORCH_BROKER_SOCKET: "/run/user/1000/orchestrator.sock",
+    }),
+    "/run/user/1000/orchestrator.sock",
+  );
+  app.dispose();
+  client.stop();
+});
 
 test("M6 deck integration applies a snapshot and ordered replay without duplicate notifications", async () => {
   const broker = new FakeDeckBroker();
@@ -24,21 +57,55 @@ test("M6 deck integration applies a snapshot and ordered replay without duplicat
   client.onStatus((status) => statuses.push(status));
 
   await client.start();
-  await waitForM6(() => client.status === "connected" && client.store.state.seq === 10);
+  await waitForM6(
+    () => client.status === "connected" && client.store.state.seq === 10,
+  );
   assert.equal(client.store.state.tasks.get("tsk_build")?.state, "running");
 
-  const blocked = m6Event(11, "evt-blocked", "task.blocked", { taskId: "tsk_build" }, { prompt: "Choose a build target." });
-  const result = m6Event(12, "evt-result", "task.result", { taskId: "tsk_build", runId: "run-1" }, { status: "accepted", summary: "Build prepared.", tests: ["m6 integration"] });
+  const blocked = m6Event(
+    11,
+    "evt-blocked",
+    "task.blocked",
+    { taskId: "tsk_build" },
+    { prompt: "Choose a build target." },
+  );
+  const result = m6Event(
+    12,
+    "evt-result",
+    "task.result",
+    { taskId: "tsk_build", runId: "run-1" },
+    {
+      status: "accepted",
+      summary: "Build prepared.",
+      tests: ["m6 integration"],
+    },
+  );
   broker.publish(blocked);
   broker.publish(result);
   await waitForM6(() => client.store.state.seq === 12);
 
   assert.equal(client.store.state.questions.size, 1);
-  assert.equal(client.store.state.results.get("evt-result")?.status, "accepted");
+  assert.equal(
+    client.store.state.results.get("evt-result")?.status,
+    "accepted",
+  );
   assert.equal(client.store.notifications.length, 2);
-  assert.match(renderNotifications(client.store.notifications, 120).join("\n"), /Build prepared|Choose a build target/);
-  assert.equal(client.store.state.results.get("evt-result")?.tests?.[0], "m6 integration");
-  assert.match(renderTaskDetail(client.store.state.tasks.get("tsk_build"), client.store.state, 120).join("\n"), /Result: not available/);
+  assert.match(
+    renderNotifications(client.store.notifications, 120).join("\n"),
+    /Build prepared|Choose a build target/,
+  );
+  assert.equal(
+    client.store.state.results.get("evt-result")?.tests?.[0],
+    "m6 integration",
+  );
+  assert.match(
+    renderTaskDetail(
+      client.store.state.tasks.get("tsk_build"),
+      client.store.state,
+      120,
+    ).join("\n"),
+    /Result: not available/,
+  );
 
   broker.publish(blocked);
   await new Promise((resolve) => setTimeout(resolve, 5));
@@ -56,16 +123,33 @@ test("M6 deck integration reconnects and resubscribes from the retained sequence
     socketFactory: () => broker.createSocket(),
   });
   await client.start();
-  await waitForM6(() => client.store.state.seq === 10 && broker.sockets.length === 1);
+  await waitForM6(
+    () => client.store.state.seq === 10 && broker.sockets.length === 1,
+  );
 
-  broker.publish(m6Event(11, "evt-working", "agent.state_changed", { agentId: "agt_alpha" }, { state: "blocked" }));
+  broker.publish(
+    m6Event(
+      11,
+      "evt-working",
+      "agent.state_changed",
+      { agentId: "agt_alpha" },
+      { state: "blocked" },
+    ),
+  );
   await waitForM6(() => client.store.state.seq === 11);
   broker.sockets[0]!.close();
-  await waitForM6(() => broker.sockets.length === 2 && client.status === "connected");
+  await waitForM6(
+    () => broker.sockets.length === 2 && client.status === "connected",
+  );
 
-  const subscriptions = broker.requests.filter((request) => request.method === "events.subscribe");
+  const subscriptions = broker.requests.filter(
+    (request) => request.method === "events.subscribe",
+  );
   assert.equal(subscriptions.length, 2);
-  assert.equal((subscriptions.at(-1)?.params as { fromSeq: number }).fromSeq, 11);
+  assert.equal(
+    (subscriptions.at(-1)?.params as { fromSeq: number }).fromSeq,
+    11,
+  );
   assert.equal(client.store.state.agents.get("agt_alpha")?.state, "blocked");
   client.stop();
 });
@@ -89,31 +173,100 @@ test("M6 deck actions preserve target identity and closure does not issue a work
 
   assert.deepEqual(
     broker.requests.map((request) => request.method),
-    ["events.subscribe", "herdr.focus", "herdr.stop", "task.cancel", "question.answer"],
+    [
+      "events.subscribe",
+      "herdr.focus",
+      "herdr.stop",
+      "task.cancel",
+      "question.answer",
+    ],
   );
-  assert.deepEqual((broker.requests[1]!.params as Record<string, unknown>), {
+  assert.deepEqual(broker.requests[1]!.params as Record<string, unknown>, {
     paneId: "pane-alpha",
     terminalId: "term-main",
     sessionId: "session-main",
     generation: 2,
   });
-  assert.equal(broker.requests.some((request) => request.method === "herdr.close"), false);
+  assert.equal(
+    broker.requests.some((request) => request.method === "herdr.close"),
+    false,
+  );
 });
 
 test("M6 keyboard and mouse activation have the same enabled-control result", () => {
   let keyboardActivations = 0;
   let mouseActivations = 0;
   const boxes: HitBox[] = [
-    { id: "focus", x: 2, y: 1, width: 8, height: 1, disabled: false, activate: () => mouseActivations++ },
-    { id: "stop", x: 12, y: 1, width: 8, height: 1, disabled: true, activate: () => mouseActivations++ },
+    {
+      id: "focus",
+      x: 2,
+      y: 1,
+      width: 8,
+      height: 1,
+      disabled: false,
+      activate: () => mouseActivations++,
+    },
+    {
+      id: "stop",
+      x: 12,
+      y: 1,
+      width: 8,
+      height: 1,
+      disabled: true,
+      activate: () => mouseActivations++,
+    },
   ];
   const tracker = new PressReleaseTracker();
-  tracker.handle({ type: "press", button: "left", x: 2, y: 1, shift: false, alt: false, ctrl: false }, boxes);
-  tracker.handle({ type: "release", button: "left", x: 2, y: 1, shift: false, alt: false, ctrl: false }, boxes);
+  tracker.handle(
+    {
+      type: "press",
+      button: "left",
+      x: 2,
+      y: 1,
+      shift: false,
+      alt: false,
+      ctrl: false,
+    },
+    boxes,
+  );
+  tracker.handle(
+    {
+      type: "release",
+      button: "left",
+      x: 2,
+      y: 1,
+      shift: false,
+      alt: false,
+      ctrl: false,
+    },
+    boxes,
+  );
   if (!boxes[0]!.disabled) keyboardActivations++;
   assert.equal(mouseActivations, keyboardActivations);
 
-  tracker.handle({ type: "press", button: "left", x: 12, y: 1, shift: false, alt: false, ctrl: false }, boxes);
-  tracker.handle({ type: "release", button: "left", x: 12, y: 1, shift: false, alt: false, ctrl: false }, boxes);
+  tracker.handle(
+    {
+      type: "press",
+      button: "left",
+      x: 12,
+      y: 1,
+      shift: false,
+      alt: false,
+      ctrl: false,
+    },
+    boxes,
+  );
+  tracker.handle(
+    {
+      type: "release",
+      button: "left",
+      x: 12,
+      y: 1,
+      shift: false,
+      alt: false,
+      ctrl: false,
+    },
+    boxes,
+  );
   assert.equal(mouseActivations, 1);
 });
