@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { Socket } from "node:net";
 import test from "node:test";
 import { PiBrokerClient } from "../../src/pi/broker-client.js";
 import { PiControlRouter } from "../../src/pi/controls.js";
@@ -124,6 +125,27 @@ test("M3 fake Pi registers, heartbeats, and does not duplicate a connection", as
       { sessionId: assignment.piSessionId, activity: "idle", turnIndex: 2 },
     );
   } finally {
+    client.close();
+    await broker.stop();
+  }
+});
+
+test("M3 broker client fails closed on a post-handshake socket error", async () => {
+  const broker = await FakePiBroker.start();
+  const originalOn = Socket.prototype.on;
+  const errorHandlers: Array<(error: Error) => void> = [];
+  Socket.prototype.on = function (event: string | symbol, listener: (...args: any[]) => void): Socket {
+    if (event === "error") errorHandlers.push(listener as (error: Error) => void);
+    return (originalOn as any).call(this, event, listener);
+  };
+  const client = new PiBrokerClient({ socketPath: broker.path, sessionKey: "fake-session-key", piSessionId: assignment.piSessionId, secret: "fake-secret" });
+  try {
+    await client.connect();
+    assert.ok(errorHandlers.length > 0);
+    for (const handler of errorHandlers) handler(new Error("injected socket error"));
+    assert.equal(client.connected, false);
+  } finally {
+    Socket.prototype.on = originalOn;
     client.close();
     await broker.stop();
   }

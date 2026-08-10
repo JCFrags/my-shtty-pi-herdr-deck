@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createServer, type Socket } from "node:net";
+import { createServer, Socket } from "node:net";
 import test from "node:test";
 import { PiBrokerClient } from "../../src/pi/broker-client.js";
 import { PiAdapter } from "../../src/pi/adapter.js";
@@ -23,5 +23,34 @@ test("PiAdapter rejects wrong control identity and unsupported capabilities", as
 
 test("question waiter binds early delivery and rejects duplicate or mismatched delivery", async () => { const fake = await server((frame, socket) => { if (frame.type === "hello") socket.write(encodeFrame(hello(frame))); }); const client = new PiBrokerClient({ socketPath: fake.path, sessionKey: "session", piSessionId: "pi-session", secret: "secret" }); await client.connect(); const waiter = client.registerQuestionWaiter("tool-1", "run-1", 10_000); assert.equal(client.resolveQuestionDelivery("q-1", "run-1", "tool-1", { state: "answered" }), true); assert.equal(client.resolveQuestionDelivery("q-1", "run-1", "tool-1", { state: "answered" }), false); await assert.doesNotReject(waiter); client.bindQuestionWaiter("tool-1", "q-1"); const mismatch = client.registerQuestionWaiter("tool-2", "run-2", 10_000); assert.equal(client.resolveQuestionDelivery("q-2", "run-2", "tool-2", { state: "answered" }), true); assert.throws(() => client.bindQuestionWaiter("tool-2", "q-3"), /QUESTION_DELIVERY_INVALID/); client.discardQuestionWaiter("tool-2"); await assert.doesNotReject(mismatch); await assert.rejects(client.registerQuestionWaiter("tool-3", "run-3", 9_999), /INVALID_REQUEST/); client.close(); await fake.close(); });
 test("PiBrokerClient gates coalesced registration and server request until explicit readiness", async () => { const delivered: string[] = []; const fake = await server((frame, socket) => { if (frame.type === "hello") socket.write(encodeFrame(hello(frame))); else if (frame.method === "agent.register_adopted") { socket.write(encodeFrame({ v: 1, type: "response", id: frame.id, method: frame.method, ok: true, result: { agentId: "agt_broker", generation: 4, connectionGeneration: 1, heartbeatMs: 5000, permissions: ["read:state"] } })); socket.write(encodeFrame({ v: 1, type: "server_request", id: "srv-ready", method: "control.abort", params: { agentId: "agt_broker", generation: 4, piSessionId: "pi-session", connectionGeneration: 1 } })); } }); const client = new PiBrokerClient({ socketPath: fake.path, sessionKey: "session", piSessionId: "pi-session", secret: "secret", onControlRequest: async (request) => { delivered.push(request.id); return { ok: true }; } }); await client.connect(); await client.register(state); await new Promise((resolve) => setTimeout(resolve, 10)); assert.deepEqual(delivered, []); client.markRegistrationReady(); await new Promise((resolve) => setTimeout(resolve, 20)); assert.deepEqual(delivered, ["srv-ready"]); client.close(); await fake.close(); });
+test("PiBrokerClient ignores delayed close from an old socket after replacement connect", async () => {
+  const peers: Socket[] = [];
+  const fake = await server((frame, socket) => {
+    if (!peers.includes(socket)) peers.push(socket);
+    if (frame.type === "hello") socket.write(encodeFrame(hello(frame)));
+    else if (frame.type === "request") socket.write(encodeFrame({ v: 1, type: "response", id: frame.id, method: frame.method, ok: true, result: { healthy: true } }));
+  });
+  const originalOn = Socket.prototype.on;
+  const errorHandlers: Array<(error: Error) => void> = [];
+  Socket.prototype.on = function (event: string | symbol, listener: (...args: any[]) => void): Socket {
+    if (event === "error") errorHandlers.push(listener as (error: Error) => void);
+    return (originalOn as any).call(this, event, listener);
+  };
+  const client = new PiBrokerClient({ socketPath: fake.path, sessionKey: "session", piSessionId: "pi-session", secret: "secret" });
+  try {
+    await client.connect();
+    assert.ok(errorHandlers.length > 0);
+    errorHandlers.at(-1)!(new Error("old socket error"));
+    await client.connect();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(client.connected, true);
+    assert.deepEqual(await client.request("agent.get", { agentId: "agt_broker" }), { healthy: true });
+  } finally {
+    Socket.prototype.on = originalOn;
+    client.close();
+    for (const peer of peers) peer.destroy();
+    await fake.close();
+  }
+});
 test("PiBrokerClient rejects and clears a question waiter on socket disconnect", async () => { let peer: import("node:net").Socket | undefined; const fake = await server((frame, socket) => { peer = socket; if (frame.type === "hello") socket.write(encodeFrame(hello(frame))); }); const client = new PiBrokerClient({ socketPath: fake.path, sessionKey: "session", piSessionId: "pi-session", secret: "secret" }); await client.connect(); const waiter = client.registerQuestionWaiter("tool-disconnect", "run-disconnect", 10_000); peer?.destroy(); await assert.rejects(waiter, /AGENT_DISCONNECTED/); client.close(); await fake.close(); });
 test("PiBrokerClient routes control server requests with identity guards and server_response", async () => { const seen: Record<string, unknown>[] = []; const pi = adapter(); const fake = await server((frame, socket) => { if (frame.type === "hello") { socket.write(encodeFrame(hello(frame))); setTimeout(() => { socket.write(encodeFrame({ v: 1, type: "server_request", id: "control-1", method: "control.set_tools", params: { agentId: state.agentId, generation: state.generation, piSessionId: state.sessionId, tools: ["read"] } })); socket.write(encodeFrame({ v: 2, type: "server_request", id: "bad-1", method: "control.set_tools", params: {} })); }, 5); } else if (frame.type === "server_response") seen.push(frame); }); const client = new PiBrokerClient({ socketPath: fake.path, sessionKey: "session", piSessionId: state.sessionId, secret: "secret", onControlRequest: (request) => pi.handleControl(request.method, request.params) }); await client.connect(); await new Promise((resolve) => setTimeout(resolve, 30)); await new Promise((resolve) => setTimeout(resolve, 30)); assert.equal(client.connected, false); client.close(); await fake.close(); });
