@@ -98,7 +98,9 @@ export class FakeDeckBroker {
     socket.onWrite = (frame) => {
       if (frame.type === "hello") {
         this.helloFrames.push(frame);
-        queueMicrotask(() => socket.send({ type: "hello_result", ok: true }));
+        queueMicrotask(() =>
+          socket.send({ type: "hello_result", id: frame.id, ok: true }),
+        );
       } else if (frame.type === "request") {
         this.requests.push(frame);
         if (frame.method === "events.subscribe")

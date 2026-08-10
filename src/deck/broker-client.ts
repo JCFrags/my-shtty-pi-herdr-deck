@@ -83,37 +83,13 @@ export class BrokerClient {
     params: Record<string, unknown> = {},
     idempotencyKey?: string,
   ): Promise<unknown> {
-    if (this.#status !== "connected" || !this.#socket)
+    if (this.#status !== "connected")
       throw new Error("Broker is disconnected; request was not queued.");
-    const id = randomUUID();
-    const frame = {
-      v: 1,
-      type: "request",
-      id,
-      method,
-      params,
-      ...(idempotencyKey ? { idempotencyKey } : {}),
-    };
-    const encoded = encodeFrame(frame);
-    return await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.#pending.delete(id);
-        reject(new Error(`Broker request timed out: ${method}`));
-      }, 10000);
-      timer.unref?.();
-      this.#pending.set(id, { resolve, reject, timer });
-      this.#socket?.write(encoded, (error) => {
-        if (error) {
-          clearTimeout(timer);
-          this.#pending.delete(id);
-          reject(error);
-        }
-      });
-    });
+    return await this.#requestAuthenticated(method, params, idempotencyKey);
   }
   async subscribe(): Promise<unknown> {
     const result = record(
-      await this.request("events.subscribe", {
+      await this.#requestAuthenticated("events.subscribe", {
         fromSeq: this.store.state.seq,
         includeSnapshot: true,
       }),
@@ -176,10 +152,10 @@ export class BrokerClient {
         return;
       }
       this.#authenticated = true;
-      this.#setStatus("connected");
       void this.subscribe()
         .then(() => {
           this.#attempt = 0;
+          this.#setStatus("connected");
         })
         .catch(() =>
           this.#closeSocket(new Error("Broker subscription failed.")),
@@ -205,6 +181,40 @@ export class BrokerClient {
           ),
         );
     }
+  }
+  async #requestAuthenticated(
+    method: string,
+    params: Record<string, unknown>,
+    idempotencyKey?: string,
+  ): Promise<unknown> {
+    const socket = this.#socket;
+    if (!this.#authenticated || !socket)
+      throw new Error("Broker is disconnected; request was not queued.");
+    const id = randomUUID();
+    const frame = {
+      v: 1,
+      type: "request",
+      id,
+      method,
+      params,
+      ...(idempotencyKey ? { idempotencyKey } : {}),
+    };
+    const encoded = encodeFrame(frame);
+    return await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.#pending.delete(id);
+        reject(new Error(`Broker request timed out: ${method}`));
+      }, 10000);
+      timer.unref?.();
+      this.#pending.set(id, { resolve, reject, timer });
+      socket.write(encoded, (error) => {
+        if (error) {
+          clearTimeout(timer);
+          this.#pending.delete(id);
+          reject(error);
+        }
+      });
+    });
   }
   #closeSocket(error: Error): void {
     this.#socket?.destroy(error);

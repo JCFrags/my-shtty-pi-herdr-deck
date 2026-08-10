@@ -66,7 +66,7 @@ test("M6 deck integration reconnects and resubscribes from the retained sequence
   const subscriptions = broker.requests.filter((request) => request.method === "events.subscribe");
   assert.equal(subscriptions.length, 2);
   assert.equal((subscriptions.at(-1)?.params as { fromSeq: number }).fromSeq, 11);
-  assert.equal(client.store.state.agents.get("agt_alpha")?.state, "working");
+  assert.equal(client.store.state.agents.get("agt_alpha")?.state, "blocked");
   client.stop();
 });
 
