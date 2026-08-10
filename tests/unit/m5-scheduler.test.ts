@@ -36,7 +36,7 @@ test("workflow planner validates DAG and keeps dry runs side-effect free", () =>
 test("workflow planner rejects cycles", () => { assert.throws(() => validateWorkflow({ ...workflow, steps: workflow.steps.map((step) => ({ ...step, dependsOn: ["b"] })) }), /WORKFLOW_CYCLE/); });
 test("parent tools defer descendant authorization to the broker and bound model-visible output", async () => {
   const calls: string[] = []; const principal: ToolPrincipal = { id: "prn", kind: "pi_parent", agentId: "agt_parent", permissions: ["delegate"] };
-  const service = new ParentToolService({ invoke: async (method) => { calls.push(method); return { workflowId: "wfl_1", summary: "x".repeat(100) }; } }, new Map([["agt_child", "agt_parent"]]), { maxResponseBytes: 10, maxTextBytes: 20 });
+  const service = new ParentToolService({ invoke: async (method) => { calls.push(method); return { workflowId: "wfl_1", summary: "x".repeat(100), retrieval: { method: "workflow.get", id: "wfl_1", nextCursor: null } }; } }, new Map([["agt_child", "agt_parent"]]), { maxResponseBytes: 10, maxTextBytes: 20 });
   const allowed = await service.execute({ tool: "agent_get", input: { agentId: "agt_child" } }, principal); assert.equal(allowed.ok, true); assert.equal(calls[0], "agent.get");
   const brokerAuthorized = await service.execute({ tool: "agent_get", input: { agentId: "agt_other" } }, principal); assert.equal(brokerAuthorized.ok, true);
 });

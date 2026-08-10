@@ -28,9 +28,13 @@ export class ParentToolService {
     try {
       const result = safeProjection(await this.#broker.invoke(methodForTool(request.tool), request.input, principal, request.idempotencyKey), this.#limits);
       const encoded = JSON.stringify(result);
-      if (encoded.length <= this.#limits.maxResponseBytes) return { ok: true, result };
-      const id = typeof result === "object" && result !== null && "workflowId" in result ? String((result as { workflowId: unknown }).workflowId) : "result";
-      return { ok: true, result: { truncated: true, retrieval: { method: `${methodForTool(request.tool)}.get`, id }, preview: safeProjection(result, { ...this.#limits, maxResponseBytes: 0, maxItems: 8, maxTextBytes: 1024 }) }, retrieval: { method: `${methodForTool(request.tool)}.get`, id, nextCursor: null } };
+      if (Buffer.byteLength(encoded, "utf8") <= this.#limits.maxResponseBytes) return { ok: true, result };
+      const candidate = result && typeof result === "object" && !Array.isArray(result) ? (result as Record<string, unknown>).retrieval : undefined;
+      const retrieval = candidate && typeof candidate === "object" && !Array.isArray(candidate) ? candidate as Record<string, unknown> : undefined;
+      const safeRetrieval = retrieval && typeof retrieval.method === "string" && typeof retrieval.id === "string" && Buffer.byteLength(retrieval.method, "utf8") <= 256 && Buffer.byteLength(retrieval.id, "utf8") <= 256 ? { method: retrieval.method, id: retrieval.id, nextCursor: typeof retrieval.nextCursor === "string" || retrieval.nextCursor === null ? retrieval.nextCursor : null } : undefined;
+      if (!safeRetrieval) return { ok: false, error: { code: "RESPONSE_TOO_LARGE", message: "The broker response exceeded the safe response limit." } };
+      const truncated = { truncated: true, preview: safeProjection(result, { ...this.#limits, maxResponseBytes: 0, maxItems: 8, maxTextBytes: 1024 }), retrieval: safeRetrieval };
+      return { ok: true, result: truncated, retrieval: safeRetrieval };
     } catch { return { ok: false, error: { code: "REQUEST_FAILED", message: "The broker rejected the parent tool request." } }; }
   }
 }
