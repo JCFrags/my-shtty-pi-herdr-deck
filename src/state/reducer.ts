@@ -1,6 +1,6 @@
 import { OrchestratorError } from "../shared/errors.js";
 import type { EventInput, OrchestrationState, StoredEvent } from "./types.js";
-import type { TaskState } from "./types.js";
+import type { TaskState, AgentState, RunState, Run } from "./types.js";
 export const emptyState = (): OrchestrationState => ({
   schemaVersion: 1,
   lastEventSeq: 0,
@@ -21,6 +21,19 @@ const known = new Set([
   "herdr.provision.intent",
   "herdr.provision.outcome",
   "herdr.reconciled",
+  "agent.registered",
+  "agent.heartbeat",
+  "agent.state_changed",
+  "agent.moved",
+  "agent.replaced",
+  "task.created_m3",
+  "run.created",
+  "assignment.delivered",
+  "assignment.accepted",
+  "run.pi_started",
+  "run.pi_settled",
+  "run.state_changed",
+  "task.cancel_requested",
 ]);
 export function reduce(
   state: OrchestrationState,
@@ -94,6 +107,53 @@ export function reduce(
         );
       next.tasks = { ...next.tasks };
       next.tasks[taskId] = { ...task, state: to };
+      break;
+    }
+    case "agent.registered": {
+      const id = String(p.agentId);
+      if (!id || next.agents[id]) throw new OrchestratorError("INVALID_REQUEST", "Agent already exists.");
+      next.agents = { ...next.agents, [id]: { id, state: "idle", generation: Number(p.generation ?? 1), managed: p.managed === true, ...(typeof p.parentAgentId === "string" ? { parentAgentId: p.parentAgentId } : {}), ...(typeof p.displayName === "string" ? { displayName: p.displayName } : {}), ...(typeof p.profileId === "string" ? { profileId: p.profileId } : {}), ...(typeof p.paneId === "string" ? { paneId: p.paneId } : {}), ...(typeof p.terminalId === "string" ? { terminalId: p.terminalId } : {}), ...(typeof p.piSessionId === "string" ? { piSessionId: p.piSessionId } : {}), connectionGeneration: Number(p.connectionGeneration ?? 1), currentAssignmentGeneration: 0 } };
+      break;
+    }
+    case "agent.heartbeat":
+    case "agent.moved":
+    case "agent.state_changed":
+    case "agent.replaced": {
+      const id = String(event.entityRefs?.agentId ?? p.agentId), agent = next.agents[id];
+      if (!agent) throw new OrchestratorError("STATE_CORRUPT", "Agent is missing.");
+      next.agents = { ...next.agents, [id]: { ...agent, ...(typeof p.state === "string" ? { state: p.state as AgentState } : {}), ...(typeof p.paneId === "string" ? { paneId: p.paneId } : {}), ...(typeof p.terminalId === "string" ? { terminalId: p.terminalId } : {}), ...(typeof p.piSessionId === "string" ? { piSessionId: p.piSessionId } : {}), ...(typeof p.currentRunId === "string" ? { currentRunId: p.currentRunId } : {}), ...(Number.isSafeInteger(p.connectionGeneration) ? { connectionGeneration: p.connectionGeneration as number } : {}), ...(Number.isSafeInteger(p.currentAssignmentGeneration) ? { currentAssignmentGeneration: p.currentAssignmentGeneration as number } : {}) } };
+      break;
+    }
+    case "task.created_m3": {
+      const id = String(p.taskId);
+      if (!id || next.tasks[id]) throw new OrchestratorError("INVALID_REQUEST", "Task already exists.");
+      next.tasks = { ...next.tasks, [id]: { id, title: String(p.title), objective: String(p.objective), state: "queued", createdAt: String(p.createdAt), ...(typeof p.parentAgentId === "string" ? { parentAgentId: p.parentAgentId } : {}), ...(typeof p.profileId === "string" ? { profileId: p.profileId } : {}), ...(Array.isArray(p.dependencies) ? { dependencies: p.dependencies.filter((v): v is string => typeof v === "string") } : {}), ...(typeof p.timeoutAt === "string" ? { timeoutAt: p.timeoutAt } : {}), runIds: [] } };
+      break;
+    }
+    case "run.created": {
+      const id = String(p.runId), task = next.tasks[String(p.taskId)];
+      if (!id || next.runs[id] || !task) throw new OrchestratorError("STATE_CORRUPT", "Run or task is invalid.");
+      const run: Run = { id, taskId: task.id, state: "created", ...(typeof p.agentId === "string" ? { agentId: p.agentId } : {}), ...(Number.isSafeInteger(p.agentGeneration) ? { agentGeneration: p.agentGeneration as number } : {}), ...(typeof p.assignmentId === "string" ? { assignmentId: p.assignmentId } : {}), assignmentGeneration: Number(p.assignmentGeneration ?? 1), ...(typeof p.piSessionId === "string" ? { piSessionId: p.piSessionId } : {}), ...(typeof p.terminalId === "string" ? { terminalId: p.terminalId } : {}), settled: false, ...(typeof p.timeoutAt === "string" ? { timeoutAt: p.timeoutAt } : {}) };
+      next.runs = { ...next.runs, [id]: run }; next.tasks = { ...next.tasks, [task.id]: { ...task, currentRunId: id, runIds: [...(task.runIds ?? []), id], state: "assigned" } };
+      break;
+    }
+    case "assignment.delivered":
+    case "assignment.accepted":
+    case "run.pi_started":
+    case "run.pi_settled":
+    case "run.state_changed": {
+      const id = String(event.entityRefs?.runId ?? p.runId), run = next.runs[id];
+      if (!run) throw new OrchestratorError("STATE_CORRUPT", "Run is missing.");
+      const state = p.state as RunState | undefined;
+      const settled = event.type === "run.pi_settled" ? true : run.settled;
+      next.runs = { ...next.runs, [id]: { ...run, ...(state ? { state } : {}), settled, ...(typeof p.piSessionId === "string" ? { piSessionId: p.piSessionId } : {}), ...(typeof p.agentId === "string" ? { agentId: p.agentId } : {}) } };
+      break;
+    }
+    case "task.cancel_requested": {
+      const id = String(event.entityRefs?.taskId ?? p.taskId), task = next.tasks[id];
+      if (!task || taskTerminal.has(task.state)) break;
+      next.tasks = { ...next.tasks, [id]: { ...task, state: "cancelled" } };
+      if (task.currentRunId && next.runs[task.currentRunId]) next.runs = { ...next.runs, [task.currentRunId]: { ...next.runs[task.currentRunId]!, state: "cancelled", cancelled: true } };
       break;
     }
     case "audit.action":
