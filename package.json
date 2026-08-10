@@ -25,7 +25,9 @@
     "herdr-plugin.toml",
     "README.md",
     "SECURITY.md",
-    "LICENSE"
+    "LICENSE",
+    "docs",
+    "scripts"
   ],
   "scripts": {
     "clean": "rm -rf dist",
@@ -38,6 +40,11 @@
     "validate": "npm run check && npm run build && npm run test:unit && npm run test:integration && npm run smoke:package",
     "test:schemas": "node scripts/schema-check.mjs",
     "schemas:check": "node scripts/schema-check.mjs",
+    "ops:plan": "node scripts/m7-ops.mjs plan",
+    "ops:deploy": "node scripts/m7-ops.mjs deploy",
+    "ops:canary": "node scripts/m7-ops.mjs canary",
+    "ops:soak": "node scripts/m7-ops.mjs soak",
+    "ops:rollback": "node scripts/m7-ops.mjs rollback",
     "check": "npm run typecheck && npm run schemas:check",
     "lint": "prettier --check \"src/shared/**/*.ts\" \"src/state/**/*.ts\" \"src/broker/**/*.ts\" \"src/cli/**/*.ts\" src/herdr/service.ts tests/unit/core-m1.test.ts tests/unit/m1-recovery-performance.test.ts tests/unit/m2-herdr.test.ts tests/integration/fake-stack.test.ts tests/integration/m2-faults.test.ts tests/integration/m2-release-gates.test.ts tests/integration/m2-adversarial.test.ts tests/integration/m2-broker-adversarial.test.ts tests/integration/m2-preflight-adversarial.test.ts tests/integration/m2-compensation-races.test.ts tests/integration/m2-lifecycle-adversarial.test.ts tests/integration/m2-git-gateway-adversarial.test.ts tests/integration/m2-token-custody-process.test.ts"
   },

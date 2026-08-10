@@ -1,3 +1,9 @@
+## M7 operations implementation handoff
+
+- FR-001–004 and FR-140–145: additive CLI surfaces now provide owner-safe config validation, state export, retention planning, and machine-readable operation plans.
+- FR-150–156 and FR-170–184: `src/ops/config.ts` fails closed on untrusted project configuration, unsafe files, unknown keys, and secret-like fields. `src/ops/retention.ts` preserves canonical state and supports verified additive export. `scripts/m7-ops.mjs` provides finite dry-run deployment, canary, soak, and rollback rehearsals.
+- NFR operations/security/privacy gates: `docs/OPERATIONS_M7.md`, `tests/unit/m7-ops.test.ts`, and package scripts provide executable evidence scaffolding. No live changes or deletion are performed by these surfaces.
+
 ## M2 implementation handoff
 
 - BL-030–BL-033: `src/herdr/runner.ts`, `capabilities.ts`, `socket-client.ts`, `types.ts`, `normalizers.ts` provide shell-free bounded process execution, schema projection, raw snapshot/event transport, and additive-field tolerant normalized types.
