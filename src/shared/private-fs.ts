@@ -18,7 +18,8 @@ export async function openPrivateRegular(path: string): Promise<FileHandle> {
     throw new Error(`Unsafe private file: ${path}`);
   }
   if ((stat.mode & 0o077) !== 0) {
-    await handle.chmod(0o600);
+    await handle.close();
+    throw new Error(`Unsafe private file mode: ${path}`);
   }
   return handle;
 }

@@ -22,10 +22,6 @@ const runTerminal = new Set([
 const known = new Set([
   "task.created",
   "task.state_changed",
-  "run.created",
-  "run.pi_settled",
-  "result.published",
-  "idempotency.record",
   "audit.action",
   "audit.authorization_denied",
   "system.status_changed",
@@ -95,7 +91,7 @@ export function reduce(
       const to = p.to as TaskState;
       if (
         !task ||
-        typeof to !== "string" ||
+        (to !== "queued" && to !== "cancelled") ||
         (taskTerminal.has(task.state) && task.state !== to)
       )
         throw new OrchestratorError(
@@ -203,8 +199,16 @@ export function reduce(
       };
       break;
     }
-    default:
+    case "audit.action":
+    case "audit.authorization_denied":
+    case "system.status_changed":
+    case "recovery.reconciled":
       break;
+    default:
+      throw new OrchestratorError(
+        "STATE_CORRUPT",
+        `Unhandled event type ${event.type}.`,
+      );
   }
   return next;
 }

@@ -7,6 +7,7 @@ import test from "node:test";
 import { EventStore } from "../../src/state/event-store.js";
 import { createId } from "../../src/shared/ids.js";
 import { Broker, safeStaleSocket } from "../../src/broker/broker.js";
+import { authenticate } from "../../src/broker/authentication.js";
 
 function paths(root: string) {
   return {
@@ -70,6 +71,25 @@ test("broker lock records nonce and Linux process-start identity", async () => {
   } finally {
     await broker.stop();
   }
+});
+
+test("broker restart preserves the owner-only secret", async () => {
+  const root = await mkdtemp(join(tmpdir(), "orch-restart-"));
+  const first = new Broker(paths(root));
+  await first.start();
+  const secret = first.secret;
+  await first.stop();
+  const second = new Broker(paths(root));
+  await second.start();
+  assert.equal(second.secret, secret);
+  await second.stop();
+});
+
+test("declared Pi parent authentication fails closed before M3", () => {
+  assert.throws(
+    () => authenticate("operator-secret", "operator-secret", "pi_parent"),
+    /deferred/,
+  );
 });
 
 test("broker rejects a mismatched session key at the authenticated boundary", async () => {

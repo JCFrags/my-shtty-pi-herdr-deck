@@ -5,11 +5,12 @@ import {
   createPrivateExclusive,
   readPrivateLines,
 } from "../shared/private-fs.js";
-import { createId } from "../shared/ids.js";
+import { createId, isEntityId } from "../shared/ids.js";
 import { canonicalJson, sha256 } from "../shared/canonical-json.js";
 import { OrchestratorError } from "../shared/errors.js";
 import { emptyState, reduce } from "./reducer.js";
 import type { EventInput, OrchestrationState, StoredEvent } from "./types.js";
+import type { Snapshot } from "./snapshot-store.js";
 const MAX_RETAINED_EVENTS = 1_000;
 export class EventStore {
   readonly path: string;
@@ -28,10 +29,23 @@ export class EventStore {
     this.path = path;
     this.#actor = actor;
   }
-  async open(): Promise<void> {
+  async open(snapshot?: Snapshot): Promise<void> {
     await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
     try {
       let index = 0;
+      let previous: StoredEvent | undefined;
+      if (snapshot) {
+        if (
+          snapshot.schemaVersion !== 1 ||
+          snapshot.lastEventSeq < 0 ||
+          snapshot.lastEventHash.length !== 64
+        )
+          throw new OrchestratorError(
+            "STATE_CORRUPT",
+            "Snapshot schema is invalid.",
+          );
+        if (snapshot.lastEventSeq === 0) this.#state = snapshot.state;
+      }
       for await (const line of readPrivateLines(this.path)) {
         if (!line || line.endsWith("\r"))
           throw new OrchestratorError(
@@ -48,13 +62,28 @@ export class EventStore {
           );
         }
         index++;
-        this.verifyEvent(event, this.#events.at(-1));
+        this.verifyEvent(event, previous);
+        previous = event;
         this.#events.push(event);
         if (this.#events.length > MAX_RETAINED_EVENTS) this.#events.shift();
         this.#lastSeq = event.seq;
         this.#lastHash = event.hash;
-        this.#state = reduce(this.#state, event);
+        if (!snapshot || event.seq > snapshot.lastEventSeq)
+          this.#state = reduce(this.#state, event);
+        else if (event.seq === snapshot.lastEventSeq) {
+          if (event.hash !== snapshot.lastEventHash)
+            throw new OrchestratorError(
+              "STATE_CORRUPT",
+              "Snapshot cursor does not match the event chain.",
+            );
+          this.#state = snapshot.state;
+        }
       }
+      if (snapshot && this.#lastSeq < snapshot.lastEventSeq)
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Snapshot is ahead of the event log.",
+        );
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
         await createPrivateExclusive(this.path, "");
@@ -88,6 +117,19 @@ export class EventStore {
   get events(): readonly StoredEvent[] {
     return this.#events;
   }
+  async readEventsFrom(fromSeq: number): Promise<StoredEvent[]> {
+    const result: StoredEvent[] = [];
+    for await (const line of readPrivateLines(this.path)) {
+      if (!line || line.endsWith("\r"))
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Noncanonical event line.",
+        );
+      const event = JSON.parse(line) as StoredEvent;
+      if (event.seq > fromSeq) result.push(event);
+    }
+    return result;
+  }
   async append(input: EventInput): Promise<StoredEvent> {
     let result: StoredEvent | undefined;
     const operation = this.#appendTail
@@ -111,6 +153,10 @@ export class EventStore {
           prevHash: this.#lastHash,
         };
         const event = { ...base, hash: sha256(canonicalJson(base)) };
+        this.verifyEvent(event, {
+          seq: this.#lastSeq,
+          hash: this.#lastHash,
+        } as StoredEvent);
         const candidateState = reduce(this.#state, event);
         const handle = await open(
           this.path,
@@ -160,6 +206,95 @@ export class EventStore {
   }
   private verifyEvent(event: StoredEvent, previous?: StoredEvent): void {
     const actor = event.actor;
+    const payload = event.payload as Record<string, unknown>;
+    const taskStates = new Set(["queued", "cancelled"]);
+    const known = new Set([
+      "task.created",
+      "task.state_changed",
+      "audit.action",
+      "audit.authorization_denied",
+      "system.status_changed",
+      "recovery.reconciled",
+    ]);
+    const refKeys = Object.keys(event.entityRefs);
+    const timestampValid =
+      typeof event.timestamp === "string" &&
+      new Date(event.timestamp).toISOString() === event.timestamp;
+    const actorValid =
+      actor &&
+      typeof actor.principalId === "string" &&
+      (actor.principalId === "prn_system" ||
+        actor.principalId === "prn_test" ||
+        isEntityId(actor.principalId, "prn")) &&
+      ["human", "cli", "deck", "observer", "system"].includes(actor.kind);
+    let eventPayloadValid =
+      known.has(event.type) &&
+      !!payload &&
+      typeof payload === "object" &&
+      timestampValid &&
+      !!actorValid;
+    if (event.type === "task.created")
+      eventPayloadValid =
+        eventPayloadValid &&
+        refKeys.length === 1 &&
+        refKeys[0] === "taskId" &&
+        isEntityId(event.entityRefs.taskId, "tsk") &&
+        payload.id === event.entityRefs.taskId &&
+        typeof payload.title === "string" &&
+        payload.title.length <= 1024 &&
+        typeof payload.objective === "string" &&
+        payload.objective.length <= 262144 &&
+        typeof payload.createdAt === "string" &&
+        (!payload.idempotencyKey ||
+          (typeof payload.idempotencyKey === "string" &&
+            typeof payload.paramsHash === "string" &&
+            payload.response !== undefined));
+    if (event.type === "task.state_changed")
+      eventPayloadValid =
+        eventPayloadValid &&
+        refKeys.length === 1 &&
+        refKeys[0] === "taskId" &&
+        isEntityId(event.entityRefs.taskId, "tsk") &&
+        typeof payload.to === "string" &&
+        taskStates.has(payload.to);
+    if (
+      event.type === "audit.action" ||
+      event.type === "audit.authorization_denied"
+    )
+      eventPayloadValid =
+        eventPayloadValid &&
+        refKeys.length === 0 &&
+        Object.keys(payload).length === 1 &&
+        typeof payload.action === "string" &&
+        payload.action.length <= 128;
+    if (event.type === "run.created")
+      eventPayloadValid =
+        eventPayloadValid &&
+        typeof payload.taskId === "string" &&
+        Number.isSafeInteger(payload.assignmentGeneration) &&
+        Number(payload.assignmentGeneration) >= 1;
+    if (event.type === "result.published") {
+      const result = payload.result as Record<string, unknown> | undefined;
+      eventPayloadValid =
+        eventPayloadValid &&
+        typeof payload.taskId === "string" &&
+        typeof payload.resultId === "string" &&
+        !!result &&
+        result.schemaVersion === 1 &&
+        ["succeeded", "failed", "cancelled"].includes(String(result.status)) &&
+        typeof result.summary === "string";
+    }
+    if (event.type === "idempotency.record")
+      eventPayloadValid =
+        eventPayloadValid &&
+        typeof payload.key === "string" &&
+        typeof payload.principalId === "string" &&
+        typeof payload.method === "string";
+    if (!eventPayloadValid)
+      throw new OrchestratorError(
+        "STATE_CORRUPT",
+        `Event payload is invalid for ${event.type}.`,
+      );
     if (
       !event ||
       event.schemaVersion !== 1 ||

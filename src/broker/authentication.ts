@@ -49,7 +49,7 @@ export function authenticate(
         "Managed agent identity is not valid.",
       );
     return {
-      id: `prn_${credential.agentId}`,
+      id: "prn_00000000000000000000000003",
       kind,
       agentId: credential.agentId,
       generation: credential.generation,
@@ -62,6 +62,11 @@ export function authenticate(
       ],
     };
   }
+  if (kind === "pi_parent")
+    throw new OrchestratorError(
+      "AUTH_FAILED",
+      "Pi parent registration is deferred until managed identity support.",
+    );
   if (!verifySecret(secret, received))
     throw new OrchestratorError("AUTH_FAILED", "Client authentication failed.");
   const permissions =
@@ -76,7 +81,11 @@ export function authenticate(
           "repair",
           "delegate",
         ];
-  return { id: `prn_${kind}`, kind, permissions };
+  const principalId =
+    kind === "observer"
+      ? "prn_00000000000000000000000002"
+      : "prn_00000000000000000000000001";
+  return { id: principalId, kind, permissions };
 }
 export function requirePermission(
   principal: Principal,

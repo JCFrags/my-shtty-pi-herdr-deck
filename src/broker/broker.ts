@@ -4,8 +4,12 @@ import {
   type Server,
   type Socket,
 } from "node:net";
-import { chmod, lstat, readFile, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, rename, unlink } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
+import {
+  createPrivateExclusive,
+  readPrivateRegular,
+} from "../shared/private-fs.js";
 import { EventStore } from "../state/event-store.js";
 import { createId } from "../shared/ids.js";
 import { canonicalJson, sha256 } from "../shared/canonical-json.js";
@@ -61,7 +65,10 @@ async function listening(path: string): Promise<boolean> {
     });
   });
 }
-export async function safeStaleSocket(path: string): Promise<void> {
+export async function safeStaleSocket(
+  path: string,
+  expected?: SocketIdentity,
+): Promise<void> {
   let stat;
   try {
     stat = await lstat(path);
@@ -74,7 +81,22 @@ export async function safeStaleSocket(path: string): Promise<void> {
   if (process.getuid?.() !== undefined && stat.uid !== process.getuid())
     throw new Error("Broker socket has the wrong owner.");
   if (await listening(path)) throw new Error("Broker socket is already live.");
-  await unlink(path);
+  const quarantine = `${path}.quarantine.${process.pid}.${randomBytes(8).toString("hex")}`;
+  await rename(path, quarantine);
+  const quarantined = await lstat(quarantine);
+  if (
+    quarantined.dev !== stat.dev ||
+    quarantined.ino !== stat.ino ||
+    quarantined.uid !== stat.uid ||
+    (expected &&
+      (expected.dev !== quarantined.dev ||
+        expected.ino !== quarantined.ino ||
+        expected.uid !== quarantined.uid))
+  )
+    throw new Error("Broker socket identity changed during quarantine.");
+  if (await listening(quarantine))
+    throw new Error("Broker socket became live during quarantine.");
+  await unlink(quarantine);
 }
 export function sessionKeyMatches(
   expectedSocket: string,
@@ -106,23 +128,17 @@ export class Broker {
     try {
       await safeStaleSocket(this.paths.socket);
       this.#secret = await this.#loadSecret();
-      await this.store.open();
-      try {
-        const snapshot = await this.snapshotStore.read();
-        if (
-          snapshot &&
-          (snapshot.lastEventSeq > this.store.state.lastEventSeq ||
-            (snapshot.lastEventSeq === this.store.state.lastEventSeq &&
-              snapshot.lastEventHash !== this.store.state.lastEventHash))
-        )
-          throw new Error("Snapshot is ahead of the verified event log.");
-      } catch (error) {
-        this.store.readOnly = true;
-        this.store.corruption =
-          error instanceof Error
-            ? error.message
-            : "Snapshot verification failed.";
-      }
+      const snapshot = await this.snapshotStore
+        .read()
+        .catch((error: unknown) => {
+          this.store.readOnly = true;
+          this.store.corruption =
+            error instanceof Error
+              ? error.message
+              : "Snapshot verification failed.";
+          return undefined;
+        });
+      await this.store.open(snapshot);
       this.#server = createServer((socket) => this.#connect(socket));
       await new Promise<void>((resolve, reject) =>
         this.#server
@@ -140,40 +156,38 @@ export class Broker {
   }
   async #loadSecret(): Promise<string> {
     try {
-      const value = await readFile(this.paths.secret, "utf8");
-      if (!value.trim() || value.includes("\n"))
+      const value = await readPrivateRegular(this.paths.secret);
+      if (!/^[^\r\n]+\n$/.test(value))
         throw new Error("Invalid broker secret.");
-      await chmod(this.paths.secret, 0o600);
-      return value.trim();
+      return value.slice(0, -1);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       const value = randomBytes(32).toString("base64url");
-      await writeFile(this.paths.secret, `${value}\n`, { mode: 0o600 });
-      await chmod(this.paths.secret, 0o600);
+      await createPrivateExclusive(this.paths.secret, `${value}\n`);
       return value;
     }
   }
   async stop(): Promise<void> {
-    for (const client of this.#clients) client.socket.destroy();
-    await new Promise<void>(
-      (resolve) => this.#server?.close(() => resolve()) ?? resolve(),
-    );
-    this.#server = undefined;
-    const current = await lstat(this.paths.socket).catch(() => undefined);
-    if (
-      current &&
-      this.#socketIdentity &&
-      (current.dev !== this.#socketIdentity.dev ||
-        current.ino !== this.#socketIdentity.ino ||
-        current.uid !== this.#socketIdentity.uid)
-    )
-      throw new Error("Broker socket identity changed.");
+    let failure: unknown;
     try {
-      await safeStaleSocket(this.paths.socket);
+      for (const client of this.#clients) client.socket.destroy();
+      await new Promise<void>(
+        (resolve) => this.#server?.close(() => resolve()) ?? resolve(),
+      );
+      this.#server = undefined;
+      await safeStaleSocket(this.paths.socket, this.#socketIdentity);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      failure = error;
+    } finally {
+      try {
+        await this.#lock.release();
+      } catch (error) {
+        if (!failure) failure = error;
+      }
+      this.#socketIdentity = undefined;
     }
-    await this.#lock.release();
+    if (failure && (failure as NodeJS.ErrnoException).code !== "ENOENT")
+      throw failure;
   }
   get secret(): string {
     return this.#secret;
@@ -223,6 +237,16 @@ export class Broker {
               throw new OrchestratorError(
                 "AUTH_FAILED",
                 "Session key does not match the broker socket.",
+              );
+            if (
+              (item.value.client.kind === "pi_child" &&
+                item.value.auth.kind !== "agent_token") ||
+              (item.value.client.kind !== "pi_child" &&
+                item.value.auth.kind !== "client_secret")
+            )
+              throw new OrchestratorError(
+                "AUTH_FAILED",
+                "Authentication kind does not match client kind.",
               );
             client.principal = authenticate(
               this.#secret,
@@ -291,6 +315,8 @@ export class Broker {
     const principal = client.principal!;
     try {
       let result: unknown;
+      let replayEvents: import("../state/types.js").StoredEvent[] = [];
+      let committedEvent: import("../state/types.js").StoredEvent | undefined;
       if (
         request.method === "system.ping" ||
         request.method === "system.status"
@@ -305,29 +331,91 @@ export class Broker {
         result = this.store.verify();
       } else if (request.method === "events.subscribe") {
         requirePermission(principal, "read:state");
-        client.subscribed = true;
         const from = Number(request.params.fromSeq ?? 0);
+        const includeSnapshot =
+          request.params.includeSnapshot === undefined
+            ? true
+            : request.params.includeSnapshot;
         if (
           !Number.isSafeInteger(from) ||
           from < 0 ||
           from > this.store.state.lastEventSeq ||
-          (this.store.events[0] !== undefined &&
-            from < this.store.events[0].seq - 1)
+          typeof includeSnapshot !== "boolean"
         )
           throw new OrchestratorError(
             "EVENT_CURSOR_EXPIRED",
             "Event cursor is invalid or expired.",
           );
+        const filters = request.params.filters;
+        if (
+          filters !== undefined &&
+          (!filters || typeof filters !== "object" || Array.isArray(filters))
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Subscription filters are invalid.",
+          );
+        const filterRecord = (filters ?? {}) as Record<string, unknown>;
+        if (
+          filterRecord.events !== undefined &&
+          (!Array.isArray(filterRecord.events) ||
+            filterRecord.events.some((item) => typeof item !== "string"))
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Event filters are invalid.",
+          );
+        if (
+          filterRecord.taskIds !== undefined &&
+          (!Array.isArray(filterRecord.taskIds) ||
+            filterRecord.taskIds.some((item) => typeof item !== "string"))
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Task filters are invalid.",
+          );
+        const matches = (
+          event: import("../state/types.js").StoredEvent,
+        ): boolean => {
+          const names = filterRecord.events as string[] | undefined;
+          const tasks = filterRecord.taskIds as string[] | undefined;
+          return (
+            (!names ||
+              names.length === 0 ||
+              names.some((name) =>
+                name.endsWith(".*")
+                  ? event.type.startsWith(name.slice(0, -1))
+                  : event.type === name,
+              )) &&
+            (!tasks ||
+              tasks.length === 0 ||
+              (event.entityRefs.taskId !== undefined &&
+                tasks.includes(event.entityRefs.taskId)))
+          );
+        };
+        const currentSeq = this.store.state.lastEventSeq;
+        if (!includeSnapshot)
+          replayEvents = (await this.store.readEventsFrom(from)).filter(
+            matches,
+          );
+        client.subscribed = true;
         result = {
           subscriptionId: createId("evt"),
-          snapshot: {
-            seq: this.store.state.lastEventSeq,
-            tasks: Object.values(this.store.state.tasks),
-            runs: Object.values(this.store.state.runs),
-          },
-          replay: this.store.events.filter((event) => event.seq > from),
-          replayFromSeq: from + 1,
+          ...(includeSnapshot
+            ? {
+                snapshot: {
+                  seq: currentSeq,
+                  tasks: Object.values(this.store.state.tasks),
+                  runs: Object.values(this.store.state.runs),
+                },
+              }
+            : {}),
+          replayFromSeq: includeSnapshot ? currentSeq + 1 : from + 1,
         };
+        if (includeSnapshot)
+          replayEvents = (await this.store.readEventsFrom(currentSeq)).filter(
+            matches,
+          );
       } else if (request.method === "events.unsubscribe") {
         requirePermission(principal, "read:state");
         client.subscribed = false;
@@ -344,6 +432,16 @@ export class Broker {
         result = this.store.state.tasks[String(request.params.taskId)] ?? null;
       } else if (request.method === "task.create") {
         requirePermission(principal, "delegate");
+        if (!["human", "cli", "deck"].includes(principal.kind))
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "Only an operator client may create M1 synthetic tasks.",
+          );
+        if (request.params.parentAgentId !== undefined)
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Parent agent binding is deferred until M3.",
+          );
         if (this.store.readOnly)
           throw new OrchestratorError(
             "BROKER_READ_ONLY",
@@ -381,7 +479,7 @@ export class Broker {
         } else {
           const id = createId("tsk");
           result = { taskId: id, state: "queued" };
-          await this.store.append({
+          committedEvent = await this.store.append({
             type: "task.created",
             actor: { principalId: principal.id, kind: principal.kind },
             entityRefs: { taskId: id },
@@ -405,7 +503,8 @@ export class Broker {
         }
       } else throw new OrchestratorError("NOT_FOUND", "Method was not found.");
       assertInvariants(this.store.state);
-      await this.snapshotStore.write(this.store.state);
+      if (committedEvent)
+        await this.snapshotStore.write(this.store.state).catch(() => undefined);
       const response = {
         v: 1,
         type: "response",
@@ -415,7 +514,11 @@ export class Broker {
         result,
       };
       client.socket.write(encodeFrame(response));
-      this.#publish(request.method, response);
+      for (const event of replayEvents) this.#sendEvent(client, event);
+      if (committedEvent)
+        for (const subscriber of this.#clients)
+          if (subscriber.subscribed)
+            this.#sendEvent(subscriber, committedEvent);
     } catch (error) {
       const typed =
         error instanceof OrchestratorError
@@ -440,25 +543,25 @@ export class Broker {
       );
     }
   }
-  #publish(method: string, response: unknown): void {
+  #sendEvent(
+    client: Client,
+    stored: import("../state/types.js").StoredEvent,
+  ): void {
     const event = {
       v: 1,
       type: "event",
-      seq: this.store.state.lastEventSeq,
-      id: createId("evt"),
-      event: method,
-      timestamp: new Date().toISOString(),
-      refs: {},
-      data: response,
+      seq: stored.seq,
+      id: stored.id,
+      event: stored.type,
+      timestamp: stored.timestamp,
+      refs: stored.entityRefs,
+      data: stored.payload,
     };
     const encoded = encodeFrame(event);
-    for (const client of this.#clients) {
-      if (!client.subscribed || client.socket.destroyed) continue;
-      if (client.socket.writableLength + encoded.byteLength > 4 * 1024 * 1024) {
-        client.socket.destroy();
-        continue;
-      }
-      client.socket.write(encoded);
+    if (client.socket.writableLength + encoded.byteLength > 4 * 1024 * 1024) {
+      client.socket.destroy();
+      return;
     }
+    client.socket.write(encoded);
   }
 }
