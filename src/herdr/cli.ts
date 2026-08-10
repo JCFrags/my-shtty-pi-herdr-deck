@@ -50,6 +50,10 @@ export class HerdrCli {
     this.capabilities.require(["pane.close"]);
     await this.runner.run(["pane", "close", id]);
   }
+  async stopAgent(id: string) {
+    this.capabilities.require(["agent.stop"]);
+    await this.runner.run(["agent", "stop", id]);
+  }
   async startPi(input: {
     name: string;
     paneId: string;

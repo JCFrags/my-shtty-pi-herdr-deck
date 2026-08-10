@@ -90,6 +90,17 @@ export interface OrchestrationState {
   runs: Record<string, Run>;
   agents: Record<string, Agent>;
   workflows: Record<string, Workflow>;
+  herdrResources?: Record<
+    string,
+    {
+      agentId: string;
+      state: string;
+      paneId?: string;
+      tabId?: string;
+      worktreeId?: string;
+      reason?: string;
+    }
+  >;
   idempotency: Record<
     string,
     {

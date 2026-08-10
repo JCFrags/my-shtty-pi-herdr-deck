@@ -29,7 +29,16 @@ export function reconcileAgents(
       });
       continue;
     }
-    const terminal = pane.occupant?.terminalId ?? pane.terminalId;
+    if (!pane.occupant) {
+      out.push({
+        agentId: a.id,
+        kind: "orphaned",
+        paneId: pane.id,
+        reason: "Managed pane has no verified occupant.",
+      });
+      continue;
+    }
+    const terminal = pane.occupant.terminalId ?? pane.terminalId;
     if (a.terminalId && terminal && a.terminalId !== terminal) {
       out.push({
         agentId: a.id,

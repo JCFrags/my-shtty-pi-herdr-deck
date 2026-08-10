@@ -15,7 +15,9 @@ export function herdrName(
   live: Iterable<string> = [],
 ): string {
   const base = slug(role),
-    tail = createHash("sha256").update(id).digest("hex");
+    tail = /^[a-z]+_[0-9A-HJKMNP-TV-Z]{26}$/u.test(id)
+      ? id.slice(id.indexOf("_") + 1, id.indexOf("_") + 9).toLowerCase()
+      : createHash("sha256").update(id).digest("hex");
   let n = `pi-${base}-${tail.slice(0, 8)}`.slice(0, 32);
   const used = new Set(live);
   let i = 8;

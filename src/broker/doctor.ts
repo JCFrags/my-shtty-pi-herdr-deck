@@ -1,5 +1,6 @@
 import { access, constants, lstat } from "node:fs/promises";
 import { resolvePaths } from "../shared/paths.js";
+import { HerdrApi } from "../herdr/api.js";
 export interface CapabilityReport {
   name: string;
   available: boolean;
@@ -13,54 +14,133 @@ export interface DoctorReport {
   checks: CapabilityReport[];
   ok: boolean;
 }
-export async function doctor(): Promise<DoctorReport> {
+function check(
+  name: string,
+  available: boolean,
+  mandatory: boolean,
+  detail: string,
+): CapabilityReport {
+  return { name, available, mandatory, detail };
+}
+export async function doctor(
+  options: {
+    herdrBinary?: string;
+    herdrSocket?: string;
+    schema?: unknown;
+  } = {},
+): Promise<DoctorReport> {
   const paths = resolvePaths();
   const checks: CapabilityReport[] = [];
-  const linux = process.platform === "linux";
-  checks.push({
-    name: "linux",
-    available: linux,
-    mandatory: true,
-    detail: process.platform,
-  });
-  const nodeOk = Number(process.versions.node.split(".")[0]) >= 22;
-  checks.push({
-    name: "node",
-    available: nodeOk,
-    mandatory: true,
-    detail: process.versions.node,
-  });
+  checks.push(
+    check("linux", process.platform === "linux", true, process.platform),
+  );
+  checks.push(
+    check(
+      "node",
+      Number(process.versions.node.split(".")[0]) >= 22,
+      true,
+      process.versions.node,
+    ),
+  );
   const git = await commandAvailable("git");
-  checks.push({
-    name: "git",
-    available: git,
-    mandatory: true,
-    detail: git ? "executable" : "not found",
-  });
-  let stateOk = true;
-  try {
-    const parent = await lstat(paths.root);
-    stateOk = parent.isDirectory() && !parent.isSymbolicLink();
-  } catch (error) {
-    stateOk = (error as NodeJS.ErrnoException).code === "ENOENT";
+  checks.push(check("git", git, true, git ? "executable" : "not found"));
+  const herdrBinary = options.herdrBinary ?? process.env.HERDR_BIN_PATH;
+  const herdr = !!herdrBinary && (await commandAvailablePath(herdrBinary));
+  checks.push(
+    check("herdr-binary", herdr, true, herdrBinary ?? "not configured"),
+  );
+  if (options.schema) {
+    const api = new HerdrApi({
+      runner: async () => ({
+        stdout: JSON.stringify(options.schema),
+        stderr: "",
+        exitCode: 0,
+      }),
+    });
+    await api.readSchema().catch(() => undefined);
+    for (const method of [
+      "session.snapshot",
+      "events.subscribe",
+      "tab.create",
+      "tab.close",
+      "agent.start",
+      "worktree.create",
+      "worktree.remove",
+    ])
+      checks.push(
+        check(
+          `herdr-capability:${method}`,
+          api.supports(method),
+          true,
+          api.supports(method) ? "supported" : "missing",
+        ),
+      );
+    for (const method of ["agent.interrupt", "agent.wait", "agent.read"])
+      checks.push(
+        check(
+          `herdr-optional:${method}`,
+          api.supports(method),
+          false,
+          api.supports(method) ? "supported" : "degraded",
+        ),
+      );
   }
-  checks.push({
-    name: "state-path",
-    available: stateOk,
-    mandatory: true,
-    detail: paths.root,
-  });
+  if (options.herdrSocket)
+    checks.push(
+      check(
+        "herdr-socket",
+        await pathExists(options.herdrSocket),
+        true,
+        options.herdrSocket,
+      ),
+    );
+  checks.push(
+    check("state-path", await safeDirectory(paths.root), true, paths.root),
+  );
+  checks.push(
+    check(
+      "runtime-path",
+      await safeDirectory(paths.runtime),
+      true,
+      paths.runtime,
+    ),
+  );
+  checks.push(
+    check("pi-integration", true, false, "callable service boundary"),
+  );
   return {
     version: "0.1.0",
     platform: process.platform,
     node: process.versions.node,
     checks,
-    ok: checks.every((check) => !check.mandatory || check.available),
+    ok: checks.every((item) => !item.mandatory || item.available),
   };
 }
-async function commandAvailable(name: string): Promise<boolean> {
+export function doctorJson(report: DoctorReport): string {
+  return JSON.stringify(report);
+}
+async function pathExists(path: string): Promise<boolean> {
   try {
-    await access(`/usr/bin/${name}`, constants.X_OK);
+    await lstat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function safeDirectory(path: string): Promise<boolean> {
+  try {
+    const s = await lstat(path);
+    return s.isDirectory() && !s.isSymbolicLink();
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT";
+  }
+}
+async function commandAvailable(name: string): Promise<boolean> {
+  return commandAvailablePath(`/usr/bin/${name}`);
+}
+async function commandAvailablePath(path: string): Promise<boolean> {
+  try {
+    await access(path, constants.X_OK);
     return true;
   } catch {
     return false;

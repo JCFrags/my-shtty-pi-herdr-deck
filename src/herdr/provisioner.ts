@@ -36,18 +36,26 @@ export class HerdrProvisioner {
   async provision(input: ProvisionInput): Promise<ProvisionResult> {
     const token = createManagedToken();
     const name = herdrName(input.role, input.agentId, this.liveNames());
-    const env = {
+    const managed = {
       PI_HERDR_ORCH_MANAGED: "1",
       PI_HERDR_ORCH_AGENT_ID: input.agentId,
       PI_HERDR_ORCH_PARENT_AGENT_ID: input.parentAgentId,
       PI_HERDR_ORCH_PROFILE_ID: input.profileId,
-      PI_HERDR_ORCH_AGENT_TOKEN: token.token,
-      ...(input.env ?? {}),
     };
+    const forbidden = Object.keys(input.env ?? {}).filter(
+      (key) =>
+        Object.hasOwn(managed, key) || key === "PI_HERDR_ORCH_AGENT_TOKEN",
+    );
+    if (forbidden.length)
+      throw new Error(
+        `Managed environment override rejected: ${forbidden.join(", ")}`,
+      );
+    const env = { ...managed, ...(input.env ?? {}) };
     let prompt: string | undefined;
     let tabId: string | undefined;
     let paneId: string | undefined;
     let worktreePath: string | undefined;
+    let worktreeId: string | undefined;
     let unusedTabId: string | undefined;
     try {
       prompt = await createPromptFile(
@@ -64,6 +72,7 @@ export class HerdrProvisioner {
         });
         const r = wt as Record<string, unknown>;
         worktreePath = typeof r.path === "string" ? r.path : undefined;
+        worktreeId = typeof r.id === "string" ? r.id : undefined;
         const workspace =
           typeof r.workspace_id === "string"
             ? r.workspace_id
@@ -134,6 +143,14 @@ export class HerdrProvisioner {
       };
     } catch (error) {
       if (prompt) await deletePromptFile(prompt).catch(() => undefined);
+      // Compensate in reverse order. Each operation is best-effort and the
+      // resulting state remains observable to startup reconciliation.
+      if (paneId) await this.cli.closePane(paneId).catch(() => undefined);
+      if (tabId) await this.cli.closeTab(tabId).catch(() => undefined);
+      if (unusedTabId && unusedTabId !== tabId)
+        await this.cli.closeTab(unusedTabId).catch(() => undefined);
+      if (worktreeId)
+        await this.cli.removeWorktree(worktreeId).catch(() => undefined);
       throw error;
     }
   }

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { canonicalJson } from "../shared/canonical-json.js";
 export interface HerdrCapabilities {
   schemaHash: string;
   binaryIdentity?: string;
@@ -80,7 +81,7 @@ export function projectCapabilities(
   const mandatory = Object.fromEntries(MANDATORY.map((m) => [m, set.has(m)]));
   const optional = Object.fromEntries(OPTIONAL.map((m) => [m, set.has(m)]));
   const schemaHash = createHash("sha256")
-    .update(JSON.stringify(schema))
+    .update(canonicalJson(schema))
     .digest("hex");
   return {
     schemaHash,
@@ -95,13 +96,26 @@ export function projectCapabilities(
     },
   };
 }
+export interface CapabilityIdentity {
+  binaryIdentity: string;
+  schemaHash: string;
+  adapterIdentity: string;
+}
 export class CapabilityCache {
   #cache = new Map<string, HerdrCapabilities>();
-  get(key: string) {
-    return this.#cache.get(key);
+  static key(identity: CapabilityIdentity): string {
+    return canonicalJson(identity);
   }
-  set(key: string, value: HerdrCapabilities) {
-    this.#cache.set(key, value);
+  get(identity: CapabilityIdentity | string) {
+    return this.#cache.get(
+      typeof identity === "string" ? identity : CapabilityCache.key(identity),
+    );
+  }
+  set(identity: CapabilityIdentity | string, value: HerdrCapabilities) {
+    this.#cache.set(
+      typeof identity === "string" ? identity : CapabilityCache.key(identity),
+      value,
+    );
     return value;
   }
   clear() {

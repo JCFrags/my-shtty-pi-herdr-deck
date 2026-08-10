@@ -1,6 +1,5 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-
 export type HerdrErrorCode =
   | "HERDR_UNAVAILABLE"
   | "HERDR_TIMEOUT"
@@ -54,6 +53,20 @@ export function minimalHerdrEnvironment(
     if (source[key] !== undefined) out[key] = source[key];
   return out;
 }
+function terminate(
+  child: ChildProcess,
+  signal: NodeJS.Signals = "SIGTERM",
+): void {
+  if (process.platform === "linux" && child.pid) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      /* process already exited */
+    }
+  }
+  child.kill(signal);
+}
 export class HerdrProcessRunner {
   readonly #options: ProcessRunnerOptions;
   constructor(options: ProcessRunnerOptions) {
@@ -63,8 +76,24 @@ export class HerdrProcessRunner {
     argv: readonly string[],
     signal?: AbortSignal,
   ): Promise<HerdrProcessResult> {
-    const timeoutMs = this.#options.timeoutMs ?? 10_000,
+    const timeoutMs = this.#options.timeoutMs ?? 30_000,
       max = this.#options.maxOutputBytes ?? 8 * 1024 * 1024;
+    if (
+      !Number.isInteger(timeoutMs) ||
+      timeoutMs < 3_001 ||
+      timeoutMs > 300_000
+    )
+      return Promise.reject(
+        new HerdrProcessError(
+          "HERDR_COMMAND_FAILED",
+          "Herdr timeout must be 3001-300000 ms.",
+        ),
+      );
+    if (this.#options.env)
+      throw new HerdrProcessError(
+        "HERDR_COMMAND_FAILED",
+        "Caller environment overrides are not allowed.",
+      );
     if (!this.#options.binary)
       return Promise.reject(
         new HerdrProcessError(
@@ -76,13 +105,21 @@ export class HerdrProcessRunner {
       const child = spawn(this.#options.binary, [...argv], {
         shell: false,
         cwd: this.#options.cwd,
-        env: this.#options.env ?? minimalHerdrEnvironment(),
+        env: minimalHerdrEnvironment(),
+        detached: process.platform === "linux",
         stdio: ["ignore", "pipe", "pipe"],
       });
       const out: Buffer[] = [],
         err: Buffer[] = [];
       let size = 0,
         settled = false;
+      const timer = setTimeout(() => {
+        terminate(child, "SIGKILL");
+        finish(
+          new HerdrProcessError("HERDR_TIMEOUT", "Herdr command timed out."),
+        );
+      }, timeoutMs);
+      timer.unref?.();
       const finish = (error?: Error, result?: HerdrProcessResult) => {
         if (settled) return;
         settled = true;
@@ -93,7 +130,7 @@ export class HerdrProcessRunner {
       const append = (target: Buffer[], chunk: Buffer) => {
         size += chunk.byteLength;
         if (size > max) {
-          child.kill("SIGKILL");
+          terminate(child, "SIGKILL");
           finish(
             new HerdrProcessError(
               "HERDR_OUTPUT_LIMIT",
@@ -135,37 +172,14 @@ export class HerdrProcessRunner {
               : {}),
           });
       });
-      const timer = setTimeout(() => {
-        child.kill("SIGKILL");
+      const abort = () => {
+        terminate(child, "SIGKILL");
         finish(
-          new HerdrProcessError("HERDR_TIMEOUT", "Herdr command timed out."),
+          new HerdrProcessError("HERDR_ABORTED", "Herdr command was aborted."),
         );
-      }, timeoutMs);
-      timer.unref?.();
-      if (signal) {
-        if (signal.aborted) {
-          child.kill("SIGKILL");
-          finish(
-            new HerdrProcessError(
-              "HERDR_ABORTED",
-              "Herdr command was aborted.",
-            ),
-          );
-        } else
-          signal.addEventListener(
-            "abort",
-            () => {
-              child.kill("SIGKILL");
-              finish(
-                new HerdrProcessError(
-                  "HERDR_ABORTED",
-                  "Herdr command was aborted.",
-                ),
-              );
-            },
-            { once: true },
-          );
-      }
+      };
+      if (signal?.aborted) abort();
+      else signal?.addEventListener("abort", abort, { once: true });
     });
   }
   async json<T>(argv: readonly string[], signal?: AbortSignal): Promise<T> {

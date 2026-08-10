@@ -499,6 +499,35 @@ export class EventStore {
         isEntityId(refs.taskId, "tsk") &&
         exactKeys(p, ["to"]) &&
         (p.to === "queued" || p.to === "cancelled");
+    } else if (event.type === "herdr.provision.intent") {
+      valid =
+        exactKeys(refs, ["agentId"]) &&
+        typeof refs.agentId === "string" &&
+        exactKeys(p, ["agentId"]) &&
+        p.agentId === refs.agentId;
+    } else if (
+      event.type === "herdr.provision.outcome" ||
+      event.type === "herdr.reconciled"
+    ) {
+      valid =
+        exactKeys(refs, ["agentId"]) &&
+        typeof refs.agentId === "string" &&
+        exactKeys(
+          p,
+          [
+            "agentId",
+            "state",
+            "paneId",
+            "tabId",
+            "worktreeId",
+            "reason",
+            "terminalId",
+            "sessionId",
+            "generation",
+          ].filter((key) => Object.hasOwn(p, key)),
+        ) &&
+        p.agentId === refs.agentId &&
+        typeof p.state === "string";
     } else if (
       event.type === "audit.action" ||
       event.type === "audit.authorization_denied"

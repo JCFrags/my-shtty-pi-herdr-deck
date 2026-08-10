@@ -9,6 +9,7 @@ export const emptyState = (): OrchestrationState => ({
   runs: {},
   agents: {},
   workflows: {},
+  herdrResources: {},
   idempotency: {},
 });
 const taskTerminal = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
@@ -17,6 +18,9 @@ const known = new Set([
   "task.state_changed",
   "audit.action",
   "audit.authorization_denied",
+  "herdr.provision.intent",
+  "herdr.provision.outcome",
+  "herdr.reconciled",
 ]);
 export function reduce(
   state: OrchestrationState,
@@ -95,6 +99,43 @@ export function reduce(
     case "audit.action":
     case "audit.authorization_denied":
       break;
+    case "herdr.provision.intent": {
+      const agentId = String(p.agentId);
+      if (!agentId)
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Herdr intent agent is invalid.",
+        );
+      next.herdrResources = {
+        ...(next.herdrResources ?? {}),
+        [agentId]: { agentId, state: "provisioning" },
+      };
+      break;
+    }
+    case "herdr.provision.outcome":
+    case "herdr.reconciled": {
+      const agentId = String(p.agentId),
+        current = next.herdrResources?.[agentId];
+      if (!current)
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Herdr resource has no intent.",
+        );
+      next.herdrResources = {
+        ...(next.herdrResources ?? {}),
+        [agentId]: {
+          ...current,
+          state: String(p.state),
+          ...(typeof p.paneId === "string" ? { paneId: p.paneId } : {}),
+          ...(typeof p.tabId === "string" ? { tabId: p.tabId } : {}),
+          ...(typeof p.worktreeId === "string"
+            ? { worktreeId: p.worktreeId }
+            : {}),
+          ...(typeof p.reason === "string" ? { reason: p.reason } : {}),
+        },
+      };
+      break;
+    }
     default:
       throw new OrchestratorError(
         "STATE_CORRUPT",

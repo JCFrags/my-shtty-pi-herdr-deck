@@ -47,3 +47,7 @@
 - Subscription replay reads retained disk history for the active event generation. It validates exact parameters, filters, future cursors, subscription IDs, replay/live filters, client count, request rate, authentication wait, and outbound bytes. Slow-client disconnects queue a canonical audit event without blocking the writer.
 - Broker and CLI verification rescan the disk chain. Invalid event or snapshot data enters read-only recovery. Unexpected internal request errors are not sent to clients. Authentication failures append a redacted canonical audit event before the socket closes when the store is writable.
 - Current local gates: `npm run lint`, `npm run typecheck`, and `npm run validate` pass. Validation includes 69 unit tests, one integration test, schema checks, and package smoke. Fresh independent exact-commit review remains required before M2.
+
+## M2 correction evidence
+
+The corrected M2 slice is executable through `src/herdr/service.ts`. It records provisioning intent and outcome in the broker event store, performs startup reconciliation, gates mutations on projected capabilities, compensates Herdr resources in reverse order, and classifies panes without verified occupants as orphaned. Local tests prove NUL-safe rename parsing, canonical capability hashing, managed-environment rejection, bounded process output, process-group termination, and fake-only integration boundaries. No live Herdr resource is used.

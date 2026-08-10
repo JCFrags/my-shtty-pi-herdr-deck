@@ -209,6 +209,10 @@ The state whitelist includes a session ID when available, the Herdr pane ID, idl
 
 Only one controlling deck may attach to a Pi pane. A second client is explicitly rejected. The bridge rate-limits state pushes to avoid render storms.
 
+## Herdr orchestration service boundary
+
+The M2 service uses canonical broker events for provisioning intent, external resource outcomes, and startup reconciliation. It requires the installed Herdr schema before mutation. Provisioning uses argv-only fake-compatible gateways, compensates created resources in reverse order on failure, and records failed or orphaned resources for later reconciliation. Managed environment keys cannot be overridden. The random registration token is not placed in command arguments or persisted state. Tests use only local fake Herdr and Git interfaces.
+
 ## Herdr interaction boundary
 
 The deck reads `HERDR_BIN_PATH` and launches Herdr with argv arrays and `shell: false`. It reads the installed schema with:

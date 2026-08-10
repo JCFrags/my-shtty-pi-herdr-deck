@@ -17,7 +17,9 @@ function fields(bytes: Uint8Array): string[] {
   let start = 0;
   for (let i = 0; i <= bytes.length; i++) {
     if (i === bytes.length || bytes[i] === 0) {
-      out.push(new TextDecoder().decode(bytes.slice(start, i)));
+      out.push(
+        new TextDecoder("utf-8", { fatal: true }).decode(bytes.slice(start, i)),
+      );
       start = i + 1;
     }
   }
@@ -25,29 +27,33 @@ function fields(bytes: Uint8Array): string[] {
 }
 export function parsePorcelainV2(input: string | Uint8Array): GitStatusEntry[] {
   const data =
-      typeof input === "string" ? new TextEncoder().encode(input) : input,
+    typeof input === "string" ? new TextEncoder().encode(input) : input;
+  const records = fields(data),
     out: GitStatusEntry[] = [];
-  for (const line of fields(data)) {
-    if (
-      !line.startsWith("1 ") &&
-      !line.startsWith("2 ") &&
-      !line.startsWith("u ")
-    )
-      continue;
-    const tab = line.indexOf("\t");
-    const metadata = tab >= 0 ? line.slice(0, tab) : line;
-    const p = metadata.split(" ");
-    const xy = p[1] ?? "??";
-    const path = tab >= 0 ? line.slice(tab + 1) : p.slice(9).join(" ");
-    if (path)
-      out.push({
-        index: xy[0] ?? ".",
-        worktree: xy[1] ?? ".",
-        path,
-        ...(line.startsWith("2 ") && p.length > p.indexOf("\t") + 1
-          ? { origPath: p[p.length - 2] }
-          : {}),
-      });
+  for (let i = 0; i < records.length; i++) {
+    const record = records[i]!;
+    if (record.startsWith("1 ") || record.startsWith("u ")) {
+      const tab = record.indexOf("\t");
+      const meta = tab >= 0 ? record.slice(0, tab) : record;
+      const p = meta.split(" ");
+      const xy = p[1] ?? "??";
+      const path = tab >= 0 ? record.slice(tab + 1) : p.slice(9).join(" ");
+      if (path) out.push({ index: xy[0] ?? ".", worktree: xy[1] ?? ".", path });
+    } else if (record.startsWith("2 ")) {
+      const tab = record.indexOf("\t");
+      if (tab < 0) continue;
+      const p = record.slice(0, tab).split(" ");
+      const xy = p[1] ?? "??";
+      const path = record.slice(tab + 1);
+      const origPath = records[++i];
+      if (path)
+        out.push({
+          index: xy[0] ?? ".",
+          worktree: xy[1] ?? ".",
+          path,
+          ...(origPath ? { origPath } : {}),
+        });
+    }
   }
   return out;
 }
