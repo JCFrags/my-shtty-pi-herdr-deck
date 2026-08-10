@@ -105,7 +105,7 @@ test("M2 normal removal preserves parent HEAD and porcelain", async () => {
       tabs: [],
       workspaces: [],
       agents: [],
-      worktrees: [],
+      worktrees: [{ id: "worktree-1", path: "/fake/worktree" }],
     }),
     closePane: async () => undefined,
     removeWorktree: async () => {
@@ -195,7 +195,7 @@ test("M2 real Git gateway preserves parent HEAD and porcelain for removal and co
       tabs: [],
       workspaces: [],
       agents: [],
-      worktrees: [],
+      worktrees: [{ id: "managed", path: worktree }],
     }),
     closePane: async () => undefined,
     removeWorktree: async () => {

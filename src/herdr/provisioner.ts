@@ -327,6 +327,7 @@ export class HerdrProvisioner {
       generation?: number;
     },
     suppliedDigest?: string,
+    cleanup = true,
   ): Promise<void> {
     if (
       !result.tokenFilePath ||
@@ -341,7 +342,9 @@ export class HerdrProvisioner {
         identity.generation !== result.token.generation)
     )
       throw new Error("HERDR_REGISTRATION_IDENTITY_MISMATCH");
-    if (result.promptPath) await deletePromptFile(result.promptPath);
-    await deletePromptFile(result.tokenFilePath);
+    if (cleanup) {
+      if (result.promptPath) await deletePromptFile(result.promptPath);
+      await deletePromptFile(result.tokenFilePath);
+    }
   }
 }

@@ -13,6 +13,8 @@ export interface HerdrSocketClientOptions {
   sessionKey?: string;
   clientId?: string;
   reconnectDelaysMs?: readonly number[];
+  /** Maximum fresh connections, including the initial attempt. */
+  maxReconnectAttempts?: number;
   connectSocket?: (path: string) => Socket;
 }
 const id = () => randomUUID();
@@ -196,8 +198,14 @@ export class HerdrSocketClient {
   ): Promise<void> {
     let cursor = 0;
     let first = true;
+    let attempts = 0;
     const delays = this.#options.reconnectDelaysMs ?? [50, 100, 250];
-    while (!signal?.aborted) {
+    const maxAttempts = Math.max(
+      1,
+      this.#options.maxReconnectAttempts ?? delays.length + 1,
+    );
+    while (!signal?.aborted && attempts < maxAttempts) {
+      attempts++;
       let socket: Socket | undefined;
       try {
         socket = await this.#connectFresh(signal);
@@ -278,6 +286,8 @@ export class HerdrSocketClient {
         socket?.destroy();
       }
     }
+    if (!signal?.aborted && attempts >= maxAttempts)
+      throw new Error("HERDR_RECONNECT_EXHAUSTED");
   }
   async close(): Promise<void> {
     this.#socket?.destroy();

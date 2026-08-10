@@ -248,7 +248,34 @@ export class HerdrService {
           occupant.generation !== identity.generation)
       )
         throw new Error("HERDR_REGISTRATION_IDENTITY_MISMATCH");
-      await this.#provisioner.verifyRegistration(result, identity, tokenProof);
+      await this.#provisioner.verifyRegistration(
+        result,
+        identity,
+        tokenProof,
+        false,
+      );
+      const secondSnapshot = await this.#cli.snapshot();
+      const secondPane = secondSnapshot.panes.find(
+        (item) => item.id === identity.paneId,
+      );
+      const secondOccupant = secondPane?.occupant;
+      if (
+        !secondPane ||
+        !secondOccupant ||
+        (secondOccupant.agentId !== undefined &&
+          secondOccupant.agentId !== resource.ownerId) ||
+        secondOccupant.generation !== result.token.generation ||
+        !sameIdentity(secondPane, secondOccupant, identity)
+      ) {
+        await this.recordLifecycle(
+          agentId,
+          "pending",
+          "registration_identity_mismatch",
+          true,
+        );
+        throw new Error("HERDR_REGISTRATION_IDENTITY_MISMATCH");
+      }
+      await this.#provisioner.cleanupRegistration(result);
       await this.#store.append({
         type: "herdr.provision.outcome",
         actor: this.#actor,
@@ -297,7 +324,11 @@ export class HerdrService {
     const agentId = this.agentForPane(guard.paneId) ?? `pane:${guard.paneId}`;
     await this.withAgentLock(agentId, async () => {
       await this.#preflight?.();
-      this.#cli.requireMutationCapabilities(["pane.close", "session.snapshot"]);
+      this.#cli.requireMutationCapabilities([
+        "pane.close",
+        "worktree.remove",
+        "session.snapshot",
+      ]);
       const resource = agentId.startsWith("pane:")
         ? undefined
         : this.resources[agentId];
@@ -340,6 +371,21 @@ export class HerdrService {
         this.#cli.closePane(guard.paneId),
       );
       if (resource?.worktreeId) {
+        const removalCheck = await this.worktreeRemovalCheck(resource);
+        if (!removalCheck.safe) {
+          await this.recordLifecycle(
+            agentId,
+            removalCheck.reason === "dirty" ? "dirty" : "replaced",
+            removalCheck.reason === "dirty"
+              ? "retained_dirty_worktree"
+              : "retained_resource_mismatch",
+          );
+          throw new Error(
+            removalCheck.reason === "dirty"
+              ? "HERDR_DIRTY_WORKTREE"
+              : "HERDR_RESOURCE_IDENTITY_MISMATCH",
+          );
+        }
         try {
           await this.#cli.removeWorktree(resource.worktreeId);
         } catch (error) {
@@ -354,6 +400,38 @@ export class HerdrService {
       if (!agentId.startsWith("pane:"))
         await this.recordLifecycle(agentId, "closed", "close_succeeded");
     });
+  }
+  private async worktreeRemovalCheck(resource: {
+    worktreeId?: string;
+    worktreePath?: string;
+    worktreeGitRoot?: string;
+    worktreeGitHead?: string;
+    worktreeGitBranch?: string;
+  }): Promise<{ safe: boolean; reason?: "dirty" | "mismatch" }> {
+    if (!resource.worktreeId || !resource.worktreePath || !this.#gitEvidence)
+      return { safe: false, reason: "mismatch" };
+    const snapshot = await this.#cli.snapshot().catch(() => undefined);
+    const worktree = snapshot?.worktrees.find(
+      (item) => item.id === resource.worktreeId,
+    );
+    if (!worktree || worktree.path !== resource.worktreePath)
+      return { safe: false, reason: "mismatch" };
+    const evidence = await this.#gitEvidence(resource.worktreePath).catch(
+      () => undefined,
+    );
+    if (!evidence || evidence.dirty)
+      return { safe: false, reason: evidence?.dirty ? "dirty" : "mismatch" };
+    if (
+      evidence.repositoryRoot !== resource.worktreePath ||
+      (resource.worktreeGitRoot &&
+        evidence.repositoryRoot !== resource.worktreeGitRoot) ||
+      (resource.worktreeGitHead &&
+        evidence.head !== resource.worktreeGitHead) ||
+      (resource.worktreeGitBranch &&
+        evidence.branch !== resource.worktreeGitBranch)
+    )
+      return { safe: false, reason: "mismatch" };
+    return { safe: true };
   }
   private async withAgentLock<T>(
     agentId: string,
@@ -502,6 +580,29 @@ export class HerdrService {
     await interrupt(this.#cli, () => this.#cli.snapshot(), guard);
   }
 }
+function sameIdentity(
+  pane: { terminalId?: string },
+  occupant: {
+    terminalId?: string;
+    sessionId?: string;
+    generation?: number;
+  },
+  identity: {
+    terminalId?: string;
+    sessionId?: string;
+    generation?: number;
+  },
+): boolean {
+  return (
+    (identity.terminalId === undefined ||
+      (occupant.terminalId ?? pane.terminalId) === identity.terminalId) &&
+    (identity.sessionId === undefined ||
+      occupant.sessionId === identity.sessionId) &&
+    (identity.generation === undefined ||
+      occupant.generation === identity.generation)
+  );
+}
+
 async function revalidateAndRun(
   cli: HerdrCli,
   guard: OccupantGuard,
