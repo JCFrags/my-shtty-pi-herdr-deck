@@ -8,17 +8,22 @@ export interface ManagedToken {
   digest: string;
   generation: number;
 }
-interface FileClaim {
+export interface FileIdentity {
   dev: number;
   ino: number;
 }
+interface FileClaim extends FileIdentity {}
 const fileClaims = new Map<string, FileClaim>();
 function claim(path: string, stat: { dev: number; ino: number }): void {
   fileClaims.set(path, { dev: stat.dev, ino: stat.ino });
 }
 function isClaimed(path: string, stat: { dev: number; ino: number }): boolean {
   const expected = fileClaims.get(path);
-  return expected !== undefined && expected.dev === stat.dev && expected.ino === stat.ino;
+  return (
+    expected !== undefined &&
+    expected.dev === stat.dev &&
+    expected.ino === stat.ino
+  );
 }
 export function createManagedToken(generation = 1): ManagedToken {
   const token = randomToken();
@@ -48,9 +53,26 @@ export async function createManagedTokenFile(
   }
   return path;
 }
+export async function managedFileIdentity(path: string): Promise<FileIdentity> {
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0)
+      throw new Error("Managed file is unsafe.");
+    return { dev: stat.dev, ino: stat.ino };
+  } finally {
+    await handle.close();
+  }
+}
+function sameIdentity(actual: FileIdentity, expected?: FileIdentity): boolean {
+  return (
+    !expected || (actual.dev === expected.dev && actual.ino === expected.ino)
+  );
+}
 export async function verifyManagedTokenFile(
   path: string,
   expectedDigest: string,
+  expectedIdentity?: FileIdentity,
 ): Promise<boolean> {
   let handle;
   try {
@@ -59,13 +81,21 @@ export async function verifyManagedTokenFile(
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     const stat = await handle.stat();
     if (!stat.isFile() || (stat.mode & 0o077) !== 0) return false;
-    claim(path, stat);
+    if (!sameIdentity(stat, expectedIdentity)) return false;
+    if (expectedIdentity === undefined && !isClaimed(path, stat)) return false;
     const value = (await handle.readFile("utf8")).trimEnd();
     const actual = Buffer.from(tokenDigest(value), "utf8");
     const expected = Buffer.from(expectedDigest, "utf8");
-    return actual.length === expected.length && timingSafeEqual(actual, expected);
+    return (
+      actual.length === expected.length && timingSafeEqual(actual, expected)
+    );
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    if (
+      ["ENOENT", "ELOOP", "ENOTDIR"].includes(
+        (error as NodeJS.ErrnoException).code ?? "",
+      )
+    )
+      return false;
     throw error;
   } finally {
     await handle?.close().catch(() => undefined);
@@ -98,7 +128,10 @@ export async function createPromptFile(
   }
   return path;
 }
-export async function deletePromptFile(path: string): Promise<void> {
+export async function deletePromptFile(
+  path: string,
+  expectedIdentity?: FileIdentity,
+): Promise<void> {
   let handle;
   try {
     // This is a claimed-inode wipe. There is no safe compare-and-unlink API
@@ -106,8 +139,9 @@ export async function deletePromptFile(path: string): Promise<void> {
     handle = await open(path, constants.O_WRONLY | constants.O_NOFOLLOW);
     const stat = await handle.stat();
     if (!stat.isFile() || (stat.mode & 0o077) !== 0) return;
-    if (!isClaimed(path, stat)) return;
-    for (let offset = 0; offset < stat.size; ) {
+    if (!sameIdentity(stat, expectedIdentity)) return;
+    if (expectedIdentity === undefined && !isClaimed(path, stat)) return;
+    for (let offset = 0; offset < stat.size;) {
       const length = Math.min(64 * 1024, stat.size - offset);
       await handle.write(Buffer.alloc(length), 0, length, offset);
       offset += length;

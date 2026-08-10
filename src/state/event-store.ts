@@ -528,6 +528,10 @@ export class EventStore {
             "parentAgentId",
             "ownerId",
             "tokenDigest",
+            "promptFileDev",
+            "promptFileIno",
+            "tokenFileDev",
+            "tokenFileIno",
             "registrationDeadline",
             "cleanupOutcome",
             "dirty",
@@ -544,7 +548,18 @@ export class EventStore {
           ].filter((key) => Object.hasOwn(p, key)),
         ) &&
         p.agentId === refs.agentId &&
-        typeof p.state === "string";
+        typeof p.state === "string" &&
+        (Object.keys(p).every(
+          (key) => !key.endsWith("FileDev") && !key.endsWith("FileIno"),
+        ) ||
+          [
+            "promptFileDev",
+            "promptFileIno",
+            "tokenFileDev",
+            "tokenFileIno",
+          ].every(
+            (key) => Number.isSafeInteger(p[key]) && Number(p[key]) >= 0,
+          ));
     } else if (
       event.type === "audit.action" ||
       event.type === "audit.authorization_denied"

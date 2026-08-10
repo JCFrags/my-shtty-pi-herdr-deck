@@ -156,6 +156,18 @@ export class HerdrService {
             ...(result.token.digest
               ? { tokenDigest: result.token.digest }
               : {}),
+            ...(result.promptFileIdentity
+              ? {
+                  promptFileDev: result.promptFileIdentity.dev,
+                  promptFileIno: result.promptFileIdentity.ino,
+                }
+              : {}),
+            ...(result.tokenFileIdentity
+              ? {
+                  tokenFileDev: result.tokenFileIdentity.dev,
+                  tokenFileIno: result.tokenFileIdentity.ino,
+                }
+              : {}),
             generation: result.token.generation,
             registrationDeadline: new Date(Date.now() + 30_000).toISOString(),
             parentAgentId: input.parentAgentId,
@@ -413,6 +425,13 @@ export class HerdrService {
     if (result) {
       this.#pending.set(agentId, result);
       this.scheduleExpiry(agentId, result);
+    } else {
+      await this.recordLifecycle(
+        agentId,
+        "orphaned",
+        "retained_claim_identity_unknown",
+        true,
+      ).catch(() => undefined);
     }
     return result;
   }

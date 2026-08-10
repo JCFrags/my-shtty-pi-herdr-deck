@@ -10,6 +10,8 @@ import {
   deletePromptFile,
   verifyManagedTokenFile,
   type ManagedToken,
+  type FileIdentity,
+  managedFileIdentity,
 } from "./token-files.js";
 export interface ProvisionInput {
   agentId: string;
@@ -34,6 +36,8 @@ export interface ProvisionResult {
   unusedTabId?: string;
   promptPath?: string;
   tokenFilePath?: string;
+  promptFileIdentity?: FileIdentity;
+  tokenFileIdentity?: FileIdentity;
 }
 export class HerdrProvisioner {
   constructor(
@@ -69,6 +73,8 @@ export class HerdrProvisioner {
     let worktreePath: string | undefined;
     let worktreeId: string | undefined;
     let unusedTabId: string | undefined;
+    let promptFileIdentity: FileIdentity | undefined;
+    let tokenFileIdentity: FileIdentity | undefined;
     try {
       prompt = await createPromptFile(
         this.promptRoot,
@@ -81,6 +87,10 @@ export class HerdrProvisioner {
         token,
       );
       managed.PI_HERDR_ORCH_TOKEN_FILE = tokenFile;
+      tokenFileIdentity = await managedFileIdentity(tokenFile);
+      promptFileIdentity = prompt
+        ? await managedFileIdentity(prompt)
+        : undefined;
       if (input.isolation === "worktree") {
         const wt = await this.cli.createWorktree({
           workspaceId: input.workspaceId,
@@ -153,8 +163,8 @@ export class HerdrProvisioner {
         await this.cli.closeTab(unusedTabId);
       }
       if (!this.retainRegistrationFiles) {
-        if (prompt) await deletePromptFile(prompt);
-        if (tokenFile) await deletePromptFile(tokenFile);
+        if (prompt) await deletePromptFile(prompt, promptFileIdentity);
+        if (tokenFile) await deletePromptFile(tokenFile, tokenFileIdentity);
       }
       return {
         name,
@@ -166,14 +176,22 @@ export class HerdrProvisioner {
         ...(this.retainRegistrationFiles && tokenFile
           ? { tokenFilePath: tokenFile }
           : {}),
+        ...(promptFileIdentity ? { promptFileIdentity } : {}),
+        ...(tokenFileIdentity ? { tokenFileIdentity } : {}),
         paneId: typeof sr.pane_id === "string" ? sr.pane_id : paneId,
         ...(worktreeId ? { worktreeId } : {}),
         ...(worktreePath ? { worktreePath } : {}),
         ...(unusedTabId ? { unusedTabId } : {}),
       };
     } catch (error) {
-      if (prompt) await deletePromptFile(prompt).catch(() => undefined);
-      if (tokenFile) await deletePromptFile(tokenFile).catch(() => undefined);
+      if (prompt)
+        await deletePromptFile(prompt, promptFileIdentity).catch(
+          () => undefined,
+        );
+      if (tokenFile)
+        await deletePromptFile(tokenFile, tokenFileIdentity).catch(
+          () => undefined,
+        );
       // Herdr has no compare-and-remove operation. Retain every worktree;
       // removing a path after an await could delete a replacement worktree.
       if (
@@ -251,9 +269,20 @@ export class HerdrProvisioner {
       worktreePath?: string;
       tokenDigest?: string;
       generation?: number;
+      promptFileDev?: number;
+      promptFileIno?: number;
+      tokenFileDev?: number;
+      tokenFileIno?: number;
     },
   ): Promise<ProvisionResult | undefined> {
-    if (!resource.tokenDigest) return undefined;
+    if (
+      !resource.tokenDigest ||
+      resource.tokenFileDev === undefined ||
+      resource.tokenFileIno === undefined ||
+      resource.promptFileDev === undefined ||
+      resource.promptFileIno === undefined
+    )
+      return undefined;
     let names: string[];
     try {
       names = await readdir(this.promptRoot);
@@ -266,7 +295,22 @@ export class HerdrProvisioner {
     const promptName = names.find((name) =>
       name.startsWith(`.prompt-${agentId}-`),
     );
-    if (!tokenName) return undefined;
+    if (!tokenName || !promptName) return undefined;
+    const tokenPath = join(this.promptRoot, tokenName);
+    const promptPath = join(this.promptRoot, promptName);
+    try {
+      const tokenIdentity = await managedFileIdentity(tokenPath);
+      const promptIdentity = await managedFileIdentity(promptPath);
+      if (
+        tokenIdentity.dev !== resource.tokenFileDev ||
+        tokenIdentity.ino !== resource.tokenFileIno ||
+        promptIdentity.dev !== resource.promptFileDev ||
+        promptIdentity.ino !== resource.promptFileIno
+      )
+        return undefined;
+    } catch {
+      return undefined;
+    }
     return {
       name: agentId,
       token: {
@@ -278,13 +322,33 @@ export class HerdrProvisioner {
       ...(resource.tabId ? { tabId: resource.tabId } : {}),
       ...(resource.worktreeId ? { worktreeId: resource.worktreeId } : {}),
       ...(resource.worktreePath ? { worktreePath: resource.worktreePath } : {}),
-      tokenFilePath: join(this.promptRoot, tokenName),
-      ...(promptName ? { promptPath: join(this.promptRoot, promptName) } : {}),
+      tokenFilePath: tokenPath,
+      promptPath,
+      ...(resource.promptFileDev !== undefined &&
+      resource.promptFileIno !== undefined
+        ? {
+            promptFileIdentity: {
+              dev: resource.promptFileDev,
+              ino: resource.promptFileIno,
+            },
+          }
+        : {}),
+      ...(resource.tokenFileDev !== undefined &&
+      resource.tokenFileIno !== undefined
+        ? {
+            tokenFileIdentity: {
+              dev: resource.tokenFileDev,
+              ino: resource.tokenFileIno,
+            },
+          }
+        : {}),
     };
   }
   async cleanupRegistration(result: ProvisionResult): Promise<void> {
-    if (result.promptPath) await deletePromptFile(result.promptPath);
-    if (result.tokenFilePath) await deletePromptFile(result.tokenFilePath);
+    if (result.promptPath)
+      await deletePromptFile(result.promptPath, result.promptFileIdentity);
+    if (result.tokenFilePath)
+      await deletePromptFile(result.tokenFilePath, result.tokenFileIdentity);
   }
   async verifyRegistration(
     result: ProvisionResult,
@@ -301,7 +365,11 @@ export class HerdrProvisioner {
       !result.tokenFilePath ||
       (suppliedDigest !== undefined &&
         suppliedDigest !== result.token.digest) ||
-      !(await verifyManagedTokenFile(result.tokenFilePath, result.token.digest))
+      !(await verifyManagedTokenFile(
+        result.tokenFilePath,
+        result.token.digest,
+        result.tokenFileIdentity,
+      ))
     )
       throw new Error("HERDR_REGISTRATION_TOKEN_INVALID");
     if (
@@ -311,8 +379,9 @@ export class HerdrProvisioner {
     )
       throw new Error("HERDR_REGISTRATION_IDENTITY_MISMATCH");
     if (cleanup) {
-      if (result.promptPath) await deletePromptFile(result.promptPath);
-      await deletePromptFile(result.tokenFilePath);
+      if (result.promptPath)
+        await deletePromptFile(result.promptPath, result.promptFileIdentity);
+      await deletePromptFile(result.tokenFilePath, result.tokenFileIdentity);
     }
   }
 }

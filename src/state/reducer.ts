@@ -151,6 +151,18 @@ export function reduce(
           ...(typeof p.tokenDigest === "string"
             ? { tokenDigest: p.tokenDigest }
             : {}),
+          ...(Number.isSafeInteger(p.promptFileDev)
+            ? { promptFileDev: p.promptFileDev as number }
+            : {}),
+          ...(Number.isSafeInteger(p.promptFileIno)
+            ? { promptFileIno: p.promptFileIno as number }
+            : {}),
+          ...(Number.isSafeInteger(p.tokenFileDev)
+            ? { tokenFileDev: p.tokenFileDev as number }
+            : {}),
+          ...(Number.isSafeInteger(p.tokenFileIno)
+            ? { tokenFileIno: p.tokenFileIno as number }
+            : {}),
           ...(typeof p.registrationDeadline === "string"
             ? { registrationDeadline: p.registrationDeadline }
             : {}),

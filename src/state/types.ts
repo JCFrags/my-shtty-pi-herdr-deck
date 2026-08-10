@@ -106,6 +106,10 @@ export interface OrchestrationState {
       sessionId?: string;
       generation?: number;
       tokenDigest?: string;
+      promptFileDev?: number;
+      promptFileIno?: number;
+      tokenFileDev?: number;
+      tokenFileIno?: number;
       registrationDeadline?: string;
       cleanupOutcome?: string;
       dirty?: boolean;
