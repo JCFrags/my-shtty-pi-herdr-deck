@@ -21,28 +21,30 @@ export const PARENT_TOOL_NAMES = [
 
 export interface ParentToolMetadata {
   readonly method: string;
+  /** Exact input fields used to identify the authorized resource. */
+  readonly targetParameters: readonly string[];
   readonly requiresTarget: boolean;
   readonly requiresDelegation: boolean;
   readonly mutating: boolean;
 }
 
 const METADATA: Record<ParentToolName, ParentToolMetadata> = {
-  delegate: { method: "delegate", requiresTarget: false, requiresDelegation: true, mutating: true },
-  agent_spawn: { method: "agent.spawn", requiresTarget: false, requiresDelegation: false, mutating: true },
-  agent_list: { method: "agent.list", requiresTarget: false, requiresDelegation: false, mutating: false },
-  agent_get: { method: "agent.get", requiresTarget: true, requiresDelegation: false, mutating: false },
-  agent_prompt: { method: "agent.prompt", requiresTarget: true, requiresDelegation: false, mutating: true },
-  agent_steer: { method: "agent.steer", requiresTarget: true, requiresDelegation: false, mutating: true },
-  agent_wait: { method: "agent.wait", requiresTarget: true, requiresDelegation: false, mutating: false },
-  agent_result: { method: "agent.result", requiresTarget: true, requiresDelegation: false, mutating: false },
-  agent_answer: { method: "agent.answer", requiresTarget: true, requiresDelegation: false, mutating: true },
-  agent_interrupt: { method: "agent.interrupt", requiresTarget: true, requiresDelegation: false, mutating: true },
-  agent_stop: { method: "agent.stop", requiresTarget: true, requiresDelegation: false, mutating: true },
-  agent_close: { method: "agent.close", requiresTarget: true, requiresDelegation: false, mutating: true },
-  task_list: { method: "task.list", requiresTarget: false, requiresDelegation: false, mutating: false },
-  task_get: { method: "task.get", requiresTarget: true, requiresDelegation: false, mutating: false },
-  task_collect: { method: "task.collect", requiresTarget: true, requiresDelegation: false, mutating: false },
-  task_cancel: { method: "task.cancel", requiresTarget: true, requiresDelegation: false, mutating: true },
+  delegate: { method: "delegate.execute", targetParameters: [], requiresTarget: false, requiresDelegation: true, mutating: true },
+  agent_spawn: { method: "agent.spawn", targetParameters: [], requiresTarget: false, requiresDelegation: false, mutating: true },
+  agent_list: { method: "agent.list", targetParameters: [], requiresTarget: false, requiresDelegation: false, mutating: false },
+  agent_get: { method: "agent.get", targetParameters: ["agentId"], requiresTarget: true, requiresDelegation: false, mutating: false },
+  agent_prompt: { method: "agent.prompt", targetParameters: ["agentId"], requiresTarget: true, requiresDelegation: false, mutating: true },
+  agent_steer: { method: "agent.steer", targetParameters: ["agentId"], requiresTarget: true, requiresDelegation: false, mutating: true },
+  agent_wait: { method: "agent.wait", targetParameters: ["agentId", "taskId", "runId"], requiresTarget: true, requiresDelegation: false, mutating: false },
+  agent_result: { method: "result.get", targetParameters: ["taskId"], requiresTarget: true, requiresDelegation: false, mutating: false },
+  agent_answer: { method: "question.answer", targetParameters: ["questionId"], requiresTarget: true, requiresDelegation: false, mutating: true },
+  agent_interrupt: { method: "agent.interrupt", targetParameters: ["agentId"], requiresTarget: true, requiresDelegation: false, mutating: true },
+  agent_stop: { method: "agent.stop", targetParameters: ["agentId"], requiresTarget: true, requiresDelegation: false, mutating: true },
+  agent_close: { method: "agent.close", targetParameters: ["agentId"], requiresTarget: true, requiresDelegation: false, mutating: true },
+  task_list: { method: "task.list", targetParameters: [], requiresTarget: false, requiresDelegation: false, mutating: false },
+  task_get: { method: "task.get", targetParameters: ["taskId"], requiresTarget: true, requiresDelegation: false, mutating: false },
+  task_collect: { method: "task.collect", targetParameters: ["taskIds"], requiresTarget: true, requiresDelegation: false, mutating: false },
+  task_cancel: { method: "task.cancel", targetParameters: ["taskId"], requiresTarget: true, requiresDelegation: false, mutating: true },
 };
 
 export const PARENT_TOOL_METADATA: Readonly<Record<ParentToolName, ParentToolMetadata>> = Object.freeze(METADATA);

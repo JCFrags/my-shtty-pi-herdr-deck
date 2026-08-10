@@ -9,8 +9,14 @@ import {
 
 test("parent tool metadata converges names to broker methods", () => {
   assert.equal(parentToolMethod("agent_get"), "agent.get");
-  assert.equal(parentToolMethod("delegate"), "delegate");
-  assert.equal(PARENT_TOOL_METADATA.agent_get.requiresTarget, true);
+  assert.equal(parentToolMethod("delegate"), "delegate.execute");
+  assert.equal(parentToolMethod("agent_result"), "result.get");
+  assert.equal(parentToolMethod("agent_answer"), "question.answer");
+  assert.deepEqual(PARENT_TOOL_METADATA.agent_get.targetParameters, ["agentId"]);
+  assert.deepEqual(PARENT_TOOL_METADATA.agent_wait.targetParameters, ["agentId", "taskId", "runId"]);
+  assert.deepEqual(PARENT_TOOL_METADATA.agent_result.targetParameters, ["taskId"]);
+  assert.deepEqual(PARENT_TOOL_METADATA.agent_answer.targetParameters, ["questionId"]);
+  assert.deepEqual(PARENT_TOOL_METADATA.task_collect.targetParameters, ["taskIds"]);
   assert.equal(PARENT_TOOL_METADATA.agent_list.requiresTarget, false);
   assert.equal(PARENT_TOOL_METADATA.delegate.requiresDelegation, true);
 });
