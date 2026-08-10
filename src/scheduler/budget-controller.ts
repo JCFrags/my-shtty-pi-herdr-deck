@@ -29,9 +29,10 @@ export function graceExpired(graceStartedAtMs: number | undefined, nowMs: number
 
 export function selectTerminalOutcome(
   action: BudgetAction,
-  currentOutcome: BudgetTerminalOutcome,
-): BudgetTerminalOutcome {
-  return action === "graceful_stop" || action === "force_stop" ? "timed_out" : currentOutcome;
+  currentOutcome: BudgetTerminalOutcome | undefined,
+): BudgetTerminalOutcome | undefined {
+  if (currentOutcome !== undefined) return currentOutcome;
+  return action === "force_stop" ? "timed_out" : undefined;
 }
 
 export class BudgetController {
@@ -72,7 +73,10 @@ export class BudgetController {
     this.state = { ...this.state, warningSent: true };
   }
 
-  public terminalOutcome(currentOutcome: BudgetTerminalOutcome, snapshot: BudgetControllerSnapshot): BudgetTerminalOutcome {
+  public terminalOutcome(
+    currentOutcome: BudgetTerminalOutcome | undefined,
+    snapshot: BudgetControllerSnapshot,
+  ): BudgetTerminalOutcome | undefined {
     return selectTerminalOutcome(snapshot.action, currentOutcome);
   }
 
