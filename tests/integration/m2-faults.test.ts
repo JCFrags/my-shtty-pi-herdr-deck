@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createConnection, type Socket } from "node:net";
 import { chmod, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +11,8 @@ import { HerdrProvisioner } from "../../src/herdr/provisioner.js";
 import { HerdrService } from "../../src/herdr/service.js";
 import { createId } from "../../src/shared/ids.js";
 import { EventStore } from "../../src/state/event-store.js";
+import { Broker } from "../../src/broker/broker.js";
+import { sessionKey } from "../../src/shared/paths.js";
 
 const methods = [
   "tab.create",
@@ -52,6 +55,7 @@ if (command === "worktree create") {
 } else if (command === "agent start") {
   writeFileSync(path, JSON.stringify(state)); console.log(JSON.stringify({ pane_id: args[6] }));
 } else if (command === "session snapshot") {
+  writeFileSync(path, JSON.stringify(state));
   console.log(JSON.stringify({ panes: [], tabs: [], workspaces: [], agents: [], worktrees: [] }));
 } else { writeFileSync(path, JSON.stringify(state)); console.log(JSON.stringify({})); }
 `;
@@ -137,6 +141,164 @@ test("M2 fake stack persists provisioning and compensates the unused initial tab
     else process.env.HERDR_CONFIG_PATH = oldConfig;
   }
 });
+
+test("M2 authenticated broker routing drives production Herdr service and startup reconciliation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-herdr-m2-broker-"));
+  const cliPath = join(root, "fake-herdr.mjs");
+  const statePath = join(root, "fake-state.json");
+  await writeFile(cliPath, fakeHerdrScript());
+  await chmod(cliPath, 0o755);
+  await writeFile(
+    statePath,
+    JSON.stringify({ calls: [], tabs: [], panes: [], worktrees: [], next: 1 }),
+  );
+  const oldConfig = process.env.HERDR_CONFIG_PATH;
+  process.env.HERDR_CONFIG_PATH = statePath;
+  const paths = {
+    root,
+    runtime: join(root, "runtime"),
+    events: join(root, "events.ndjson"),
+    snapshot: join(root, "snapshot.json"),
+    lock: join(root, "broker.lock"),
+    socket: join(root, "broker.sock"),
+    secret: join(root, "secret"),
+  };
+  const cli = new HerdrCli(
+    new HerdrProcessRunner({ binary: cliPath }),
+    fakeCapabilities(),
+  );
+  const broker = new Broker(paths, {
+    herdrFactory: async (store) =>
+      new HerdrService({
+        store,
+        cli,
+        provisioner: new HerdrProvisioner(cli, join(root, "prompts")),
+      }),
+  });
+  try {
+    await broker.start();
+    const hello = await brokerRequestForTest(
+      broker,
+      "hello",
+      "system.ping",
+      {},
+    );
+    assert.equal(hello.ok, true, JSON.stringify(hello));
+    const agentId = createId("agt");
+    const response = await brokerRequestForTest(
+      broker,
+      "provision",
+      "herdr.provision",
+      {
+        agentId,
+        parentAgentId: createId("agt"),
+        role: "worker",
+        workspaceId: "workspace-1",
+        cwd: "/fake/project",
+        profileId: "test-runner",
+        isolation: "shared-readonly",
+        prompt: "broker-routed fake prompt",
+      },
+    );
+    assert.equal(
+      response.ok,
+      true,
+      JSON.stringify({ response, verify: broker.store.verify() }),
+    );
+    const result = response.result as Record<string, unknown>;
+    assert.equal(typeof result.tokenDigest, "string");
+    assert.equal("token" in result, false);
+    const status = await brokerRequestForTest(
+      broker,
+      "status",
+      "herdr.status",
+      {},
+    );
+    assert.equal(status.ok, true);
+    const reconciled = await brokerRequestForTest(
+      broker,
+      "reconcile",
+      "herdr.reconcile",
+      {},
+    );
+    assert.equal(reconciled.ok, true);
+    const state = JSON.parse(await readFile(statePath, "utf8")) as {
+      calls: string[][];
+    };
+    assert.ok(
+      state.calls.some((args) => args.join(" ").startsWith("session snapshot")),
+    );
+  } finally {
+    await broker.stop().catch(() => undefined);
+    if (oldConfig === undefined) delete process.env.HERDR_CONFIG_PATH;
+    else process.env.HERDR_CONFIG_PATH = oldConfig;
+  }
+});
+
+async function brokerRequestForTest(
+  broker: Broker,
+  id: string,
+  method: string,
+  params: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const socket = createConnection(broker.paths.socket);
+  let buffer = "";
+  const frames: Record<string, unknown>[] = [];
+  const next = (predicate: (frame: Record<string, unknown>) => boolean) =>
+    new Promise<Record<string, unknown>>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error(`broker test response timeout: ${id}`)),
+        2_000,
+      );
+      const check = () => {
+        const found = frames.find(predicate);
+        if (found) {
+          clearTimeout(timer);
+          resolve(found);
+        }
+      };
+      (socket as Socket & { __check?: () => void }).__check = check;
+      check();
+    });
+  socket.on("data", (data) => {
+    buffer += data.toString("utf8");
+    let at = buffer.indexOf("\n");
+    while (at >= 0) {
+      frames.push(JSON.parse(buffer.slice(0, at)) as Record<string, unknown>);
+      buffer = buffer.slice(at + 1);
+      at = buffer.indexOf("\n");
+    }
+    (socket as Socket & { __check?: () => void }).__check?.();
+  });
+  await new Promise<void>((resolve, reject) => {
+    socket.once("connect", resolve);
+    socket.once("error", reject);
+  });
+  socket.write(
+    JSON.stringify({
+      v: 1,
+      type: "hello",
+      id: id + "-hello",
+      client: {
+        kind: "cli",
+        name: "m2-test",
+        version: "0.1.0",
+        capabilities: [],
+      },
+      sessionKey: sessionKey(broker.paths.socket),
+      auth: { kind: "client_secret", secret: broker.secret },
+    }) + "\n",
+  );
+  await next((frame) => frame.type === "hello_result" && frame.ok === true);
+  socket.write(
+    JSON.stringify({ v: 1, type: "request", id, method, params }) + "\n",
+  );
+  const response = await next(
+    (frame) => frame.type === "response" && frame.id === id,
+  );
+  socket.destroy();
+  return response;
+}
 
 test("M2 fake stack leaves no resources at each creation fault boundary", async () => {
   for (const fail of [

@@ -35,6 +35,7 @@ import {
 import { OrchestratorError } from "../shared/errors.js";
 import { assertInvariants } from "../state/invariants.js";
 import { SnapshotStore } from "../state/snapshot-store.js";
+import type { HerdrService } from "../herdr/service.js";
 interface SubscriptionFilter {
   events?: string[];
   agentIds?: string[];
@@ -56,6 +57,14 @@ function exactKeys(
   allowed: readonly string[],
 ): boolean {
   return Object.keys(value).every((key) => allowed.includes(key));
+}
+function safeText(value: unknown, max = 4096): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= max &&
+    !/[\u0000-\u001f\u007f]/u.test(value)
+  );
 }
 function subscriptionId(): string {
   return `sub_${createId("evt").slice(4)}`;
@@ -195,6 +204,13 @@ export function sessionKeyMatches(
 ): boolean {
   return sessionKey(expectedSocket) === received;
 }
+export interface BrokerOptions {
+  herdr?: HerdrService;
+  herdrFactory?: (
+    store: EventStore,
+    paths: ResolvedPaths,
+  ) => Promise<HerdrService>;
+}
 export class Broker {
   readonly store: EventStore;
   readonly snapshotStore: SnapshotStore;
@@ -205,12 +221,22 @@ export class Broker {
   #lock: BrokerLock;
   #secret: string;
   #clients = new Set<Client>();
-  constructor(paths: ResolvedPaths) {
+  #herdr?: HerdrService;
+  readonly #herdrFactory:
+    | ((store: EventStore, paths: ResolvedPaths) => Promise<HerdrService>)
+    | undefined;
+  constructor(paths: ResolvedPaths, options: BrokerOptions = {}) {
     this.paths = paths;
     this.#lock = new BrokerLock(paths.lock, paths.socket);
     this.#secret = "";
     this.store = new EventStore(paths.events);
     this.snapshotStore = new SnapshotStore(paths.snapshot);
+    if (options.herdr) {
+      if (options.herdr.store !== this.store)
+        throw new Error("Herdr service must use the broker-owned event store.");
+      this.#herdr = options.herdr;
+    }
+    this.#herdrFactory = options.herdrFactory;
   }
   async readSnapshot(): Promise<
     import("../state/snapshot-store.js").Snapshot | undefined
@@ -236,6 +262,9 @@ export class Broker {
           return undefined;
         });
       await this.store.open(snapshot);
+      if (this.#herdrFactory)
+        this.#herdr = await this.#herdrFactory(this.store, this.paths);
+      if (this.#herdr) await this.#herdr.startupReconcile();
       this.#server = createServer((socket) => this.#connect(socket));
       await new Promise<void>((resolve, reject) =>
         this.#server
@@ -508,6 +537,118 @@ export class Broker {
           lastEventSeq: this.store.state.lastEventSeq,
           corruption: this.store.corruption,
         };
+      } else if (request.method === "herdr.status") {
+        requirePermission(principal, "read:state");
+        if (Object.keys(request.params).length || !this.#herdr)
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Herdr status parameters are invalid.",
+          );
+        result = { resources: this.#herdr.resources };
+      } else if (request.method === "herdr.reconcile") {
+        requirePermission(principal, "repair");
+        if (Object.keys(request.params).length || !this.#herdr)
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Herdr reconcile parameters are invalid.",
+          );
+        result = await this.#herdr.startupReconcile();
+      } else if (request.method === "herdr.provision") {
+        requirePermission(principal, "delegate");
+        if (
+          !this.#herdr ||
+          !exactKeys(request.params, [
+            "agentId",
+            "parentAgentId",
+            "role",
+            "workspaceId",
+            "cwd",
+            "profileId",
+            "isolation",
+            "prompt",
+            "projectBase",
+            "branch",
+            "env",
+          ])
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Herdr provisioning parameters are invalid.",
+          );
+        const p = request.params;
+        const required = [
+          "agentId",
+          "parentAgentId",
+          "role",
+          "workspaceId",
+          "cwd",
+          "profileId",
+          "isolation",
+          "prompt",
+        ];
+        if (
+          !required.every((key) => safeText(p[key])) ||
+          (p.isolation !== "shared-readonly" && p.isolation !== "worktree") ||
+          (p.env !== undefined &&
+            (!p.env ||
+              typeof p.env !== "object" ||
+              Array.isArray(p.env) ||
+              !Object.entries(p.env).every(
+                ([key, value]) => safeText(key, 128) && safeText(value, 4096),
+              ))) ||
+          (p.projectBase !== undefined && !safeText(p.projectBase)) ||
+          (p.branch !== undefined && !safeText(p.branch))
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Herdr provisioning parameters are invalid.",
+          );
+        const provisioned = await this.#herdr.provision(p as never);
+        result = {
+          name: provisioned.name,
+          generation: provisioned.token.generation,
+          tokenDigest: provisioned.token.digest,
+          ...(provisioned.tabId ? { tabId: provisioned.tabId } : {}),
+          ...(provisioned.paneId ? { paneId: provisioned.paneId } : {}),
+          ...(provisioned.worktreeId
+            ? { worktreeId: provisioned.worktreeId }
+            : {}),
+          ...(provisioned.worktreePath
+            ? { worktreePath: provisioned.worktreePath }
+            : {}),
+        };
+      } else if (
+        request.method === "herdr.focus" ||
+        request.method === "herdr.interrupt" ||
+        request.method === "herdr.close"
+      ) {
+        requirePermission(principal, "manage:all");
+        if (
+          !this.#herdr ||
+          !exactKeys(request.params, [
+            "paneId",
+            "terminalId",
+            "sessionId",
+            "generation",
+          ]) ||
+          !safeText(request.params.paneId, 256) ||
+          (request.params.terminalId !== undefined &&
+            !safeText(request.params.terminalId, 256)) ||
+          (request.params.sessionId !== undefined &&
+            !safeText(request.params.sessionId, 256)) ||
+          (request.params.generation !== undefined &&
+            !Number.isSafeInteger(request.params.generation))
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Herdr occupant guard is invalid.",
+          );
+        const guard = request.params as never;
+        if (request.method === "herdr.focus") await this.#herdr.focus(guard);
+        else if (request.method === "herdr.interrupt")
+          await this.#herdr.interrupt(guard);
+        else await this.#herdr.close(guard);
+        result = { ok: true };
       } else if (request.method === "events.verify") {
         requirePermission(principal, "read:audit");
         if (Object.keys(request.params).length)

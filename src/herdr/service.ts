@@ -7,7 +7,12 @@ import {
   type ProvisionResult,
 } from "./provisioner.js";
 import type { HerdrSnapshot } from "./types.js";
-import type { HerdrCli } from "./cli.js";
+import { HerdrCli } from "./cli.js";
+import { focus, interrupt, close, type OccupantGuard } from "./controls.js";
+import { HerdrProcessRunner } from "./runner.js";
+import { projectCapabilities } from "./capabilities.js";
+import { join } from "node:path";
+import type { ResolvedPaths } from "../shared/paths.js";
 export interface HerdrServiceOptions {
   store: EventStore;
   cli: HerdrCli;
@@ -25,6 +30,9 @@ export class HerdrService {
     this.#cli = options.cli;
     this.#provisioner = options.provisioner;
     this.#actor = options.actor ?? actor;
+  }
+  get store(): EventStore {
+    return this.#store;
   }
   get resources() {
     return this.#store.state.herdrResources ?? {};
@@ -122,4 +130,31 @@ export class HerdrService {
   async startupReconcile(): Promise<Reconciliation[]> {
     return this.reconcile();
   }
+  async focus(guard: OccupantGuard): Promise<void> {
+    await focus(this.#cli, () => this.#cli.snapshot(), guard);
+  }
+  async interrupt(guard: OccupantGuard): Promise<void> {
+    await interrupt(this.#cli, () => this.#cli.snapshot(), guard);
+  }
+  async close(guard: OccupantGuard): Promise<void> {
+    await close(this.#cli, () => this.#cli.snapshot(), guard);
+  }
+}
+
+export async function createProductionHerdrService(
+  store: EventStore,
+  paths: ResolvedPaths,
+  binary = process.env.HERDR_BIN_PATH,
+): Promise<HerdrService> {
+  if (!binary)
+    throw new Error("HERDR_UNAVAILABLE: HERDR_BIN_PATH is not configured.");
+  const runner = new HerdrProcessRunner({ binary });
+  const schema = await runner.json(["api", "schema", "--json"]);
+  const capabilities = projectCapabilities(schema, binary);
+  const cli = new HerdrCli(runner, capabilities);
+  return new HerdrService({
+    store,
+    cli,
+    provisioner: new HerdrProvisioner(cli, join(paths.root, "prompts")),
+  });
 }
