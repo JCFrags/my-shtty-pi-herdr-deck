@@ -1,0 +1,91 @@
+import type { ParentToolName, ParentToolRequest } from "./parent-tools.js";
+
+export const PARENT_TOOL_NAMES = [
+  "delegate",
+  "agent_spawn",
+  "agent_list",
+  "agent_get",
+  "agent_prompt",
+  "agent_steer",
+  "agent_wait",
+  "agent_result",
+  "agent_answer",
+  "agent_interrupt",
+  "agent_stop",
+  "agent_close",
+  "task_list",
+  "task_get",
+  "task_collect",
+  "task_cancel",
+] as const satisfies readonly ParentToolName[];
+
+export interface ParentToolMetadata {
+  readonly method: string;
+  readonly requiresTarget: boolean;
+  readonly requiresDelegation: boolean;
+  readonly mutating: boolean;
+}
+
+const METADATA: Record<ParentToolName, ParentToolMetadata> = {
+  delegate: { method: "delegate", requiresTarget: false, requiresDelegation: true, mutating: true },
+  agent_spawn: { method: "agent.spawn", requiresTarget: false, requiresDelegation: false, mutating: true },
+  agent_list: { method: "agent.list", requiresTarget: false, requiresDelegation: false, mutating: false },
+  agent_get: { method: "agent.get", requiresTarget: true, requiresDelegation: false, mutating: false },
+  agent_prompt: { method: "agent.prompt", requiresTarget: true, requiresDelegation: false, mutating: true },
+  agent_steer: { method: "agent.steer", requiresTarget: true, requiresDelegation: false, mutating: true },
+  agent_wait: { method: "agent.wait", requiresTarget: true, requiresDelegation: false, mutating: false },
+  agent_result: { method: "agent.result", requiresTarget: true, requiresDelegation: false, mutating: false },
+  agent_answer: { method: "agent.answer", requiresTarget: true, requiresDelegation: false, mutating: true },
+  agent_interrupt: { method: "agent.interrupt", requiresTarget: true, requiresDelegation: false, mutating: true },
+  agent_stop: { method: "agent.stop", requiresTarget: true, requiresDelegation: false, mutating: true },
+  agent_close: { method: "agent.close", requiresTarget: true, requiresDelegation: false, mutating: true },
+  task_list: { method: "task.list", requiresTarget: false, requiresDelegation: false, mutating: false },
+  task_get: { method: "task.get", requiresTarget: true, requiresDelegation: false, mutating: false },
+  task_collect: { method: "task.collect", requiresTarget: true, requiresDelegation: false, mutating: false },
+  task_cancel: { method: "task.cancel", requiresTarget: true, requiresDelegation: false, mutating: true },
+};
+
+export const PARENT_TOOL_METADATA: Readonly<Record<ParentToolName, ParentToolMetadata>> = Object.freeze(METADATA);
+
+export function parentToolMetadata(tool: ParentToolName): ParentToolMetadata {
+  return PARENT_TOOL_METADATA[tool];
+}
+
+export function parentToolMethod(tool: ParentToolName): string {
+  return parentToolMetadata(tool).method;
+}
+
+export interface ParentToolValidationIssue {
+  readonly path: string;
+  readonly message: string;
+}
+
+export type ParentToolValidation =
+  | { readonly valid: true; readonly request: ParentToolRequest; readonly issues: readonly [] }
+  | { readonly valid: false; readonly issues: readonly ParentToolValidationIssue[] };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function validateParentToolRequest(value: unknown): ParentToolValidation {
+  const issues: ParentToolValidationIssue[] = [];
+  if (!isRecord(value)) return { valid: false, issues: [{ path: "$", message: "Request must be an object." }] };
+
+  const keys = Object.keys(value);
+  for (const key of keys) {
+    if (key !== "tool" && key !== "input" && key !== "idempotencyKey") issues.push({ path: `$.${key}`, message: "Unknown property." });
+  }
+  if (!PARENT_TOOL_NAMES.includes(value.tool as ParentToolName)) issues.push({ path: "$.tool", message: "Tool name is not supported." });
+  if (!isRecord(value.input)) issues.push({ path: "$.input", message: "Input must be an object." });
+  else if (Object.keys(value.input).length > 32) issues.push({ path: "$.input", message: "Input has more than 32 properties." });
+  if (value.idempotencyKey !== undefined && (typeof value.idempotencyKey !== "string" || value.idempotencyKey.length < 1 || value.idempotencyKey.length > 256)) {
+    issues.push({ path: "$.idempotencyKey", message: "Idempotency key must contain 1 to 256 characters." });
+  }
+  if (issues.length > 0) return { valid: false, issues };
+  return { valid: true, request: value as unknown as ParentToolRequest, issues: [] };
+}
+
+export function isParentToolRequest(value: unknown): value is ParentToolRequest {
+  return validateParentToolRequest(value).valid;
+}
