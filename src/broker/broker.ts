@@ -397,8 +397,19 @@ export class Broker {
           return undefined;
         });
       await this.store.open(snapshot);
-      for (const question of Object.values(this.store.state.questions ?? {}))
-        if (question.state === "open") this.#scheduleQuestionTimeout(question);
+      for (const question of Object.values(this.store.state.questions ?? {})) {
+        if (question.state !== "open") continue;
+        const payload = question.payload as { timeoutMs?: unknown } | undefined;
+        const timeoutMs =
+          typeof payload?.timeoutMs === "number" &&
+          Number.isSafeInteger(payload.timeoutMs)
+            ? payload.timeoutMs
+            : 300_000;
+        const askedAt = question.askedAt ? Date.parse(question.askedAt) : NaN;
+        if (Number.isFinite(askedAt) && askedAt + timeoutMs <= Date.now())
+          await this.#terminalizeQuestionTimeout(question.id);
+        else this.#scheduleQuestionTimeout(question);
+      }
       if (this.#herdrFactory)
         this.#herdr = await this.#herdrFactory(this.store, this.paths);
       if (this.#herdr) await this.#herdr.startupReconcile();
@@ -487,6 +498,8 @@ export class Broker {
           },
         );
     } finally {
+      for (const timer of this.#questionTimers.values()) clearTimeout(timer);
+      this.#questionTimers.clear();
       try {
         await this.#lock.release();
       } catch (error) {
@@ -2234,22 +2247,36 @@ export class Broker {
             "Answer fields are invalid.",
           );
         if (
-          answer.optionId !== undefined &&
-          !body?.options.some((o) => o.id === answer.optionId)
+          (answer.optionId !== undefined &&
+            typeof answer.optionId !== "string") ||
+          (answer.text !== undefined &&
+            answer.text !== null &&
+            typeof answer.text !== "string") ||
+          (typeof answer.text === "string" &&
+            (answer.text.length === 0 ||
+              answer.text.length > 16_384 ||
+              /[\\u0000-\\u001f\\u007f]/u.test(answer.text)))
         )
           throw new OrchestratorError(
             "INVALID_REQUEST",
-            "Answer option is not present.",
+            "Answer value types are invalid.",
+          );
+        if (
+          answer.optionId !== undefined &&
+          (!body?.options.some((o) => o.id === answer.optionId) ||
+            (answer.text !== undefined && answer.text !== null))
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Answer option is not present or has text.",
           );
         if (
           answer.optionId === undefined &&
-          (!body?.allowFreeform ||
-            typeof answer.text !== "string" ||
-            answer.text.length > 16_384)
+          (!body?.allowFreeform || typeof answer.text !== "string")
         )
           throw new OrchestratorError(
             "INVALID_REQUEST",
-            "Free-form answer is not allowed or is invalid.",
+            "Free-form answer is not allowed or is missing text.",
           );
         const run = this.store.state.runs[question.runId];
         if (
@@ -3457,47 +3484,56 @@ export class Broker {
   async #canAccessTask(principal: Principal, taskId: string): Promise<boolean> {
     return this.#canAccessTaskSync(principal, taskId);
   }
+  async #terminalizeQuestionTimeout(questionId: string): Promise<void> {
+    const current = this.store.state.questions?.[questionId];
+    if (!current || current.state !== "open") return;
+    const actor = {
+      principalId: "prn_00000000000000000000000000",
+      kind: "system" as const,
+    };
+    await this.store.append({
+      type: "question.timed_out",
+      actor,
+      entityRefs: {
+        questionId: current.id,
+        taskId: current.taskId,
+        runId: current.runId,
+      },
+      payload: { questionId: current.id },
+    });
+    await this.store.append({
+      type: "run.state_changed",
+      actor,
+      entityRefs: { runId: current.runId, taskId: current.taskId },
+      payload: { runId: current.runId, state: "failed" },
+    });
+    await this.#deferQuestionDelivery(
+      this.store.state.questions?.[current.id] ?? current,
+      "timed_out",
+    )();
+  }
   #scheduleQuestionTimeout(question: QuestionRecord): void {
-    if (this.#questionTimers.has(question.id)) return;
+    if (question.state !== "open" || this.#questionTimers.has(question.id))
+      return;
     const payload = question.payload as { timeoutMs?: unknown } | undefined;
     const timeoutMs =
       typeof payload?.timeoutMs === "number" &&
       Number.isSafeInteger(payload.timeoutMs)
         ? payload.timeoutMs
         : 300_000;
-    const timer = setTimeout(() => {
-      this.#questionTimers.delete(question.id);
-      void (async () => {
-        const current = this.store.state.questions?.[question.id];
-        if (!current || current.state !== "open") return;
-        await this.store.append({
-          type: "question.timed_out",
-          actor: {
-            principalId: "prn_00000000000000000000000000",
-            kind: "system",
-          },
-          entityRefs: {
-            questionId: current.id,
-            taskId: current.taskId,
-            runId: current.runId,
-          },
-          payload: { questionId: current.id },
-        });
-        await this.store.append({
-          type: "run.state_changed",
-          actor: {
-            principalId: "prn_00000000000000000000000000",
-            kind: "system",
-          },
-          entityRefs: { runId: current.runId, taskId: current.taskId },
-          payload: { runId: current.runId, state: "failed" },
-        });
-        await this.#deferQuestionDelivery(
-          this.store.state.questions?.[current.id] ?? current,
-          "timed_out",
-        )();
-      })().catch(() => undefined);
-    }, timeoutMs);
+    const askedAt = question.askedAt ? Date.parse(question.askedAt) : NaN;
+    const deadline = Number.isFinite(askedAt)
+      ? askedAt + timeoutMs
+      : Date.now() + timeoutMs;
+    const timer = setTimeout(
+      () => {
+        this.#questionTimers.delete(question.id);
+        void this.#terminalizeQuestionTimeout(question.id).catch(
+          () => undefined,
+        );
+      },
+      Math.max(0, deadline - Date.now()),
+    );
     timer.unref();
     this.#questionTimers.set(question.id, timer);
   }
@@ -3513,6 +3549,20 @@ export class Broker {
         this.#questionTimers.delete(question.id);
       }
       const agent = this.store.state.agents[question.agentId];
+      const assignmentGeneration = question.assignmentGeneration;
+      const run = this.store.state.runs[question.runId];
+      if (
+        assignmentGeneration === undefined ||
+        !agent ||
+        !run ||
+        run.agentId !== question.agentId ||
+        run.assignmentGeneration !== assignmentGeneration ||
+        agent.currentRunId !== question.runId ||
+        agent.currentAssignmentGeneration !== assignmentGeneration
+      ) {
+        this.#queueAudit("question_terminal_delivery_stale");
+        return;
+      }
       const connected = [...this.#clients].some(
         (item) =>
           item.principal?.kind === "pi_child" &&
@@ -3535,6 +3585,7 @@ export class Broker {
             ? { connectionGeneration: agent.connectionGeneration }
             : {}),
           ...(agent.piSessionId ? { piSessionId: agent.piSessionId } : {}),
+          assignmentGeneration,
           runId: question.runId,
         },
       );

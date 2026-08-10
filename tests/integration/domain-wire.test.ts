@@ -205,6 +205,24 @@ test("broker domain wire persists correlated result, question, workflow, and rep
       }),
     );
     const operator = await connect(paths, secret, "human");
+    assert.equal(
+      (
+        await request(operator, "question.answer", {
+          questionId: opened.questionId,
+          answer: { optionId: null },
+        })
+      ).ok,
+      false,
+    );
+    assert.equal(
+      (
+        await request(operator, "question.answer", {
+          questionId: opened.questionId,
+          answer: { optionId: "yes", text: "wrong" },
+        })
+      ).ok,
+      false,
+    );
     resultOf(
       await request(operator, "question.answer", {
         questionId: opened.questionId,
@@ -246,6 +264,133 @@ test("broker domain wire persists correlated result, question, workflow, and rep
     socket.destroy();
     await restarted.stop();
   } finally {
+    await broker.stop().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+    await rm(runtime, { recursive: true, force: true });
+  }
+});
+
+test("production broker restarts an open question from its durable absolute deadline", async () => {
+  const root = await mkdtemp(join(tmpdir(), "domain-question-timeout-"));
+  const runtime = await mkdtemp(
+    join(tmpdir(), "domain-question-timeout-runtime-"),
+  );
+  const paths = {
+    ...resolvePaths(join(runtime, "herdr.sock")),
+    root,
+    runtime,
+    events: join(root, "events.jsonl"),
+    snapshot: join(root, "snapshot.json"),
+    lock: join(runtime, "lock"),
+    socket: join(runtime, "broker.sock"),
+    secret: join(runtime, "secret"),
+  };
+  const makeBroker = () =>
+    new Broker(paths, {
+      herdrFactory: async (store) =>
+        ({
+          store,
+          startupReconcile: async () => [],
+          verifyRoot: async (identity: any) => ({
+            paneId: identity.paneId,
+            terminalId: identity.terminalId,
+            workspaceId: "w",
+            cwd: "/fake",
+          }),
+        }) as any,
+    });
+  let broker = makeBroker();
+  await broker.start();
+  let socket: Socket | undefined;
+  try {
+    const secret = (await readFile(paths.secret, "utf8")).trim();
+    socket = await connect(paths, secret);
+    const registered = resultOf(
+      await request(socket, "agent.register_adopted", {
+        adapterVersion: "0.1.0",
+        herdr: {
+          paneId: "pane-timeout",
+          terminalId: "terminal-timeout",
+          detectedKind: "pi",
+          name: "timeout",
+        },
+        pi: {
+          sessionId: "session-timeout",
+          sessionName: "timeout",
+          capabilities: {},
+          state: {},
+        },
+      }),
+    );
+    const workflow = resultOf(
+      await request(socket, "workflow.create", {
+        objective: "timeout",
+        parentAgentId: registered.agentId,
+        definition: {
+          version: 1,
+          id: "timeout",
+          name: "Timeout",
+          description: "timeout",
+          mode: "single",
+          failureMode: "collect_all",
+          maxCorrectionLoops: 0,
+          steps: [
+            {
+              key: "one",
+              profileId: "scout",
+              title: "One",
+              objectiveTemplate: "{{input.objective}}",
+              constraints: [],
+              dependsOn: [],
+              resultProjection: [],
+              isolationMode: "shared-readonly",
+            },
+          ],
+        },
+      }),
+    );
+    const taskId = workflow.tasks[0].taskId;
+    const run = resultOf(
+      await request(socket, "run.create", {
+        taskId,
+        agentId: registered.agentId,
+        assignmentGeneration: 1,
+      }),
+    );
+    const opened = resultOf(
+      await request(socket, "question.open", {
+        agentId: registered.agentId,
+        taskId,
+        runId: run.runId,
+        assignmentGeneration: 1,
+        toolCallId: "tool-timeout",
+        question: { ...question, timeoutMs: 10_000 },
+      }),
+    );
+    assert.equal(
+      broker.store.state.questions![opened.questionId]!.state,
+      "open",
+    );
+    socket.destroy();
+    socket = undefined;
+    const beforeStopSeq = broker.store.state.lastEventSeq;
+    await broker.stop();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(broker.store.state.lastEventSeq, beforeStopSeq);
+    broker = makeBroker();
+    await broker.start();
+    assert.equal(
+      broker.store.state.questions![opened.questionId]!.state,
+      "open",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10_100));
+    assert.equal(
+      broker.store.state.questions![opened.questionId]!.state,
+      "timed_out",
+    );
+    assert.equal(broker.store.state.runs[run.runId]!.state, "failed");
+  } finally {
+    socket?.destroy();
     await broker.stop().catch(() => undefined);
     await rm(root, { recursive: true, force: true });
     await rm(runtime, { recursive: true, force: true });

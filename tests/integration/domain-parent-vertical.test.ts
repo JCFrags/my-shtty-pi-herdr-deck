@@ -381,6 +381,11 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
     const runId = spawned.tasks[0].runId;
     const assignmentId = spawned.tasks[0].assignmentId;
     const token = fake.tokens.get(childId)!;
+    let deliveryFrame: Frame | undefined;
+    let resolveDelivery!: () => void;
+    const deliverySeen = new Promise<void>((resolve) => {
+      resolveDelivery = resolve;
+    });
     const child = await connect(
       paths,
       {
@@ -392,6 +397,35 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
       },
       "pi_child",
       (frame, socket) => {
+        if (frame.method === "question.deliver_answer") {
+          deliveryFrame = frame;
+          assert.deepEqual(Object.keys(frame.params).sort(), [
+            "answer",
+            "expected",
+            "questionId",
+            "runId",
+            "state",
+            "toolCallId",
+          ]);
+          assert.equal(frame.params.state, "answered");
+          assert.equal(
+            broker.store.state.questions?.[frame.params.questionId]?.state,
+            "answered",
+          );
+          assert.equal(frame.params.toolCallId, "tool-question-vertical");
+          assert.equal(frame.params.expected.assignmentGeneration, 1);
+          socket.write(
+            encodeFrame({
+              v: 1,
+              type: "server_response",
+              id: frame.id,
+              ok: true,
+              result: { accepted: true },
+            }),
+          );
+          resolveDelivery();
+          return;
+        }
         if (frame.method === "assignment.deliver") {
           assert.deepEqual(Object.keys(frame.params?.expected ?? {}).sort(), [
             "activity",
@@ -581,6 +615,13 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
         answer: { optionId: "a" },
       }),
     );
+    await Promise.race([
+      deliverySeen,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("question delivery timeout")), 2_000),
+      ),
+    ]);
+    assert.equal(deliveryFrame?.params.state, "answered");
     assert.equal(
       (await send(p2.socket, "agent.get", { agentId: childId })).ok,
       false,
