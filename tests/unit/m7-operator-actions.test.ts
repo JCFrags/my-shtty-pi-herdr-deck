@@ -1,10 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   applyOperationPlan,
   createOperationPlan,
   createRollbackRecord,
   digestEvidence,
+  loadCurrentEvidence,
+  loadOperationPlan,
   verifyOperationPlan,
 } from "../../src/ops/operator-actions.js";
 
@@ -32,30 +37,60 @@ function plan() {
   });
 }
 
+function current(value = plan()) {
+  return {
+    format: "pi-herdr-operator-current/v1" as const,
+    commit,
+    resources: [resource],
+    preflight: value.preflight,
+  };
+}
+
 test("operation plans require exact identities and retain rollback evidence", () => {
   const value = plan();
   assert.equal(value.dryRun, true);
   assert.equal(value.executionEnabled, false);
   assert.equal(value.confirmationRequired, true);
   assert.deepEqual(value.rollback.resourceIdentities, ["broker-v1"]);
-  assert.equal(verifyOperationPlan(value, commit, [resource]).ok, true);
+  assert.equal(
+    verifyOperationPlan(value, commit, [resource], value.preflight).ok,
+    true,
+  );
   assert.deepEqual(
-    verifyOperationPlan(value, commit, [
-      { ...resource, identity: "replacement" },
-    ]).reasons,
+    verifyOperationPlan(
+      value,
+      commit,
+      [{ ...resource, identity: "replacement" }],
+      value.preflight,
+    ).reasons,
     ["resource identity changed: broker"],
   );
 });
 
-test("dirty, missing, and changed resources fail closed", () => {
+test("dirty, missing, extra, and changed resources fail closed", () => {
   const value = plan();
   assert.equal(
-    verifyOperationPlan(value, commit, [{ ...resource, state: "dirty" }]).ok,
+    verifyOperationPlan(
+      value,
+      commit,
+      [{ ...resource, state: "dirty" }],
+      value.preflight,
+    ).ok,
     false,
   );
-  assert.deepEqual(verifyOperationPlan(value, commit, []).reasons, [
-    "resource is missing: broker",
-  ]);
+  assert.deepEqual(
+    verifyOperationPlan(value, commit, [], value.preflight).reasons,
+    ["resource is missing: broker"],
+  );
+  assert.match(
+    verifyOperationPlan(
+      value,
+      commit,
+      [resource, { id: "extra", identity: "extra-v1", state: "unknown" }],
+      value.preflight,
+    ).reasons[0]!,
+    /unknown resource/,
+  );
   assert.throws(
     () =>
       createOperationPlan({
@@ -66,22 +101,84 @@ test("dirty, missing, and changed resources fail closed", () => {
   );
 });
 
-test("apply requires confirmation and an injected fake runner", async () => {
+test("stale preflight evidence fails closed", () => {
   const value = plan();
-  await assert.rejects(() => applyOperationPlan(value), /confirmation/);
-  const calls: string[] = [];
+  const stale = [{ name: "validate", digest: digestEvidence("stale") }];
+  assert.deepEqual(
+    verifyOperationPlan(value, commit, [resource], stale).reasons,
+    ["preflight evidence changed: validate"],
+  );
+  assert.match(
+    verifyOperationPlan(value, commit, [resource], []).reasons[0]!,
+    /missing/,
+  );
+  assert.match(
+    verifyOperationPlan(
+      value,
+      commit,
+      [resource],
+      [...value.preflight, { name: "extra", digest: digestEvidence("extra") }],
+    ).reasons[0]!,
+    /extra/,
+  );
+});
+
+test("apply revalidates immediately before the fake runner", async () => {
+  const value = plan();
+  let calls = 0;
+  await assert.rejects(
+    () =>
+      applyOperationPlan(value, {
+        confirmed: true,
+        execute: true,
+        readCurrentEvidence: async () => ({
+          ...current(),
+          resources: [{ ...resource, identity: "replacement" }],
+        }),
+        runner: {
+          async run() {
+            calls++;
+            return { status: 0 };
+          },
+        },
+      }),
+    /evidence is stale/,
+  );
+  assert.equal(calls, 0);
   const result = await applyOperationPlan(value, {
     confirmed: true,
     execute: true,
+    readCurrentEvidence: async () => current(value),
     runner: {
       async run(command, args, options) {
-        calls.push(`${command}:${args[0]}:${options.timeoutMs}`);
-        return { status: 0, outputDigest: digestEvidence("fake-runner") };
+        assert.equal(command, "restart");
+        assert.deepEqual(args, [commit]);
+        assert.equal(options.timeoutMs, 5000);
+        calls++;
+        return { status: 0 };
       },
     },
   });
   assert.equal(result.applied, true);
-  assert.deepEqual(calls, [`restart:${commit}:5000`]);
+  assert.equal(calls, 1);
+});
+
+test("strict private plan and current files reject malformed and duplicate entries", async () => {
+  const root = await mkdtemp(join(tmpdir(), "orch-m7-operator-files-"));
+  const planPath = join(root, "plan.json");
+  const currentPath = join(root, "current.json");
+  await writeFile(planPath, JSON.stringify(plan()), { mode: 0o600 });
+  await writeFile(currentPath, JSON.stringify(current()), { mode: 0o600 });
+  assert.equal((await loadOperationPlan(planPath)).expectedCommit, commit);
+  assert.equal((await loadCurrentEvidence(currentPath)).commit, commit);
+  await writeFile(
+    planPath,
+    JSON.stringify({ ...plan(), expectedResources: [resource, resource] }),
+    { mode: 0o600 },
+  );
+  await assert.rejects(() => loadOperationPlan(planPath), /duplicate/);
+  await writeFile(currentPath, "[]", { mode: 0o600 });
+  await assert.rejects(() => loadCurrentEvidence(currentPath), /object/);
 });
 
 test("invalid commit, evidence, timeout, and rollback values are refused", () => {

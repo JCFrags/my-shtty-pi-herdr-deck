@@ -51,6 +51,19 @@ npm run ops:rollback
 
 The harness is plan-only. `--execute` is rejected. Operator mutations use `src/ops/operator-actions.ts`; they require explicit confirmation, exact commit and resource identities, preflight evidence, a finite timeout, and a rollback record. Execution requires an injected runner and is used only by fake-runner tests in this lane.
 
+Create an expected plan, then verify it against a separate owner-only current-evidence file:
+
+```bash
+umask 077
+pi-herdr-orchestrator ops plan --action restart \
+  --commit <candidate-40-hex> --rollback <rollback-40-hex> \
+  --evidence validate:<sha256> --resource broker:broker-v1:clean > expected.json
+pi-herdr-orchestrator ops verify --plan expected.json --current current.json
+pi-herdr-orchestrator ops apply --plan expected.json --current current.json
+```
+
+`expected.json` and `current.json` must be owner-only regular files. The loader rejects unknown fields, duplicates, malformed entries, stale identities, stale preflight evidence, and unsafe resource states. CLI apply reports that execution is disabled. It does not imply that a mutation ran. An injected runner is required for apply tests.
+
 Canary order is: fake validation, package smoke, disposable fake stack, then an explicitly selected low-risk task. Do not repoint Pi or Herdr registration until each earlier gate passes.
 
 ## Rollback

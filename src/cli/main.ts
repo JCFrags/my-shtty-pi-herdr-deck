@@ -10,9 +10,10 @@ import { planRetention as planRetentionPolicy } from "../ops/retention-policy.js
 import { exportBeforeRepair, planRecovery } from "../ops/recovery.js";
 import { ConfigPolicy } from "../ops/config-policy.js";
 import {
-  applyOperationPlan,
   createOperationPlan,
   createRollbackRecord,
+  loadCurrentEvidence,
+  loadOperationPlan,
   verifyOperationPlan,
   type OperatorResource,
 } from "../ops/operator-actions.js";
@@ -118,48 +119,65 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     command === "ops" &&
     (subcommand === "plan" || subcommand === "verify" || subcommand === "apply")
   ) {
-    const action = option(argv, "--action") as
-      "deploy" | "restart" | "rollback" | undefined;
-    const expectedCommit = option(argv, "--commit");
-    const rollbackCommit = option(argv, "--rollback");
-    const evidence = option(argv, "--evidence");
-    const generation = Number(option(argv, "--state-generation") ?? "0");
-    if (!action || !expectedCommit || !rollbackCommit || !evidence)
-      throw new Error(
-        "Usage: ops plan|verify|apply --action ACTION --commit COMMIT --rollback COMMIT --evidence NAME:SHA256 [--resource ID:IDENTITY:clean].",
-      );
-    const resources: OperatorResource[] = [];
-    for (let index = 0; index < argv.length; index++)
-      if (argv[index] === "--resource")
-        resources.push(operationResource(argv[index + 1] ?? ""));
-    const plan = createOperationPlan({
-      action,
-      expectedCommit,
-      expectedResources: resources,
-      preflight: [operationEvidence(evidence)],
-      timeoutMs: Number(option(argv, "--timeout-ms") ?? "30000"),
-      rollback: createRollbackRecord({
-        candidateCommit: expectedCommit,
-        rollbackCommit,
-        stateGeneration: generation,
-        resourceIdentities: resources.map((resource) => resource.identity),
-      }),
-    });
     if (subcommand === "plan") {
+      const action = option(argv, "--action") as
+        "deploy" | "restart" | "rollback" | undefined;
+      const expectedCommit = option(argv, "--commit");
+      const rollbackCommit = option(argv, "--rollback");
+      const evidence = option(argv, "--evidence");
+      const generation = Number(option(argv, "--state-generation") ?? "0");
+      if (!action || !expectedCommit || !rollbackCommit || !evidence)
+        throw new Error(
+          "Usage: ops plan --action ACTION --commit COMMIT --rollback COMMIT --evidence NAME:SHA256 [--resource ID:IDENTITY:clean].",
+        );
+      const resources: OperatorResource[] = [];
+      for (let index = 0; index < argv.length; index++)
+        if (argv[index] === "--resource")
+          resources.push(operationResource(argv[index + 1] ?? ""));
+      const plan = createOperationPlan({
+        action,
+        expectedCommit,
+        expectedResources: resources,
+        preflight: [operationEvidence(evidence)],
+        timeoutMs: Number(option(argv, "--timeout-ms") ?? "30000"),
+        rollback: createRollbackRecord({
+          candidateCommit: expectedCommit,
+          rollbackCommit,
+          stateGeneration: generation,
+          resourceIdentities: resources.map((resource) => resource.identity),
+        }),
+      });
       console.log(JSON.stringify(plan));
       return;
     }
-    if (subcommand === "verify") {
-      const result = verifyOperationPlan(
-        plan,
-        option(argv, "--current-commit") ?? "",
-        resources,
+    const planPath = option(argv, "--plan");
+    const currentPath = option(argv, "--current");
+    if (!planPath || !currentPath)
+      throw new Error(
+        "Usage: ops verify|apply --plan EXPECTED.json --current CURRENT.json.",
       );
-      console.log(JSON.stringify(result));
-      if (!result.ok) process.exitCode = 1;
+    const plan = await loadOperationPlan(planPath);
+    const current = await loadCurrentEvidence(currentPath);
+    const verification = verifyOperationPlan(
+      plan,
+      current.commit,
+      current.resources,
+      current.preflight,
+    );
+    if (subcommand === "verify") {
+      console.log(JSON.stringify({ ...verification, executionEnabled: false }));
+      if (!verification.ok) process.exitCode = 1;
       return;
     }
-    await applyOperationPlan(plan);
+    console.log(
+      JSON.stringify({
+        applied: false,
+        executionEnabled: false,
+        verification,
+        reason: "CLI apply is disabled; use an injected runner in tests.",
+      }),
+    );
+    if (!verification.ok) process.exitCode = 1;
     return;
   }
   if (command === "export") {
