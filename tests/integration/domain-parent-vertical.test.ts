@@ -10,7 +10,6 @@ import { createId } from "../../src/shared/ids.js";
 import { resolvePaths, sessionKey } from "../../src/shared/paths.js";
 import { encodeFrame, NdjsonDecoder } from "../../src/shared/protocol/codec.js";
 import type { EventStore } from "../../src/state/event-store.js";
-
 type Frame = {
   type?: string;
   id?: string;
@@ -386,6 +385,7 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
     const deliverySeen = new Promise<void>((resolve) => {
       resolveDelivery = resolve;
     });
+    let assignmentFrame: { frame: Frame; socket: Socket } | undefined;
     const child = await connect(
       paths,
       {
@@ -443,6 +443,8 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
             Number.isSafeInteger(frame.params.expected.connectionGeneration),
             true,
           );
+          assignmentFrame = { frame, socket };
+          return;
         }
         socket.write(
           encodeFrame({
@@ -504,6 +506,27 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
         })
       ).ok,
       false,
+    );
+    assert.ok(assignmentFrame);
+    assignmentFrame.socket.write(
+      encodeFrame({
+        v: 1,
+        type: "server_response",
+        id: assignmentFrame.frame.id,
+        ok: true,
+        result: { status: "accepted" },
+      }),
+    );
+    for (
+      let attempt = 0;
+      attempt < 100 &&
+      broker.store.state.runs[runId]?.assignmentDeliveryState !== "accepted";
+      attempt++
+    )
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(
+      broker.store.state.runs[runId]?.assignmentDeliveryState,
+      "accepted",
     );
     assert.equal(
       (

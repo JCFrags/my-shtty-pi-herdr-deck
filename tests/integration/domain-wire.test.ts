@@ -942,7 +942,7 @@ test("production broker task cancellation terminalizes an open question durably"
   }
 });
 
-test("production strict child receives durable cancellation delivery after task.cancel", async () => {
+test("production strict managed child task.cancel-versus-timeout race", async () => {
   const root = await mkdtemp(join(tmpdir(), "domain-cancel-delivery-"));
   const runtime = await mkdtemp(
     join(tmpdir(), "domain-cancel-delivery-runtime-"),
@@ -958,7 +958,14 @@ test("production strict child receives durable cancellation delivery after task.
     secret: join(runtime, "secret"),
   };
   let herdr!: DomainHerdr;
+  const timers: Array<() => void> = [];
   const broker = new Broker(paths, {
+    now: () => Date.now(),
+    setTimeout: (callback) => {
+      const handle = setTimeout(() => undefined, 2_000_000);
+      timers.push(callback);
+      return handle;
+    },
     herdrFactory: async (store) => (herdr = new DomainHerdr(store)) as any,
   });
   await broker.start();
@@ -1009,6 +1016,7 @@ test("production strict child receives durable cancellation delivery after task.
     const agent = broker.store.state.agents[item.agentId];
     assert.ok(agent);
     let resolveDelivery!: () => void;
+    const deliveredStates: string[] = [];
     const delivery = new Promise<void>((resolve) => {
       resolveDelivery = resolve;
     });
@@ -1038,15 +1046,22 @@ test("production strict child receives durable cancellation delivery after task.
           "state",
           "toolCallId",
         ]);
-        assert.equal(frame.params.state, "cancelled");
+        deliveredStates.push(frame.params.state);
+        assert.ok(["cancelled", "timed_out"].includes(frame.params.state));
         assert.equal(frame.params.expected.assignmentGeneration, 1);
         assert.equal(frame.params.expected.runId, item.runId);
         assert.equal(
           broker.store.state.questions?.[frame.params.questionId]?.state,
-          "cancelled",
+          frame.params.state,
         );
-        assert.equal(broker.store.state.runs[item.runId]?.state, "cancelled");
-        assert.equal(broker.store.state.tasks[item.taskId]?.state, "cancelled");
+        assert.equal(
+          broker.store.state.runs[item.runId]?.state,
+          frame.params.state === "cancelled" ? "cancelled" : "failed",
+        );
+        assert.equal(
+          broker.store.state.tasks[item.taskId]?.state,
+          frame.params.state === "cancelled" ? "cancelled" : "failed",
+        );
         socket.write(
           encodeFrame({
             v: 1,
@@ -1128,16 +1143,13 @@ test("production strict child receives durable cancellation delivery after task.
     );
     assert.equal(questionAck.toolCallId, "cancel-tool");
     const terminalBefore = broker.store.state.lastEventSeq;
-    assert.equal(
-      (
-        await request(parent, "task.cancel", {
-          taskId: item.taskId,
-          reason: "test_cancel",
-          cascade: true,
-        })
-      ).ok,
-      true,
-    );
+    const cancelRace = request(parent, "task.cancel", {
+      taskId: item.taskId,
+      reason: "test_cancel",
+      cascade: true,
+    });
+    timers.at(-1)?.();
+    assert.equal((await cancelRace).ok, true);
     await Promise.race([
       delivery,
       new Promise((_, reject) =>
@@ -1153,6 +1165,20 @@ test("production strict child receives durable cancellation delivery after task.
       1,
     );
     assert.ok(broker.store.state.lastEventSeq > terminalBefore);
+    assert.equal((await request(parent, "system.status", {})).ok, true);
+    assert.equal(deliveredStates.length, 1);
+    assert.equal(
+      Object.values(broker.store.events).filter(
+        (event) =>
+          event.entityRefs?.questionId === questionAck.questionId &&
+          [
+            "question.answered",
+            "question.cancelled",
+            "question.timed_out",
+          ].includes(event.type),
+      ).length,
+      1,
+    );
   } finally {
     child?.destroy();
     parent?.destroy();
