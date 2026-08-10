@@ -1,6 +1,9 @@
 import { doctor } from "../broker/doctor.js";
 import { Broker } from "../broker/broker.js";
 import { ensurePrivateDirectory, resolvePaths } from "../shared/paths.js";
+import { brokerRequest } from "./client.js";
+import { readPrivateRegular } from "../shared/private-fs.js";
+import { createProductionHerdrService } from "../herdr/service.js";
 async function openStore(broker: Broker): Promise<void> {
   const snapshot = await broker.readSnapshot().catch((error: unknown) => {
     broker.store.readOnly = true;
@@ -31,7 +34,73 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   const paths = resolvePaths();
   await ensurePrivateDirectory(paths.root);
   await ensurePrivateDirectory(paths.runtime);
-  const broker = new Broker(paths);
+  if (command === "herdr") {
+    const method =
+      subcommand === "status"
+        ? "herdr.status"
+        : subcommand === "reconcile"
+          ? "herdr.reconcile"
+          : (subcommand ?? "");
+    if (
+      ![
+        "herdr.status",
+        "herdr.reconcile",
+        "herdr.focus",
+        "herdr.interrupt",
+        "herdr.stop",
+        "herdr.adopt",
+        "herdr.register",
+        "herdr.close",
+        "herdr.provision",
+      ].includes(method)
+    ) {
+      console.error(
+        "Usage: herdr status|reconcile|focus|interrupt|stop|adopt|register|close|provision",
+      );
+      process.exitCode = 2;
+      return;
+    }
+    let params: Record<string, unknown> = {};
+    if (
+      ["herdr.focus", "herdr.interrupt", "herdr.stop", "herdr.close"].includes(
+        method,
+      )
+    ) {
+      const paneId = argv[2];
+      if (!paneId || /[\u0000-\u001f\u007f]/u.test(paneId))
+        throw new Error("Pane ID is invalid.");
+      params = { paneId };
+      if (argv[3]) params.terminalId = argv[3];
+      if (argv[4]) params.sessionId = argv[4];
+      if (argv[5]) params.generation = Number(argv[5]);
+    } else if (
+      method === "herdr.provision" ||
+      method === "herdr.adopt" ||
+      method === "herdr.register"
+    ) {
+      const file = argv[2];
+      if (!file) throw new Error("Provisioning requires --params-file PATH.");
+      params = JSON.parse(await readPrivateRegular(file)) as Record<
+        string,
+        unknown
+      >;
+    }
+    console.log(
+      JSON.stringify(
+        await brokerRequest(paths.socket, paths.secret, method, params),
+      ),
+    );
+    return;
+  }
+  const broker = new Broker(
+    paths,
+    process.env.HERDR_BIN_PATH
+      ? {
+          herdrFactory: (store, resolved) =>
+            createProductionHerdrService(store, resolved),
+        }
+      : {},
+  );
   if (command === "broker" && subcommand === "start") {
     await broker.start();
     console.log(JSON.stringify({ status: "started", socket: paths.socket }));

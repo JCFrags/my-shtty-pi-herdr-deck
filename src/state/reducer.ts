@@ -9,6 +9,7 @@ export const emptyState = (): OrchestrationState => ({
   runs: {},
   agents: {},
   workflows: {},
+  herdrResources: {},
   idempotency: {},
 });
 const taskTerminal = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
@@ -17,6 +18,9 @@ const known = new Set([
   "task.state_changed",
   "audit.action",
   "audit.authorization_denied",
+  "herdr.provision.intent",
+  "herdr.provision.outcome",
+  "herdr.reconciled",
 ]);
 export function reduce(
   state: OrchestrationState,
@@ -95,6 +99,106 @@ export function reduce(
     case "audit.action":
     case "audit.authorization_denied":
       break;
+    case "herdr.provision.intent": {
+      const agentId = String(p.agentId);
+      if (!agentId)
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Herdr intent agent is invalid.",
+        );
+      next.herdrResources = {
+        ...(next.herdrResources ?? {}),
+        [agentId]: { agentId, state: "provisioning" },
+      };
+      break;
+    }
+    case "herdr.provision.outcome":
+    case "herdr.reconciled": {
+      const agentId = String(p.agentId),
+        current = next.herdrResources?.[agentId];
+      if (!current)
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Herdr resource has no intent.",
+        );
+      next.herdrResources = {
+        ...(next.herdrResources ?? {}),
+        [agentId]: {
+          ...current,
+          state: String(p.state),
+          ...(typeof p.paneId === "string" ? { paneId: p.paneId } : {}),
+          ...(typeof p.tabId === "string" ? { tabId: p.tabId } : {}),
+          ...(typeof p.worktreeId === "string"
+            ? { worktreeId: p.worktreeId }
+            : {}),
+          ...(typeof p.worktreePath === "string"
+            ? { worktreePath: p.worktreePath }
+            : {}),
+          ...(typeof p.reason === "string" ? { reason: p.reason } : {}),
+          ...(typeof p.parentAgentId === "string"
+            ? { parentAgentId: p.parentAgentId }
+            : {}),
+          ...(typeof p.ownerId === "string" ? { ownerId: p.ownerId } : {}),
+          ...(typeof p.terminalId === "string"
+            ? { terminalId: p.terminalId }
+            : {}),
+          ...(typeof p.sessionId === "string"
+            ? { sessionId: p.sessionId }
+            : {}),
+          ...(Number.isSafeInteger(p.generation)
+            ? { generation: p.generation as number }
+            : {}),
+          ...(typeof p.tokenDigest === "string"
+            ? { tokenDigest: p.tokenDigest }
+            : {}),
+          ...(Number.isSafeInteger(p.promptFileDev)
+            ? { promptFileDev: p.promptFileDev as number }
+            : {}),
+          ...(Number.isSafeInteger(p.promptFileIno)
+            ? { promptFileIno: p.promptFileIno as number }
+            : {}),
+          ...(Number.isSafeInteger(p.tokenFileDev)
+            ? { tokenFileDev: p.tokenFileDev as number }
+            : {}),
+          ...(Number.isSafeInteger(p.tokenFileIno)
+            ? { tokenFileIno: p.tokenFileIno as number }
+            : {}),
+          ...(typeof p.registrationDeadline === "string"
+            ? { registrationDeadline: p.registrationDeadline }
+            : {}),
+          ...(typeof p.cleanupOutcome === "string"
+            ? { cleanupOutcome: p.cleanupOutcome }
+            : {}),
+          ...(typeof p.dirty === "boolean" ? { dirty: p.dirty } : {}),
+          ...(typeof p.replaced === "boolean" ? { replaced: p.replaced } : {}),
+          ...(typeof p.orphaned === "boolean" ? { orphaned: p.orphaned } : {}),
+          ...(typeof p.unknown === "boolean" ? { unknown: p.unknown } : {}),
+          ...(typeof p.parentGitRoot === "string"
+            ? { parentGitRoot: p.parentGitRoot }
+            : {}),
+          ...(typeof p.parentGitHead === "string"
+            ? { parentGitHead: p.parentGitHead }
+            : {}),
+          ...(typeof p.parentGitBranch === "string"
+            ? { parentGitBranch: p.parentGitBranch }
+            : {}),
+          ...(Array.isArray(p.parentGitChangedFiles) &&
+          p.parentGitChangedFiles.every((x) => typeof x === "string")
+            ? { parentGitChangedFiles: p.parentGitChangedFiles as string[] }
+            : {}),
+          ...(typeof p.worktreeGitRoot === "string"
+            ? { worktreeGitRoot: p.worktreeGitRoot }
+            : {}),
+          ...(typeof p.worktreeGitHead === "string"
+            ? { worktreeGitHead: p.worktreeGitHead }
+            : {}),
+          ...(typeof p.worktreeGitBranch === "string"
+            ? { worktreeGitBranch: p.worktreeGitBranch }
+            : {}),
+        },
+      };
+      break;
+    }
     default:
       throw new OrchestratorError(
         "STATE_CORRUPT",

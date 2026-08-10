@@ -499,6 +499,67 @@ export class EventStore {
         isEntityId(refs.taskId, "tsk") &&
         exactKeys(p, ["to"]) &&
         (p.to === "queued" || p.to === "cancelled");
+    } else if (event.type === "herdr.provision.intent") {
+      valid =
+        exactKeys(refs, ["agentId"]) &&
+        typeof refs.agentId === "string" &&
+        exactKeys(p, ["agentId"]) &&
+        p.agentId === refs.agentId;
+    } else if (
+      event.type === "herdr.provision.outcome" ||
+      event.type === "herdr.reconciled"
+    ) {
+      valid =
+        exactKeys(refs, ["agentId"]) &&
+        typeof refs.agentId === "string" &&
+        exactKeys(
+          p,
+          [
+            "agentId",
+            "state",
+            "paneId",
+            "tabId",
+            "worktreeId",
+            "worktreePath",
+            "reason",
+            "terminalId",
+            "sessionId",
+            "generation",
+            "parentAgentId",
+            "ownerId",
+            "tokenDigest",
+            "promptFileDev",
+            "promptFileIno",
+            "tokenFileDev",
+            "tokenFileIno",
+            "registrationDeadline",
+            "cleanupOutcome",
+            "dirty",
+            "replaced",
+            "orphaned",
+            "unknown",
+            "parentGitRoot",
+            "parentGitHead",
+            "parentGitBranch",
+            "parentGitChangedFiles",
+            "worktreeGitRoot",
+            "worktreeGitHead",
+            "worktreeGitBranch",
+          ].filter((key) => Object.hasOwn(p, key)),
+        ) &&
+        p.agentId === refs.agentId &&
+        typeof p.state === "string" &&
+        (Object.keys(p).every(
+          (key) => !key.endsWith("FileDev") && !key.endsWith("FileIno"),
+        ) ||
+          [
+            "promptFileDev",
+            "promptFileIno",
+            "tokenFileDev",
+            "tokenFileIno",
+          ].every(
+            (key) => Number.isSafeInteger(p[key]) && Number(p[key]) >= 0,
+          ));
     } else if (
       event.type === "audit.action" ||
       event.type === "audit.authorization_denied"

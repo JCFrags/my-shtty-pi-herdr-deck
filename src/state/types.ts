@@ -58,10 +58,23 @@ export interface Agent {
   id: string;
   state: AgentState;
   generation: number;
+  managed?: boolean;
   parentAgentId?: string;
+  depth?: number;
+  displayName?: string;
+  herdrName?: string;
+  profileId?: string;
   terminalId?: string;
+  paneId?: string;
+  workspaceId?: string;
+  tabId?: string;
   piSessionId?: string;
+  connectionGeneration?: number;
+  detectedKind?: string;
+  coarseStatus?: "idle" | "working" | "blocked" | "done" | "unknown";
   currentRunId?: string;
+  currentAssignmentGeneration?: number;
+  tokenDigest?: string;
 }
 export interface Workflow {
   id: string;
@@ -77,6 +90,41 @@ export interface OrchestrationState {
   runs: Record<string, Run>;
   agents: Record<string, Agent>;
   workflows: Record<string, Workflow>;
+  herdrResources?: Record<
+    string,
+    {
+      agentId: string;
+      state: string;
+      paneId?: string;
+      tabId?: string;
+      worktreeId?: string;
+      worktreePath?: string;
+      reason?: string;
+      parentAgentId?: string;
+      ownerId?: string;
+      terminalId?: string;
+      sessionId?: string;
+      generation?: number;
+      tokenDigest?: string;
+      promptFileDev?: number;
+      promptFileIno?: number;
+      tokenFileDev?: number;
+      tokenFileIno?: number;
+      registrationDeadline?: string;
+      cleanupOutcome?: string;
+      dirty?: boolean;
+      replaced?: boolean;
+      orphaned?: boolean;
+      unknown?: boolean;
+      parentGitRoot?: string;
+      parentGitHead?: string;
+      parentGitBranch?: string;
+      parentGitChangedFiles?: string[];
+      worktreeGitRoot?: string;
+      worktreeGitHead?: string;
+      worktreeGitBranch?: string;
+    }
+  >;
   idempotency: Record<
     string,
     {
