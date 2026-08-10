@@ -18,6 +18,16 @@ test("incomplete final event enters read-only recovery", async () => {
   assert.match(store.corruption ?? "", /incomplete/);
 });
 
+test("oversized unterminated event line enters read-only recovery", async () => {
+  const root = await mkdtemp(join(tmpdir(), "orch-oversize-"));
+  const path = join(root, "events.jsonl");
+  await writeFile(path, "x".repeat(1_048_577));
+  const store = new EventStore(path);
+  await store.open();
+  assert.equal(store.readOnly, true);
+  assert.match(store.corruption ?? "", /maximum size/);
+});
+
 test("snapshots verify their checksum and state cursor", async () => {
   const root = await mkdtemp(join(tmpdir(), "orch-snapshot-"));
   const store = new EventStore(join(root, "events.jsonl"));

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createConnection } from "node:net";
-import { mkdtemp, writeFile, lstat } from "node:fs/promises";
+import { mkdtemp, writeFile, readFile, lstat } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
@@ -52,6 +52,24 @@ test("event append serializes concurrent canonical mutations", async () => {
   );
   assert.equal(store.events.length, 32);
   assert.equal(store.verify().valid, true);
+});
+
+test("broker lock records nonce and Linux process-start identity", async () => {
+  const root = await mkdtemp(join(tmpdir(), "orch-lock-"));
+  const broker = new Broker(paths(root));
+  await broker.start();
+  try {
+    const lock = JSON.parse(await readFile(broker.paths.lock, "utf8")) as {
+      pid: number;
+      nonce: string;
+      startIdentity: string;
+    };
+    assert.equal(lock.pid, process.pid);
+    assert.match(lock.nonce, /^[0-9a-f]{32}$/);
+    assert.notEqual(lock.startIdentity, "unknown");
+  } finally {
+    await broker.stop();
+  }
 });
 
 test("broker rejects a mismatched session key at the authenticated boundary", async () => {

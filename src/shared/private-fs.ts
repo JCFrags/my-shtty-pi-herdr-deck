@@ -1,6 +1,7 @@
+import { createReadStream, constants } from "node:fs";
 import { lstat, open } from "node:fs/promises";
+import { LIMITS } from "./limits.js";
 import type { FileHandle } from "node:fs/promises";
-import { constants } from "node:fs";
 const noFollow =
   (constants as typeof constants & { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
 export async function openPrivateRegular(path: string): Promise<FileHandle> {
@@ -16,7 +17,9 @@ export async function openPrivateRegular(path: string): Promise<FileHandle> {
     await handle.close();
     throw new Error(`Unsafe private file: ${path}`);
   }
-  if ((stat.mode & 0o077) !== 0) await handle.chmod(0o600);
+  if ((stat.mode & 0o077) !== 0) {
+    await handle.chmod(0o600);
+  }
   return handle;
 }
 export async function readPrivateRegular(path: string): Promise<string> {
@@ -25,6 +28,43 @@ export async function readPrivateRegular(path: string): Promise<string> {
     return await handle.readFile("utf8");
   } finally {
     await handle.close();
+  }
+}
+export async function* readPrivateLines(path: string): AsyncGenerator<string> {
+  const handle = await openPrivateRegular(path);
+  const stream = createReadStream("", { fd: handle.fd, autoClose: false });
+  let buffer = Buffer.alloc(0);
+  try {
+    for await (const chunk of stream) {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      if (
+        buffer.length + bytes.length > LIMITS.maxLineBytes &&
+        bytes.indexOf(0x0a) < 0
+      )
+        throw new Error("Private line exceeds the maximum size.");
+      buffer = Buffer.concat([buffer, bytes]);
+      if (buffer.length > LIMITS.maxLineBytes && buffer.indexOf(0x0a) < 0)
+        throw new Error("Private line exceeds the maximum size.");
+      let newline = buffer.indexOf(0x0a);
+      while (newline >= 0) {
+        if (newline > LIMITS.maxLineBytes)
+          throw new Error("Private line exceeds the maximum size.");
+        let line = buffer.subarray(0, newline);
+
+        yield line.toString("utf8");
+        buffer = buffer.subarray(newline + 1);
+        newline = buffer.indexOf(0x0a);
+      }
+      if (buffer.length > LIMITS.maxLineBytes)
+        throw new Error("Private line exceeds the maximum size.");
+    }
+    if (buffer.length)
+      throw new Error("Private file ends with an incomplete line.");
+  } finally {
+    stream.destroy();
+    await handle.close().catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "EBADF") throw error;
+    });
   }
 }
 export async function createPrivateExclusive(

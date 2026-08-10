@@ -94,7 +94,7 @@ export class Broker {
   #clients = new Set<Client>();
   constructor(paths: ResolvedPaths) {
     this.paths = paths;
-    this.#lock = new BrokerLock(paths.lock);
+    this.#lock = new BrokerLock(paths.lock, paths.socket);
     this.#secret = "";
     this.store = new EventStore(paths.events);
     this.snapshotStore = new SnapshotStore(paths.snapshot);

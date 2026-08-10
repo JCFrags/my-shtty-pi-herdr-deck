@@ -1,76 +1,199 @@
-import { chmod, lstat, open, readFile, unlink } from "node:fs/promises";
+import { constants, readFileSync } from "node:fs";
+import { open, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+
 export interface LockIdentity {
   dev: number;
   ino: number;
   uid: number;
+  nonce: string;
+  pid: number;
+  startIdentity: string;
+  expectedSocket: string;
 }
-async function alive(pid: number): Promise<boolean> {
+interface LockRecord {
+  pid: number;
+  nonce: string;
+  startIdentity: string;
+  expectedSocket: string;
+}
+const noFollow =
+  (constants as typeof constants & { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
+function processStart(pid: number): string | undefined {
   try {
-    process.kill(pid, 0);
-    return true;
+    const text = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const end = text.lastIndexOf(") ");
+    if (end < 0) return undefined;
+    return text
+      .slice(end + 2)
+      .trim()
+      .split(/\s+/)[19];
   } catch {
-    return false;
+    return undefined;
+  }
+}
+function currentStart(): string {
+  const value = processStart(process.pid);
+  if (!value) throw new Error("Linux process-start identity is unavailable.");
+  return value;
+}
+function validRecord(value: unknown): value is LockRecord {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return (
+    Number.isSafeInteger(record.pid) &&
+    (record.pid as number) > 0 &&
+    typeof record.nonce === "string" &&
+    /^[0-9a-f]{32}$/.test(record.nonce) &&
+    typeof record.startIdentity === "string" &&
+    record.startIdentity !== "unknown" &&
+    typeof record.expectedSocket === "string" &&
+    record.expectedSocket.length > 0
+  );
+}
+function sameRecord(a: LockRecord, b: LockRecord): boolean {
+  return (
+    a.pid === b.pid &&
+    a.nonce === b.nonce &&
+    a.startIdentity === b.startIdentity &&
+    a.expectedSocket === b.expectedSocket
+  );
+}
+async function readRecord(path: string): Promise<{
+  record: LockRecord;
+  stat: Awaited<ReturnType<FileHandle["stat"]>>;
+}> {
+  const handle = await open(path, constants.O_RDONLY | noFollow);
+  try {
+    const stat = await handle.stat();
+    const record = JSON.parse(await handle.readFile("utf8")) as unknown;
+    if (
+      !stat.isFile() ||
+      stat.nlink !== 1 ||
+      (process.getuid?.() !== undefined && stat.uid !== process.getuid()) ||
+      (stat.mode & 0o077) !== 0 ||
+      !validRecord(record)
+    )
+      throw new Error("Broker lock record is unsafe.");
+    return { record, stat };
+  } finally {
+    await handle.close();
   }
 }
 export class BrokerLock {
   #handle: FileHandle | undefined;
   #identity: LockIdentity | undefined;
-  constructor(readonly path: string) {}
+  readonly #recoveryPath: string;
+  constructor(
+    readonly path: string,
+    readonly expectedSocket = "",
+  ) {
+    this.#recoveryPath = `${path}.recovery`;
+  }
   get identity(): LockIdentity | undefined {
     return this.#identity;
   }
   async acquire(): Promise<void> {
     for (;;) {
+      const record: LockRecord = {
+        pid: process.pid,
+        nonce: randomBytes(16).toString("hex"),
+        startIdentity: currentStart(),
+        expectedSocket: this.expectedSocket,
+      };
       try {
-        this.#handle = await open(this.path, "wx", 0o600);
-        await this.#handle.write(`${process.pid}\n`);
+        this.#handle = await open(
+          this.path,
+          constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | noFollow,
+          0o600,
+        );
+        await this.#handle.write(`${JSON.stringify(record)}\n`);
         await this.#handle.sync();
-        await chmod(this.path, 0o600);
-        const stat = await lstat(this.path);
+        await this.#handle.chmod(0o600);
+        const stat = await this.#handle.stat();
         if (
           !stat.isFile() ||
           stat.nlink !== 1 ||
           (process.getuid?.() !== undefined && stat.uid !== process.getuid())
         )
           throw new Error("Unsafe broker lock.");
-        this.#identity = { dev: stat.dev, ino: stat.ino, uid: stat.uid };
+        const checked = await readRecord(this.path);
+        if (
+          checked.stat.dev !== stat.dev ||
+          checked.stat.ino !== stat.ino ||
+          !sameRecord(checked.record, record)
+        )
+          throw new Error("Broker lock identity changed.");
+        this.#identity = {
+          dev: stat.dev,
+          ino: stat.ino,
+          uid: stat.uid,
+          nonce: record.nonce,
+          pid: record.pid,
+          startIdentity: record.startIdentity,
+          expectedSocket: record.expectedSocket,
+        };
         return;
       } catch (error) {
         await this.#handle?.close().catch(() => undefined);
         this.#handle = undefined;
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        const text = await readFile(this.path, "utf8").catch(() => "");
-        const pid = Number(text.trim().split("\n")[0]);
-        if (!Number.isSafeInteger(pid) || pid <= 0 || (await alive(pid)))
-          throw new Error(
-            "Broker lock is held by a live or unverifiable process.",
-          );
-        const stat = await lstat(this.path);
-        if (!stat.isFile() || stat.nlink !== 1)
-          throw new Error("Refusing unsafe stale broker lock.");
-        await unlink(this.path);
+        const old = await readRecord(this.path);
+        const liveStart = processStart(old.record.pid);
+        if (liveStart !== undefined && liveStart === old.record.startIdentity)
+          throw new Error("Broker lock is held by a live process.");
+        if (liveStart === undefined) {
+          try {
+            process.kill(old.record.pid, 0);
+            throw new Error("Broker lock owner is unverifiable.");
+          } catch (probeError) {
+            if ((probeError as NodeJS.ErrnoException).code !== "ESRCH")
+              throw probeError;
+          }
+        }
+        const guardNonce = randomBytes(16).toString("hex");
+        const guard = await open(
+          this.#recoveryPath,
+          constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollow,
+          0o600,
+        );
+        try {
+          await guard.write(`${guardNonce}\n`);
+          await guard.sync();
+          const current = await readRecord(this.path);
+          if (
+            current.stat.dev !== old.stat.dev ||
+            current.stat.ino !== old.stat.ino ||
+            !sameRecord(current.record, old.record)
+          )
+            throw new Error("Broker lock changed during recovery.");
+          await unlink(this.path);
+        } finally {
+          await guard.close();
+          await unlink(this.#recoveryPath).catch(() => undefined);
+        }
       }
     }
   }
   async release(): Promise<void> {
     const expected = this.#identity;
-    if (expected) {
-      const stat = await lstat(this.path).catch(() => undefined);
-      if (
-        stat &&
-        (stat.dev !== expected.dev ||
-          stat.ino !== expected.ino ||
-          stat.uid !== expected.uid)
-      )
-        throw new Error("Broker lock identity changed.");
-    }
+    if (!expected) return;
+    const current = await readRecord(this.path);
+    if (
+      current.stat.dev !== expected.dev ||
+      current.stat.ino !== expected.ino ||
+      !sameRecord(current.record, {
+        pid: expected.pid,
+        nonce: expected.nonce,
+        startIdentity: expected.startIdentity,
+        expectedSocket: expected.expectedSocket,
+      })
+    )
+      throw new Error("Broker lock identity changed.");
     await this.#handle?.close();
     this.#handle = undefined;
     this.#identity = undefined;
-    if (expected)
-      await unlink(this.path).catch((error: NodeJS.ErrnoException) => {
-        if (error.code !== "ENOENT") throw error;
-      });
+    await unlink(this.path);
   }
 }

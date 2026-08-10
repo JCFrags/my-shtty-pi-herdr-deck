@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import { constants } from "node:fs";
 import {
   createPrivateExclusive,
-  readPrivateRegular,
+  readPrivateLines,
 } from "../shared/private-fs.js";
 import { createId } from "../shared/ids.js";
 import { canonicalJson, sha256 } from "../shared/canonical-json.js";
@@ -31,14 +31,13 @@ export class EventStore {
   async open(): Promise<void> {
     await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
     try {
-      const text = await readPrivateRegular(this.path);
-      if (text.length && !text.endsWith("\n"))
-        throw new OrchestratorError(
-          "STATE_CORRUPT",
-          "Event log ends with an incomplete record.",
-        );
-      for (const [index, line] of text.split("\n").entries()) {
-        if (!line) continue;
+      let index = 0;
+      for await (const line of readPrivateLines(this.path)) {
+        if (!line || line.endsWith("\r"))
+          throw new OrchestratorError(
+            "STATE_CORRUPT",
+            `Noncanonical event line at ${index + 1}.`,
+          );
         let event: StoredEvent;
         try {
           event = JSON.parse(line) as StoredEvent;
@@ -48,6 +47,7 @@ export class EventStore {
             `Invalid event at line ${index + 1}.`,
           );
         }
+        index++;
         this.verifyEvent(event, this.#events.at(-1));
         this.#events.push(event);
         if (this.#events.length > MAX_RETAINED_EVENTS) this.#events.shift();
@@ -58,6 +58,17 @@ export class EventStore {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
         await createPrivateExclusive(this.path, "");
+        return;
+      }
+      if (
+        error instanceof Error &&
+        (error.message.includes("incomplete line") ||
+          error.message.includes("line exceeds"))
+      ) {
+        this.readOnly = true;
+        this.corruption = error.message.includes("exceeds")
+          ? "Event log line exceeds the maximum size."
+          : "Event log ends with an incomplete record.";
         return;
       }
       if (
