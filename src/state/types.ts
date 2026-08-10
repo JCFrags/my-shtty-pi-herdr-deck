@@ -58,10 +58,23 @@ export interface Agent {
   id: string;
   state: AgentState;
   generation: number;
+  managed?: boolean;
   parentAgentId?: string;
+  depth?: number;
+  displayName?: string;
+  herdrName?: string;
+  profileId?: string;
   terminalId?: string;
+  paneId?: string;
+  workspaceId?: string;
+  tabId?: string;
   piSessionId?: string;
+  connectionGeneration?: number;
+  detectedKind?: string;
+  coarseStatus?: "idle" | "working" | "blocked" | "done" | "unknown";
   currentRunId?: string;
+  currentAssignmentGeneration?: number;
+  tokenDigest?: string;
 }
 export interface Workflow {
   id: string;
