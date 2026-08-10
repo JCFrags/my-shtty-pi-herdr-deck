@@ -42,17 +42,29 @@ export interface Task {
   state: TaskState;
   createdAt: string;
   parentAgentId?: string;
+  workflowId?: string;
+  profileId?: string;
+  constraints?: string[];
+  dependencies?: string[];
   currentRunId?: string;
+  runIds?: string[];
   resultId?: string;
+  timeoutAt?: string;
 }
 export interface Run {
   id: string;
   taskId: string;
   state: RunState;
   agentId?: string;
+  agentGeneration?: number;
+  assignmentId?: string;
   assignmentGeneration: number;
+  piSessionId?: string;
+  terminalId?: string;
   settled: boolean;
   resultId?: string;
+  timeoutAt?: string;
+  cancelled?: boolean;
 }
 export interface Agent {
   id: string;
