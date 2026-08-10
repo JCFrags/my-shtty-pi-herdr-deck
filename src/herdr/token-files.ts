@@ -13,6 +13,11 @@ export interface FileIdentity {
   ino: number;
 }
 interface FileClaim extends FileIdentity {}
+export type ManagedFileCleanupResult = "wiped" | "retained" | "missing";
+interface ManagedFileHooks {
+  /** Test-only synchronization point after open and the first stat. */
+  afterOpen?: () => Promise<void>;
+}
 const fileClaims = new Map<string, FileClaim>();
 function claim(path: string, stat: { dev: number; ino: number }): void {
   fileClaims.set(path, { dev: stat.dev, ino: stat.ino });
@@ -69,10 +74,18 @@ function sameIdentity(actual: FileIdentity, expected?: FileIdentity): boolean {
     !expected || (actual.dev === expected.dev && actual.ino === expected.ino)
   );
 }
+function isSafeManagedStat(stat: {
+  isFile: () => boolean;
+  nlink: number;
+  mode: number;
+}): boolean {
+  return stat.isFile() && stat.nlink === 1 && (stat.mode & 0o077) === 0;
+}
 export async function verifyManagedTokenFile(
   path: string,
   expectedDigest: string,
   expectedIdentity?: FileIdentity,
+  hooks?: ManagedFileHooks,
 ): Promise<boolean> {
   let handle;
   try {
@@ -80,10 +93,19 @@ export async function verifyManagedTokenFile(
     // read another inode after a replacement.
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     const stat = await handle.stat();
-    if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0)
-      return false;
+    if (!isSafeManagedStat(stat)) return false;
     if (!sameIdentity(stat, expectedIdentity)) return false;
     if (expectedIdentity === undefined && !isClaimed(path, stat)) return false;
+    await hooks?.afterOpen?.();
+    // Revalidate after the last await and before reading private bytes. A
+    // hard-link added while the handle was open must be retained untouched.
+    const beforeRead = await handle.stat();
+    if (
+      !isSafeManagedStat(beforeRead) ||
+      !sameIdentity(beforeRead, stat) ||
+      (expectedIdentity === undefined && !isClaimed(path, beforeRead))
+    )
+      return false;
     const value = (await handle.readFile("utf8")).trimEnd();
     const actual = Buffer.from(tokenDigest(value), "utf8");
     const expected = Buffer.from(expectedDigest, "utf8");
@@ -132,26 +154,54 @@ export async function createPromptFile(
 export async function deletePromptFile(
   path: string,
   expectedIdentity?: FileIdentity,
-): Promise<void> {
+  hooks?: ManagedFileHooks,
+): Promise<ManagedFileCleanupResult> {
   let handle;
   try {
     // This is a claimed-inode wipe. There is no safe compare-and-unlink API
     // here, so never unlink a pathname that may now name a replacement.
     handle = await open(path, constants.O_WRONLY | constants.O_NOFOLLOW);
     const stat = await handle.stat();
-    if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0) return;
-    if (!sameIdentity(stat, expectedIdentity)) return;
-    if (expectedIdentity === undefined && !isClaimed(path, stat)) return;
-    for (let offset = 0; offset < stat.size;) {
-      const length = Math.min(64 * 1024, stat.size - offset);
+    if (!isSafeManagedStat(stat)) return "retained";
+    if (!sameIdentity(stat, expectedIdentity)) return "retained";
+    if (expectedIdentity === undefined && !isClaimed(path, stat))
+      return "retained";
+    await hooks?.afterOpen?.();
+    // Revalidate after the last await and before changing private bytes. There
+    // is no compare-and-remove primitive, so an ambiguous file is retained.
+    const beforeWipe = await handle.stat();
+    if (
+      !isSafeManagedStat(beforeWipe) ||
+      !sameIdentity(beforeWipe, stat) ||
+      (expectedIdentity === undefined && !isClaimed(path, beforeWipe))
+    )
+      return "retained";
+    for (let offset = 0; offset < beforeWipe.size;) {
+      const current = await handle.stat();
+      if (
+        !isSafeManagedStat(current) ||
+        !sameIdentity(current, beforeWipe) ||
+        (expectedIdentity === undefined && !isClaimed(path, current))
+      )
+        return "retained";
+      const length = Math.min(64 * 1024, beforeWipe.size - offset);
       await handle.write(Buffer.alloc(length), 0, length, offset);
       offset += length;
     }
+    const beforeTruncate = await handle.stat();
+    if (
+      !isSafeManagedStat(beforeTruncate) ||
+      !sameIdentity(beforeTruncate, beforeWipe) ||
+      (expectedIdentity === undefined && !isClaimed(path, beforeTruncate))
+    )
+      return "retained";
     await handle.truncate(0);
     await handle.sync();
     fileClaims.delete(path);
+    return "wiped";
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing";
+    throw error;
   } finally {
     await handle?.close().catch(() => undefined);
   }

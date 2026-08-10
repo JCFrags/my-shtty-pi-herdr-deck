@@ -27,13 +27,22 @@ async function child(
   path: string,
   digest: string,
   identity: { dev: number; ino: number },
+  sentinel?: string,
 ): Promise<string> {
   const script = `
     const m = await import(process.env.MODULE);
     const identity = JSON.parse(process.env.IDENTITY);
+    const hooks = process.env.SENTINEL ? {
+      afterOpen: async () => {
+        const { link, unlink } = await import("node:fs/promises");
+        await link(process.env.PATH, process.env.SENTINEL);
+        await unlink(process.env.PATH);
+        await link(process.env.SENTINEL, process.env.PATH);
+      },
+    } : undefined;
     const result = process.env.MODE === "verify"
-      ? await m.verifyManagedTokenFile(process.env.PATH, process.env.DIGEST, identity)
-      : (await m.deletePromptFile(process.env.PATH, identity), true);
+      ? await m.verifyManagedTokenFile(process.env.PATH, process.env.DIGEST, identity, hooks)
+      : await m.deletePromptFile(process.env.PATH, identity, hooks);
     process.stdout.write(JSON.stringify(result));
   `;
   const result = await run(
@@ -47,6 +56,7 @@ async function child(
         PATH: path,
         DIGEST: digest,
         IDENTITY: JSON.stringify(identity),
+        ...(sentinel ? { SENTINEL: sentinel } : {}),
       },
     },
   );
@@ -93,6 +103,45 @@ test("M2 separate process refuses hard-link sentinel custody attacks", async () 
   await child(modulePath, "delete", promptPath, "unused", promptIdentity);
   assert.equal(await readFile(promptPath, "utf8"), "prompt sentinel\n");
   assert.equal(await readFile(promptSentinel, "utf8"), "prompt sentinel\n");
+});
+
+test("M2 post-open hard-link race retains token and prompt bytes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "m2-token-hardlink-race-"));
+  const modulePath = join(process.cwd(), "dist/src/herdr/token-files.js");
+  const token = createManagedToken();
+  const tokenPath = await createManagedTokenFile(root, "agent", token);
+  const tokenIdentity = await managedFileIdentity(tokenPath);
+  const tokenSentinel = join(root, "token-race-sentinel");
+  assert.equal(
+    await child(
+      modulePath,
+      "verify",
+      tokenPath,
+      token.digest,
+      tokenIdentity,
+      tokenSentinel,
+    ),
+    "false",
+  );
+  assert.equal(await readFile(tokenPath, "utf8"), token.token + "\n");
+  assert.equal(await readFile(tokenSentinel, "utf8"), token.token + "\n");
+
+  const promptPath = await createPromptFile(root, "agent", "prompt race\n");
+  const promptIdentity = await managedFileIdentity(promptPath);
+  const promptSentinel = join(root, "prompt-race-sentinel");
+  assert.equal(
+    await child(
+      modulePath,
+      "delete",
+      promptPath,
+      "unused",
+      promptIdentity,
+      promptSentinel,
+    ),
+    JSON.stringify("retained"),
+  );
+  assert.equal(await readFile(promptPath, "utf8"), "prompt race\n");
+  assert.equal(await readFile(promptSentinel, "utf8"), "prompt race\n");
 });
 
 test("M2 separate process refuses replacement and symlink custody attacks", async () => {
