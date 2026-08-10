@@ -1,0 +1,16 @@
+{
+  "v": 1,
+  "type": "response",
+  "id": "req_01J4M9X2Q7YV1A2B3C4D5E6F7H",
+  "method": "task.get",
+  "ok": false,
+  "error": {
+    "code": "TASK_NOT_FOUND",
+    "message": "The task was not found.",
+    "retryable": false,
+    "details": {
+      "taskId": "tsk_01J4M9X2Q7YV1A2B3C4D5E6F7J"
+    },
+    "remediation": "Refresh the task list."
+  }
+}

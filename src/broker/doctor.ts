@@ -1,0 +1,68 @@
+import { access, constants, lstat } from "node:fs/promises";
+import { resolvePaths } from "../shared/paths.js";
+export interface CapabilityReport {
+  name: string;
+  available: boolean;
+  mandatory: boolean;
+  detail: string;
+}
+export interface DoctorReport {
+  version: string;
+  platform: string;
+  node: string;
+  checks: CapabilityReport[];
+  ok: boolean;
+}
+export async function doctor(): Promise<DoctorReport> {
+  const paths = resolvePaths();
+  const checks: CapabilityReport[] = [];
+  const linux = process.platform === "linux";
+  checks.push({
+    name: "linux",
+    available: linux,
+    mandatory: true,
+    detail: process.platform,
+  });
+  const nodeOk = Number(process.versions.node.split(".")[0]) >= 22;
+  checks.push({
+    name: "node",
+    available: nodeOk,
+    mandatory: true,
+    detail: process.versions.node,
+  });
+  const git = await commandAvailable("git");
+  checks.push({
+    name: "git",
+    available: git,
+    mandatory: true,
+    detail: git ? "executable" : "not found",
+  });
+  let stateOk = true;
+  try {
+    const parent = await lstat(paths.root);
+    stateOk = parent.isDirectory() && !parent.isSymbolicLink();
+  } catch (error) {
+    stateOk = (error as NodeJS.ErrnoException).code === "ENOENT";
+  }
+  checks.push({
+    name: "state-path",
+    available: stateOk,
+    mandatory: true,
+    detail: paths.root,
+  });
+  return {
+    version: "0.1.0",
+    platform: process.platform,
+    node: process.versions.node,
+    checks,
+    ok: checks.every((check) => !check.mandatory || check.available),
+  };
+}
+async function commandAvailable(name: string): Promise<boolean> {
+  try {
+    await access(`/usr/bin/${name}`, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}

@@ -1,8 +1,8 @@
-id = "pi.herdr.deck"
-name = "Pi Deck"
+id = "pi.herdr.orchestrator"
+name = "Pi Herd Orchestrator"
 version = "0.1.0"
-min_herdr_version = "0.7.2"
-description = "Mouse-first side deck for a running Pi agent pane"
+min_herdr_version = "0.8.0"
+description = "Herdr-native multi-agent control plane for Pi coding agents"
 platforms = ["linux"]
 
 [[build]]
@@ -11,6 +11,6 @@ platforms = ["linux"]
 
 [[panes]]
 id = "deck"
-title = "Pi Deck"
+title = "Pi Herd"
 placement = "split"
-command = ["./bin/pi-herdr-deck"]
+command = ["./bin/pi-herdr-orchestrator", "deck"]

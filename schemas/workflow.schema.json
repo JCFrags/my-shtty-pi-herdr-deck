@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jcfrags.local/pi-herdr-orchestrator/schemas/workflow-v1.json",
+  "title": "Delegation Workflow",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "id",
+    "name",
+    "description",
+    "mode",
+    "failureMode",
+    "maxCorrectionLoops",
+    "steps"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "mode": {
+      "enum": [
+        "single",
+        "parallel",
+        "chain",
+        "dag",
+        "implement_review_fix"
+      ]
+    },
+    "failureMode": {
+      "enum": [
+        "fail_fast",
+        "collect_all"
+      ]
+    },
+    "maxCorrectionLoops": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 3
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "key",
+          "profileId",
+          "title",
+          "objectiveTemplate",
+          "constraints",
+          "dependsOn",
+          "resultProjection",
+          "isolationMode"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+          },
+          "profileId": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "objectiveTemplate": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 65536
+          },
+          "constraints": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            }
+          },
+          "dependsOn": {
+            "type": "array",
+            "maxItems": 32,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+            }
+          },
+          "resultProjection": {
+            "type": "array",
+            "maxItems": 16,
+            "uniqueItems": true,
+            "items": {
+              "enum": [
+                "/summary",
+                "/findings",
+                "/changedFiles",
+                "/tests",
+                "/unresolved",
+                "/recommendedNextAction"
+              ]
+            }
+          },
+          "isolationMode": {
+            "enum": [
+              "profile-default",
+              "shared-readonly",
+              "worktree",
+              "shared-explicit",
+              "reuse-worktree"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

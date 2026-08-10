@@ -1,0 +1,16 @@
+{
+  "v": 1,
+  "type": "event",
+  "seq": 1843,
+  "id": "evt_01J4M9X2Q7YV1A2B3C4D5E6F7K",
+  "event": "task.state_changed",
+  "timestamp": "2026-08-08T20:14:33.120Z",
+  "refs": {
+    "taskId": "tsk_01J4M9X2Q7YV1A2B3C4D5E6F7J"
+  },
+  "data": {
+    "from": "running",
+    "to": "blocked",
+    "reasonCode": "QUESTION_OPEN"
+  }
+}

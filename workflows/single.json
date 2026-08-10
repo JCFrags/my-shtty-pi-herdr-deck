@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "id": "single",
+  "name": "Single delegation",
+  "description": "Run one task with a selected profile.",
+  "mode": "single",
+  "failureMode": "fail_fast",
+  "maxCorrectionLoops": 0,
+  "steps": [
+    {
+      "key": "task",
+      "profileId": "scout",
+      "title": "Delegated task",
+      "objectiveTemplate": "{{input.objective}}",
+      "constraints": [],
+      "dependsOn": [],
+      "resultProjection": [
+        "/summary",
+        "/findings",
+        "/unresolved"
+      ],
+      "isolationMode": "profile-default"
+    }
+  ]
+}

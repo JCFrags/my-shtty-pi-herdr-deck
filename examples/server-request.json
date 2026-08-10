@@ -1,0 +1,9 @@
+{
+  "v": 1,
+  "type": "server_request",
+  "id": "srv_01J4M9X2Q7YV1A2B3C4D5E6F7M",
+  "method": "assignment.deliver",
+  "params": {
+    "assignmentId": "asg_01J4M9X2Q7YV1A2B3C4D5E6F7N"
+  }
+}

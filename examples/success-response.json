@@ -1,0 +1,11 @@
+{
+  "v": 1,
+  "type": "response",
+  "id": "req_01J4M9X2Q7YV1A2B3C4D5E6F7H",
+  "method": "task.get",
+  "ok": true,
+  "result": {
+    "taskId": "tsk_01J4M9X2Q7YV1A2B3C4D5E6F7J",
+    "state": "running"
+  }
+}

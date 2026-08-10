@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "status": "succeeded",
+  "summary": "Implemented refresh-token validation and added boundary coverage.",
+  "findings": [],
+  "changedFiles": [
+    {
+      "path": "src/auth/refresh.ts",
+      "change": "modified",
+      "previousPath": null
+    },
+    {
+      "path": "test/auth/refresh.test.ts",
+      "change": "modified",
+      "previousPath": null
+    }
+  ],
+  "commandsRun": [
+    {
+      "command": "npm test -- auth",
+      "exitCode": 0,
+      "outcome": "passed"
+    }
+  ],
+  "tests": [
+    {
+      "name": "Authentication tests",
+      "command": "npm test -- auth",
+      "status": "passed",
+      "passed": 34,
+      "failed": 0,
+      "skipped": 0,
+      "evidence": "All selected tests passed."
+    }
+  ],
+  "commits": [
+    {
+      "sha": "8f31a2c",
+      "subject": "Validate refresh token expiry"
+    }
+  ],
+  "artifacts": [],
+  "unresolved": [],
+  "questions": [],
+  "recommendedNextAction": "review"
+}

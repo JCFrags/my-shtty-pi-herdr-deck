@@ -308,3 +308,7 @@ Coverage includes protocol encoding/decoding, malformed and oversized frames, so
 ## Non-goals
 
 Version one does not implement a file browser, change review, session switching, sub-agent spawning, arbitrary shell execution, transcript mirroring, or raw terminal keystroke control.
+
+## Orchestrator migration
+
+This release adds the `pi-herdr-orchestrator` binary and the `pi.herdr.orchestrator` plugin. The `pi-herdr-deck` binary remains as a compatibility entrypoint for the existing Overview and Tools behavior. M0/M1 core state and broker APIs are local-only and do not publish packages or use provider credentials.

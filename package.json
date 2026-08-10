@@ -1,7 +1,7 @@
 {
-  "name": "pi-herdr-deck",
+  "name": "pi-herdr-orchestrator",
   "version": "0.1.0",
-  "description": "Mouse-first Herdr side deck for controlling a running Pi session",
+  "description": "Herdr-native multi-agent control plane for Pi coding agents",
   "type": "module",
   "license": "MIT",
   "private": false,
@@ -12,12 +12,16 @@
     "node": ">=22.19.0"
   },
   "bin": {
+    "pi-herdr-orchestrator": "./bin/pi-herdr-orchestrator",
     "pi-herdr-deck": "./bin/pi-herdr-deck"
   },
   "files": [
     "bin",
-    "dist/extensions",
-    "dist/src",
+    "dist",
+    "schemas",
+    "profiles",
+    "workflows",
+    "examples",
     "herdr-plugin.toml",
     "README.md",
     "SECURITY.md",
@@ -26,12 +30,16 @@
   "scripts": {
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit",
-    "build": "npm run clean && tsc",
+    "build": "npm run clean && tsc && cp -r schemas profiles workflows examples dist/",
     "test": "node --test dist/tests/unit/*.test.js",
     "test:unit": "node --test dist/tests/unit/*.test.js",
     "test:integration": "node --test dist/tests/integration/*.test.js",
     "smoke:package": "node scripts/package-smoke.mjs",
-    "validate": "npm run typecheck && npm run build && npm run test:unit && npm run test:integration && npm run smoke:package"
+    "validate": "npm run check && npm run build && npm run test:unit && npm run test:integration && npm run smoke:package",
+    "test:schemas": "node scripts/schema-check.mjs",
+    "schemas:check": "node scripts/schema-check.mjs",
+    "check": "npm run typecheck && npm run schemas:check",
+    "lint": "prettier --check \"src/shared/**/*.ts\" \"src/state/**/*.ts\" \"src/broker/**/*.ts\" \"src/cli/**/*.ts\" tests/unit/core-m1.test.ts tests/unit/m1-recovery-performance.test.ts"
   },
   "dependencies": {
     "@pi-herdr-deck/tui": "npm:@earendil-works/pi-tui@0.83.0"
@@ -58,11 +66,12 @@
   },
   "devDependencies": {
     "@types/node": "22.15.30",
+    "prettier": "^3.9.6",
     "typescript": "5.8.3"
   },
   "pi": {
     "extensions": [
-      "./dist/extensions/pi-herdr-deck.js"
+      "./dist/extensions/pi-herdr-orchestrator.js"
     ]
   },
   "keywords": [

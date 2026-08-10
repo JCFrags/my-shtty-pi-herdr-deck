@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "id": "implement-review-fix",
+  "name": "Implement, review, and correct",
+  "description": "Implement in a worktree, review it, apply at most one correction, and review again.",
+  "mode": "implement_review_fix",
+  "failureMode": "fail_fast",
+  "maxCorrectionLoops": 1,
+  "steps": [
+    {
+      "key": "implement",
+      "profileId": "implementer",
+      "title": "Implement change",
+      "objectiveTemplate": "Implement: {{input.objective}}",
+      "constraints": [],
+      "dependsOn": [],
+      "resultProjection": [
+        "/summary",
+        "/changedFiles",
+        "/tests",
+        "/unresolved"
+      ],
+      "isolationMode": "worktree"
+    },
+    {
+      "key": "review",
+      "profileId": "reviewer",
+      "title": "Review implementation",
+      "objectiveTemplate": "Review the implementation for: {{input.objective}}",
+      "constraints": [
+        "Do not edit files."
+      ],
+      "dependsOn": [
+        "implement"
+      ],
+      "resultProjection": [
+        "/summary",
+        "/findings",
+        "/unresolved",
+        "/recommendedNextAction"
+      ],
+      "isolationMode": "reuse-worktree"
+    },
+    {
+      "key": "fix",
+      "profileId": "implementer",
+      "title": "Apply review correction",
+      "objectiveTemplate": "Address the review findings for: {{input.objective}}",
+      "constraints": [],
+      "dependsOn": [
+        "review"
+      ],
+      "resultProjection": [
+        "/summary",
+        "/changedFiles",
+        "/tests",
+        "/unresolved"
+      ],
+      "isolationMode": "reuse-worktree"
+    },
+    {
+      "key": "final-review",
+      "profileId": "reviewer",
+      "title": "Final review",
+      "objectiveTemplate": "Perform final review for: {{input.objective}}",
+      "constraints": [
+        "Do not edit files."
+      ],
+      "dependsOn": [
+        "fix"
+      ],
+      "resultProjection": [
+        "/summary",
+        "/findings",
+        "/unresolved",
+        "/recommendedNextAction"
+      ],
+      "isolationMode": "reuse-worktree"
+    }
+  ]
+}

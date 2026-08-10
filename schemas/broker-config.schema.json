@@ -1,0 +1,226 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jcfrags.local/pi-herdr-orchestrator/schemas/broker-config-v1.json",
+  "title": "Pi Herd Orchestrator Broker Configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "scheduler": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxActiveAgents": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32,
+          "default": 4
+        },
+        "maxActivePerParent": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16,
+          "default": 4
+        },
+        "maxQueuedTasks": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000,
+          "default": 32
+        },
+        "maxTasksPerDelegate": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32,
+          "default": 8
+        },
+        "maxDelegationDepth": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4,
+          "default": 2
+        },
+        "maxProvisioning": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8,
+          "default": 2
+        }
+      }
+    },
+    "timeouts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "agentStartMs": {
+          "type": "integer",
+          "minimum": 3001,
+          "maximum": 300000,
+          "default": 30000
+        },
+        "adapterRegisterMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 300000,
+          "default": 15000
+        },
+        "assignmentAcceptMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 60000,
+          "default": 10000
+        },
+        "defaultTaskMs": {
+          "type": "integer",
+          "minimum": 10000,
+          "maximum": 86400000,
+          "default": 1800000
+        },
+        "questionMs": {
+          "type": "integer",
+          "minimum": 10000,
+          "maximum": 86400000,
+          "default": 1800000
+        },
+        "resultRecoveryMs": {
+          "type": "integer",
+          "minimum": 10000,
+          "maximum": 600000,
+          "default": 120000
+        },
+        "stopGraceMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 300000,
+          "default": 30000
+        },
+        "externalCommandMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 300000,
+          "default": 10000
+        }
+      }
+    },
+    "retention": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "eventsDays": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3650,
+          "default": 30
+        },
+        "artifactsDays": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3650,
+          "default": 14
+        },
+        "logsDays": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 365,
+          "default": 7
+        },
+        "cleanWorktreesDays": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3650,
+          "default": 7
+        },
+        "retainFinalResults": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "security": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allowProjectProfiles": {
+          "type": "boolean",
+          "default": true
+        },
+        "allowProjectProfileOverrides": {
+          "type": "boolean",
+          "default": false
+        },
+        "allowSharedWrites": {
+          "type": "boolean",
+          "default": false
+        },
+        "allowCoarseHerdrControlFallback": {
+          "type": "boolean",
+          "default": false
+        },
+        "maxProtocolLineBytes": {
+          "type": "integer",
+          "minimum": 65536,
+          "maximum": 1048576,
+          "default": 1048576
+        },
+        "artifactMaxBytes": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 67108864,
+          "default": 16777216
+        }
+      }
+    },
+    "ui": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "metadataTokens": {
+          "type": "boolean",
+          "default": true
+        },
+        "notificationLevel": {
+          "enum": [
+            "critical",
+            "normal",
+            "all",
+            "none"
+          ],
+          "default": "normal"
+        }
+      }
+    },
+    "logging": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "enum": [
+            "error",
+            "warn",
+            "info",
+            "debug",
+            "trace"
+          ],
+          "default": "info"
+        },
+        "maxFileBytes": {
+          "type": "integer",
+          "minimum": 1048576,
+          "maximum": 104857600,
+          "default": 10485760
+        },
+        "maxFiles": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50,
+          "default": 5
+        }
+      }
+    }
+  }
+}
