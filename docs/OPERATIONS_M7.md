@@ -22,13 +22,15 @@ Validate an owner-controlled configuration file:
 pi-herdr-orchestrator config validate ./config.json
 ```
 
-Project configuration is accepted only when `PI_HERDR_ORCH_PROJECT_TRUSTED=1` is set by the trusted Pi context. Unknown fields, writable files, symlinks, and secret-like fields fail closed.
+Project configuration is accepted only when `PI_HERDR_ORCH_PROJECT_TRUSTED=1` is set by the trusted Pi context. Unknown fields, writable files, symlinks, and secret-like fields fail closed. The shipped CLI also applies the effective config policy and returns its generation and hash.
 
 ## State and export
 
 ```bash
 pi-herdr-orchestrator broker status
 pi-herdr-orchestrator events verify --json
+pi-herdr-orchestrator recovery plan
+pi-herdr-orchestrator recovery export --output ./private-export
 pi-herdr-orchestrator retention plan
 pi-herdr-orchestrator export --output ./private-export
 ```
@@ -47,7 +49,7 @@ PI_HERDR_ORCH_SOAK_ITERATIONS=20 npm run ops:soak
 npm run ops:rollback
 ```
 
-`--execute` is reserved for a separately approved operator run. The harness uses argv-only child processes, finite timeouts, and records only command status and output lengths.
+The harness is plan-only. `--execute` is rejected. Operator mutations use `src/ops/operator-actions.ts`; they require explicit confirmation, exact commit and resource identities, preflight evidence, a finite timeout, and a rollback record. Execution requires an injected runner and is used only by fake-runner tests in this lane.
 
 Canary order is: fake validation, package smoke, disposable fake stack, then an explicitly selected low-risk task. Do not repoint Pi or Herdr registration until each earlier gate passes.
 
@@ -60,7 +62,7 @@ Canary order is: fake validation, package smoke, disposable fake stack, then an 
 5. Start the broker and run `doctor` and `status`.
 6. Reconcile agents and retain dirty or ambiguous worktrees.
 
-Never run older code against a newer unsupported state generation. Never kill-scan processes. Never remove a dirty, live, unknown, or replaced resource.
+Never run older code against a newer unsupported state generation. Never kill-scan processes. Never remove a dirty, live, unknown, missing, ambiguous, or replaced resource. Operation verification fails closed when a resource identity changes.
 
 ## Soak evidence
 
