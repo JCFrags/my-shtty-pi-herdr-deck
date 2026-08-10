@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jcfrags.local/pi-herdr-orchestrator/schemas/task-create-v1.json",
+  "title": "Task Create Request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "title",
+    "objective",
+    "constraints",
+    "profileId",
+    "priority",
+    "dependsOn",
+    "isolation",
+    "budget",
+    "timeoutMs"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "objective": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 65536
+    },
+    "constraints": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 8192
+      }
+    },
+    "profileId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    },
+    "priority": {
+      "enum": [
+        "low",
+        "normal",
+        "high"
+      ]
+    },
+    "dependsOn": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^tsk_[0-9A-HJKMNP-TV-Z]{26}$"
+      }
+    },
+    "isolation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "profile-default",
+            "shared-readonly",
+            "worktree",
+            "shared-explicit"
+          ]
+        },
+        "baseRevision": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256
+        }
+      }
+    },
+    "budget": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "wallTimeMs": {
+          "type": "integer",
+          "minimum": 10000,
+          "maximum": 86400000
+        },
+        "maxTurns": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "maxContextPercent": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "exclusiveMinimum": 0,
+          "maximum": 100
+        },
+        "maxCostUsd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "exclusiveMinimum": 0
+        }
+      }
+    },
+    "timeoutMs": {
+      "type": "integer",
+      "minimum": 10000,
+      "maximum": 86400000
+    },
+    "contextReferences": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "reference",
+          "description"
+        ],
+        "properties": {
+          "kind": {
+            "enum": [
+              "task_result",
+              "file",
+              "artifact",
+              "text"
+            ]
+          },
+          "reference": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
+        }
+      },
+      "default": []
+    }
+  }
+}

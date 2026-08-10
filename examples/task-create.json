@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "title": "Inspect authentication",
+  "objective": "Locate the authentication implementation and identify correctness and security risks.",
+  "constraints": [
+    "Do not modify files.",
+    "Cite exact paths and symbols."
+  ],
+  "profileId": "scout",
+  "priority": "normal",
+  "dependsOn": [],
+  "isolation": {
+    "mode": "profile-default",
+    "baseRevision": null
+  },
+  "budget": {
+    "wallTimeMs": 900000,
+    "maxTurns": 20,
+    "maxContextPercent": 85,
+    "maxCostUsd": null
+  },
+  "timeoutMs": 900000,
+  "contextReferences": []
+}

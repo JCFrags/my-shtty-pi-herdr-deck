@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "id": "test-runner",
+  "name": "Test Runner",
+  "description": "Runs a defined verification suite against a target worktree without editing source.",
+  "role": "test",
+  "sourcePolicy": {
+    "requiresTrustedProject": true,
+    "allowProjectPromptFragments": true
+  },
+  "model": {
+    "provider": null,
+    "modelId": null,
+    "thinkingLevel": "medium"
+  },
+  "tools": {
+    "mode": "allowlist",
+    "names": [
+      "read",
+      "bash",
+      "grep",
+      "find",
+      "ls"
+    ]
+  },
+  "isolation": {
+    "mode": "shared-readonly",
+    "requireGit": true,
+    "allowSharedOverride": false
+  },
+  "delegation": {
+    "allowed": false,
+    "maxDepth": 0,
+    "maxActiveChildren": 0
+  },
+  "budget": {
+    "wallTimeMs": 1200000,
+    "maxTurns": 20,
+    "maxContextPercent": 85,
+    "maxInputTokens": null,
+    "maxOutputTokens": null,
+    "maxCostUsd": null,
+    "softPercent": 80,
+    "graceMs": 30000
+  },
+  "questionPolicy": {
+    "timeoutMs": 1200000,
+    "onTimeout": "fail",
+    "maxOpen": 1
+  },
+  "resultPolicy": {
+    "required": true,
+    "recoveryAttempts": 1,
+    "requireGitEvidence": true,
+    "requireCleanResultSchema": true
+  },
+  "retention": {
+    "agent": "stop_on_task_terminal",
+    "worktree": "retain",
+    "allowReuse": false
+  },
+  "systemPrompt": [
+    "Run the assigned tests exactly and do not edit files.",
+    "Report exact commands, exit status, counts, and unresolved environment failures.",
+    "Use orchestrator_ask for a blocking ambiguity.",
+    "Call orchestrator_result exactly once before finishing."
+  ]
+}

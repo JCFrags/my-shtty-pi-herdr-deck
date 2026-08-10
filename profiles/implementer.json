@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "id": "implementer",
+  "name": "Implementer",
+  "description": "Implements a scoped change in an isolated Git worktree and reports exact evidence.",
+  "role": "implement",
+  "sourcePolicy": {
+    "requiresTrustedProject": true,
+    "allowProjectPromptFragments": true
+  },
+  "model": {
+    "provider": null,
+    "modelId": null,
+    "thinkingLevel": "high"
+  },
+  "tools": {
+    "mode": "allowlist",
+    "names": [
+      "read",
+      "write",
+      "edit",
+      "bash",
+      "grep",
+      "find",
+      "ls"
+    ]
+  },
+  "isolation": {
+    "mode": "worktree",
+    "requireGit": true,
+    "allowSharedOverride": false
+  },
+  "delegation": {
+    "allowed": false,
+    "maxDepth": 0,
+    "maxActiveChildren": 0
+  },
+  "budget": {
+    "wallTimeMs": 1800000,
+    "maxTurns": 30,
+    "maxContextPercent": 90,
+    "maxInputTokens": null,
+    "maxOutputTokens": null,
+    "maxCostUsd": null,
+    "softPercent": 80,
+    "graceMs": 30000
+  },
+  "questionPolicy": {
+    "timeoutMs": 1800000,
+    "onTimeout": "fail",
+    "maxOpen": 1
+  },
+  "resultPolicy": {
+    "required": true,
+    "recoveryAttempts": 1,
+    "requireGitEvidence": true,
+    "requireCleanResultSchema": true
+  },
+  "retention": {
+    "agent": "retain_until_workflow_terminal",
+    "worktree": "retain",
+    "allowReuse": false
+  },
+  "systemPrompt": [
+    "Work only in the assigned worktree and on the assigned objective.",
+    "Run relevant verification and report failures honestly.",
+    "Use orchestrator_ask for a blocking ambiguity.",
+    "Call orchestrator_result exactly once before finishing."
+  ]
+}

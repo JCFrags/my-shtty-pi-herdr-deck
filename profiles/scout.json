@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "id": "scout",
+  "name": "Scout",
+  "description": "Performs fast read-only codebase reconnaissance and returns concise evidence.",
+  "role": "scout",
+  "sourcePolicy": {
+    "requiresTrustedProject": true,
+    "allowProjectPromptFragments": true
+  },
+  "model": {
+    "provider": null,
+    "modelId": null,
+    "thinkingLevel": "low"
+  },
+  "tools": {
+    "mode": "allowlist",
+    "names": [
+      "read",
+      "grep",
+      "find",
+      "ls"
+    ]
+  },
+  "isolation": {
+    "mode": "shared-readonly",
+    "requireGit": false,
+    "allowSharedOverride": false
+  },
+  "delegation": {
+    "allowed": false,
+    "maxDepth": 0,
+    "maxActiveChildren": 0
+  },
+  "budget": {
+    "wallTimeMs": 900000,
+    "maxTurns": 20,
+    "maxContextPercent": 85,
+    "maxInputTokens": null,
+    "maxOutputTokens": null,
+    "maxCostUsd": null,
+    "softPercent": 80,
+    "graceMs": 30000
+  },
+  "questionPolicy": {
+    "timeoutMs": 900000,
+    "onTimeout": "fail",
+    "maxOpen": 1
+  },
+  "resultPolicy": {
+    "required": true,
+    "recoveryAttempts": 1,
+    "requireGitEvidence": false,
+    "requireCleanResultSchema": true
+  },
+  "retention": {
+    "agent": "stop_on_task_terminal",
+    "worktree": "retain",
+    "allowReuse": false
+  },
+  "systemPrompt": [
+    "Investigate only the assigned objective and remain read-only.",
+    "Cite exact files, symbols, commands, or test names as evidence.",
+    "Use orchestrator_ask for a blocking ambiguity.",
+    "Call orchestrator_result exactly once before finishing."
+  ]
+}

@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jcfrags.local/pi-herdr-orchestrator/schemas/question-v1.json",
+  "title": "Managed Agent Question",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "prompt",
+    "options",
+    "allowFreeform",
+    "context",
+    "defaultOptionId",
+    "timeoutMs"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "prompt": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16384
+    },
+    "context": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 16384
+    },
+    "options": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "label",
+          "description"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,32}$"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 4096
+          }
+        }
+      }
+    },
+    "allowFreeform": {
+      "type": "boolean"
+    },
+    "defaultOptionId": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[A-Za-z0-9_-]{1,32}$"
+    },
+    "timeoutMs": {
+      "type": "integer",
+      "minimum": 10000,
+      "maximum": 86400000
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "allowFreeform": {
+            "const": false
+          },
+          "options": {
+            "maxItems": 0
+          }
+        }
+      },
+      "then": false
+    }
+  ]
+}

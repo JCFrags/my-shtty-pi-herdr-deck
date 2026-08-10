@@ -1,0 +1,389 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jcfrags.local/pi-herdr-orchestrator/schemas/agent-profile-v1.json",
+  "title": "Pi Herd Orchestrator Agent Profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "id",
+    "name",
+    "description",
+    "role",
+    "sourcePolicy",
+    "model",
+    "tools",
+    "isolation",
+    "delegation",
+    "budget",
+    "questionPolicy",
+    "resultPolicy",
+    "retention",
+    "systemPrompt"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "role": {
+      "enum": [
+        "scout",
+        "plan",
+        "implement",
+        "review",
+        "test",
+        "debug",
+        "release",
+        "custom"
+      ]
+    },
+    "sourcePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requiresTrustedProject",
+        "allowProjectPromptFragments"
+      ],
+      "properties": {
+        "requiresTrustedProject": {
+          "type": "boolean"
+        },
+        "allowProjectPromptFragments": {
+          "type": "boolean"
+        }
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "modelId",
+        "thinkingLevel"
+      ],
+      "properties": {
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "modelId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "thinkingLevel": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            null,
+            "off",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "provider": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ]
+          },
+          "then": {
+            "properties": {
+              "modelId": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "modelId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "modelId"
+            ]
+          },
+          "then": {
+            "properties": {
+              "provider": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "tools": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "names"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "allowlist",
+            "inherit",
+            "denylist"
+          ]
+        },
+        "names": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      }
+    },
+    "isolation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "requireGit",
+        "allowSharedOverride"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "shared-readonly",
+            "worktree",
+            "shared-explicit"
+          ]
+        },
+        "requireGit": {
+          "type": "boolean"
+        },
+        "allowSharedOverride": {
+          "type": "boolean"
+        }
+      }
+    },
+    "delegation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allowed",
+        "maxDepth",
+        "maxActiveChildren"
+      ],
+      "properties": {
+        "allowed": {
+          "type": "boolean"
+        },
+        "maxDepth": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4
+        },
+        "maxActiveChildren": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16
+        }
+      }
+    },
+    "budget": {
+      "$ref": "#/$defs/budget"
+    },
+    "questionPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "timeoutMs",
+        "onTimeout",
+        "maxOpen"
+      ],
+      "properties": {
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 10000,
+          "maximum": 86400000
+        },
+        "onTimeout": {
+          "enum": [
+            "fail",
+            "continue_default",
+            "escalate"
+          ]
+        },
+        "maxOpen": {
+          "const": 1
+        }
+      }
+    },
+    "resultPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "required",
+        "recoveryAttempts",
+        "requireGitEvidence",
+        "requireCleanResultSchema"
+      ],
+      "properties": {
+        "required": {
+          "const": true
+        },
+        "recoveryAttempts": {
+          "const": 1
+        },
+        "requireGitEvidence": {
+          "type": "boolean"
+        },
+        "requireCleanResultSchema": {
+          "const": true
+        }
+      }
+    },
+    "retention": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agent",
+        "worktree",
+        "allowReuse"
+      ],
+      "properties": {
+        "agent": {
+          "enum": [
+            "stop_on_task_terminal",
+            "retain_until_workflow_terminal",
+            "retain_idle"
+          ]
+        },
+        "worktree": {
+          "enum": [
+            "retain",
+            "gc_when_clean"
+          ]
+        },
+        "allowReuse": {
+          "type": "boolean"
+        }
+      }
+    },
+    "systemPrompt": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 8192
+      }
+    }
+  },
+  "$defs": {
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "wallTimeMs",
+        "maxTurns",
+        "maxContextPercent",
+        "maxInputTokens",
+        "maxOutputTokens",
+        "maxCostUsd",
+        "softPercent",
+        "graceMs"
+      ],
+      "properties": {
+        "wallTimeMs": {
+          "type": "integer",
+          "minimum": 10000,
+          "maximum": 86400000
+        },
+        "maxTurns": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "maxContextPercent": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "exclusiveMinimum": 0,
+          "maximum": 100
+        },
+        "maxInputTokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "maxOutputTokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "maxCostUsd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "exclusiveMinimum": 0,
+          "maximum": 1000000
+        },
+        "softPercent": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 99
+        },
+        "graceMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 300000
+        }
+      }
+    }
+  }
+}

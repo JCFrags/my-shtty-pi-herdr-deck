@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jcfrags.local/pi-herdr-orchestrator/schemas/stored-event-v1.json",
+  "title": "Stored Event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "seq",
+    "id",
+    "timestamp",
+    "type",
+    "actor",
+    "entityRefs",
+    "payload",
+    "prevHash",
+    "hash"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^evt_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "type": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$",
+      "maxLength": 128
+    },
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "principalId",
+        "kind"
+      ],
+      "properties": {
+        "principalId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "kind": {
+          "enum": [
+            "human",
+            "pi_parent",
+            "pi_child",
+            "observer",
+            "system"
+          ]
+        }
+      }
+    },
+    "correlationId": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 128
+    },
+    "entityRefs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "workflowId": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "taskId": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "runId": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "agentId": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "questionId": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "resultId": {
+          "type": "string",
+          "maxLength": 64
+        }
+      }
+    },
+    "payload": {
+      "type": "object"
+    },
+    "prevHash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

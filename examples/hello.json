@@ -1,0 +1,18 @@
+{
+  "v": 1,
+  "type": "hello",
+  "id": "req_01J4M9X2Q7YV1A2B3C4D5E6F7G",
+  "client": {
+    "kind": "deck",
+    "name": "pi-herdr-orchestrator-deck",
+    "version": "0.1.0",
+    "capabilities": [
+      "events.replay"
+    ]
+  },
+  "sessionKey": "0123456789abcdef01234567",
+  "auth": {
+    "kind": "client_secret",
+    "secret": "example-not-a-real-secret"
+  }
+}

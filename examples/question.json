@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "prompt": "The implementation and tests disagree about the refresh-token lifetime. Which is authoritative?",
+  "context": "The implementation uses 30 minutes; two tests expect 60 minutes.",
+  "options": [
+    {
+      "id": "A",
+      "label": "Use 30 minutes",
+      "description": "Preserve implementation and update tests."
+    },
+    {
+      "id": "B",
+      "label": "Use 60 minutes",
+      "description": "Update implementation to match tests."
+    },
+    {
+      "id": "C",
+      "label": "Report conflict only",
+      "description": "Make no behavior change."
+    }
+  ],
+  "allowFreeform": true,
+  "defaultOptionId": null,
+  "timeoutMs": 1800000
+}

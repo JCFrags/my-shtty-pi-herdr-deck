@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "id": "parallel-scout",
+  "name": "Parallel scouts",
+  "description": "Run independent read-only scouts and collect all results.",
+  "mode": "parallel",
+  "failureMode": "collect_all",
+  "maxCorrectionLoops": 0,
+  "steps": [
+    {
+      "key": "source",
+      "profileId": "scout",
+      "title": "Inspect source",
+      "objectiveTemplate": "Inspect source for: {{input.objective}}",
+      "constraints": [
+        "Remain read-only."
+      ],
+      "dependsOn": [],
+      "resultProjection": [
+        "/summary",
+        "/findings",
+        "/unresolved"
+      ],
+      "isolationMode": "shared-readonly"
+    },
+    {
+      "key": "tests",
+      "profileId": "scout",
+      "title": "Inspect tests",
+      "objectiveTemplate": "Inspect tests and gaps for: {{input.objective}}",
+      "constraints": [
+        "Remain read-only."
+      ],
+      "dependsOn": [],
+      "resultProjection": [
+        "/summary",
+        "/findings",
+        "/unresolved"
+      ],
+      "isolationMode": "shared-readonly"
+    }
+  ]
+}

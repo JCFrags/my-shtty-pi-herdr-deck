@@ -1,0 +1,350 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jcfrags.local/pi-herdr-orchestrator/schemas/result-v1.json",
+  "title": "Managed Agent Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "status",
+    "summary",
+    "findings",
+    "changedFiles",
+    "commandsRun",
+    "tests",
+    "commits",
+    "artifacts",
+    "unresolved",
+    "questions",
+    "recommendedNextAction"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "status": {
+      "enum": [
+        "succeeded",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 65536
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "severity",
+          "title",
+          "description",
+          "evidence",
+          "resolved"
+        ],
+        "properties": {
+          "severity": {
+            "enum": [
+              "info",
+              "low",
+              "medium",
+              "high",
+              "critical"
+            ]
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192
+          },
+          "evidence": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          },
+          "resolved": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "changedFiles": {
+      "type": "array",
+      "maxItems": 4096,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "change"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "change": {
+            "enum": [
+              "added",
+              "modified",
+              "deleted",
+              "renamed",
+              "unknown"
+            ]
+          },
+          "previousPath": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 4096
+          }
+        }
+      }
+    },
+    "commandsRun": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "command",
+          "exitCode",
+          "outcome"
+        ],
+        "properties": {
+          "command": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192
+          },
+          "exitCode": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 255
+          },
+          "outcome": {
+            "enum": [
+              "passed",
+              "failed",
+              "cancelled",
+              "unknown"
+            ]
+          }
+        }
+      }
+    },
+    "tests": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "command",
+          "status",
+          "passed",
+          "failed",
+          "skipped",
+          "evidence"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "command": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 8192
+          },
+          "status": {
+            "enum": [
+              "passed",
+              "failed",
+              "cancelled",
+              "unknown"
+            ]
+          },
+          "passed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "failed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "skipped": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "evidence": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 4096
+          }
+        }
+      }
+    },
+    "commits": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sha",
+          "subject"
+        ],
+        "properties": {
+          "sha": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{7,64}$"
+          },
+          "subject": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "path",
+          "description",
+          "mediaType"
+        ],
+        "properties": {
+          "kind": {
+            "enum": [
+              "text",
+              "json",
+              "patch",
+              "log",
+              "report",
+              "other"
+            ]
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "mediaType": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      }
+    },
+    "unresolved": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "title",
+          "description",
+          "blocking"
+        ],
+        "properties": {
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192
+          },
+          "blocking": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "questions": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "questionId",
+          "summary",
+          "answered"
+        ],
+        "properties": {
+          "questionId": {
+            "type": "string",
+            "pattern": "^qst_[0-9A-HJKMNP-TV-Z]{26}$"
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "answered": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "recommendedNextAction": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 8192
+    }
+  }
+}

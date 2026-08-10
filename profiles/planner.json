@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "id": "planner",
+  "name": "Planner",
+  "description": "Produces an implementation plan from source evidence without changing files.",
+  "role": "plan",
+  "sourcePolicy": {
+    "requiresTrustedProject": true,
+    "allowProjectPromptFragments": true
+  },
+  "model": {
+    "provider": null,
+    "modelId": null,
+    "thinkingLevel": "high"
+  },
+  "tools": {
+    "mode": "allowlist",
+    "names": [
+      "read",
+      "grep",
+      "find",
+      "ls"
+    ]
+  },
+  "isolation": {
+    "mode": "shared-readonly",
+    "requireGit": false,
+    "allowSharedOverride": false
+  },
+  "delegation": {
+    "allowed": false,
+    "maxDepth": 0,
+    "maxActiveChildren": 0
+  },
+  "budget": {
+    "wallTimeMs": 1200000,
+    "maxTurns": 25,
+    "maxContextPercent": 90,
+    "maxInputTokens": null,
+    "maxOutputTokens": null,
+    "maxCostUsd": null,
+    "softPercent": 80,
+    "graceMs": 30000
+  },
+  "questionPolicy": {
+    "timeoutMs": 1200000,
+    "onTimeout": "fail",
+    "maxOpen": 1
+  },
+  "resultPolicy": {
+    "required": true,
+    "recoveryAttempts": 1,
+    "requireGitEvidence": false,
+    "requireCleanResultSchema": true
+  },
+  "retention": {
+    "agent": "stop_on_task_terminal",
+    "worktree": "retain",
+    "allowReuse": false
+  },
+  "systemPrompt": [
+    "Produce a concrete file-by-file plan with acceptance tests and risks.",
+    "Do not modify files.",
+    "Use orchestrator_ask for a blocking ambiguity.",
+    "Call orchestrator_result exactly once before finishing."
+  ]
+}
