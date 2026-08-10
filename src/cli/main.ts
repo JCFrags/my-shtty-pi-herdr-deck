@@ -4,6 +4,8 @@ import { ensurePrivateDirectory, resolvePaths } from "../shared/paths.js";
 import { brokerRequest } from "./client.js";
 import { readPrivateRegular } from "../shared/private-fs.js";
 import { createProductionHerdrService } from "../herdr/service.js";
+import { loadConfig } from "../ops/config.js";
+import { exportState, planRetention } from "../ops/retention.js";
 async function openStore(broker: Broker): Promise<void> {
   const snapshot = await broker.readSnapshot().catch((error: unknown) => {
     broker.store.readOnly = true;
@@ -34,6 +36,26 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   const paths = resolvePaths();
   await ensurePrivateDirectory(paths.root);
   await ensurePrivateDirectory(paths.runtime);
+  if (command === "config" && subcommand === "validate") {
+    const file = argv[2] ?? process.env.PI_HERDR_ORCH_CONFIG_PATH;
+    if (!file) throw new Error("Usage: config validate PATH.");
+    const config = await loadConfig(file, {
+      trustedProject: process.env.PI_HERDR_ORCH_PROJECT_TRUSTED === "1",
+    });
+    console.log(JSON.stringify({ valid: true, version: config.version }));
+    return;
+  }
+  if (command === "retention" && subcommand === "plan") {
+    console.log(JSON.stringify(await planRetention(paths.root)));
+    return;
+  }
+  if (command === "export") {
+    const outputFlag = argv.indexOf("--output");
+    const output = outputFlag >= 0 ? argv[outputFlag + 1] : undefined;
+    if (!output) throw new Error("Usage: export --output DIRECTORY.");
+    console.log(JSON.stringify(await exportState(paths, output)));
+    return;
+  }
   if (command === "herdr") {
     const method =
       subcommand === "status"
@@ -125,7 +147,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     return;
   }
   console.error(
-    "Usage: pi-herdr-orchestrator doctor [--json] | broker start|status | events verify | version",
+    "Usage: doctor [--json] | broker start|status | events verify | config validate PATH | retention plan | export --output DIR | version",
   );
   process.exitCode = 2;
 }
