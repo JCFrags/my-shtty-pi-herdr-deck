@@ -123,12 +123,9 @@ test("registration retention admission serializes concurrent provisions", async 
     startPi: async (input: { paneId: string }) => ({ pane_id: input.paneId }),
   } as never;
   const provisioner = new HerdrProvisioner(cli, root, () => [], true);
-  const aliasProvisioner = new HerdrProvisioner(
-    cli,
-    join(root, "."),
-    () => [],
-    true,
-  );
+  const aliasRoot = `${root}-alias`;
+  await symlink(root, aliasRoot);
+  const aliasProvisioner = new HerdrProvisioner(cli, aliasRoot, () => [], true);
   const attempts = await Promise.allSettled(
     Array.from({ length: 65 }, (_, index) =>
       (index % 2 === 0 ? provisioner : aliasProvisioner).provision({

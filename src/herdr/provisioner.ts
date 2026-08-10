@@ -1,7 +1,7 @@
 import type { HerdrCli } from "./cli.js";
 import { branchSlug, herdrName, label } from "./names.js";
 import type { GitEvidence } from "../git/porcelain.js";
-import { open, readdir } from "node:fs/promises";
+import { mkdir, open, readdir, realpath, stat } from "node:fs/promises";
 import { constants } from "node:fs";
 import { join, resolve } from "node:path";
 import {
@@ -148,7 +148,16 @@ export class HerdrProvisioner {
       throw new Error("HERDR_REGISTRATION_RETENTION_BUDGET_EXCEEDED");
   }
   async provision(input: ProvisionInput): Promise<ProvisionResult> {
-    return await withRetentionAdmission(resolve(this.promptRoot), () =>
+    await mkdir(this.promptRoot, { recursive: true, mode: 0o700 });
+    const canonicalRoot = await realpath(resolve(this.promptRoot));
+    const rootStat = await stat(canonicalRoot);
+    if (
+      !rootStat.isDirectory() ||
+      (rootStat.mode & 0o077) !== 0 ||
+      (process.getuid !== undefined && rootStat.uid !== process.getuid())
+    )
+      throw new Error("HERDR_REGISTRATION_ROOT_UNSAFE");
+    return await withRetentionAdmission(canonicalRoot, () =>
       this.provisionWithRetentionAdmission(input),
     );
   }
