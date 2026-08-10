@@ -523,6 +523,42 @@ async function revalidateAndRun(
   await cli.snapshot();
 }
 
+export interface ProductionPreflightOptions {
+  runner: HerdrProcessRunner;
+  binary: string;
+  socketPath: string;
+  expectedSchemaHash: string;
+  adapterIdentity?: string;
+  expectedBinaryIdentity?: string;
+  binaryIdentity?: string;
+  staleResourceCheck?: () => Promise<boolean>;
+}
+export async function runProductionPreflight(
+  options: ProductionPreflightOptions,
+): Promise<void> {
+  if (
+    options.expectedBinaryIdentity !== undefined &&
+    options.binaryIdentity !== options.expectedBinaryIdentity
+  )
+    throw new Error("HERDR_BINARY_IDENTITY_CHANGED");
+  const currentSchema = await options.runner.json(["api", "schema", "--json"]);
+  const currentCapabilities = projectCapabilities(
+    currentSchema,
+    options.binary,
+  );
+  if (currentCapabilities.schemaHash !== options.expectedSchemaHash)
+    throw new Error("HERDR_SCHEMA_IDENTITY_CHANGED");
+  if (options.adapterIdentity !== "pi-herdr-orchestrator")
+    throw new Error("HERDR_PI_ADAPTER_IDENTITY_INVALID");
+  if (options.staleResourceCheck && !(await options.staleResourceCheck()))
+    throw new Error("HERDR_STALE_RESOURCE");
+  const report = await doctor({
+    herdrBinary: options.binary,
+    herdrSocket: options.socketPath,
+    schema: currentSchema,
+  });
+  if (!report.ok) throw new Error("HERDR_DOCTOR_FAILED");
+}
 export async function createProductionHerdrService(
   store: EventStore,
   paths: ResolvedPaths,
@@ -551,20 +587,16 @@ export async function createProductionHerdrService(
       collectGitEvidence,
     ),
     gitEvidence: collectGitEvidence,
-    preflight: async () => {
-      const currentSchema = await runner.json(["api", "schema", "--json"]);
-      const currentCapabilities = projectCapabilities(currentSchema, binary);
-      if (currentCapabilities.schemaHash !== expectedSchemaHash)
-        throw new Error("HERDR_SCHEMA_IDENTITY_CHANGED");
-      if (adapterIdentity !== "pi-herdr-orchestrator")
-        throw new Error("HERDR_PI_ADAPTER_IDENTITY_INVALID");
-      const report = await doctor({
-        herdrBinary: binary,
-        herdrSocket: socketPath,
-        schema: currentSchema,
-      });
-      if (!report.ok) throw new Error("HERDR_DOCTOR_FAILED");
-    },
+    preflight: async () =>
+      await runProductionPreflight({
+        runner,
+        binary,
+        socketPath,
+        expectedSchemaHash,
+        ...(adapterIdentity !== undefined ? { adapterIdentity } : {}),
+        expectedBinaryIdentity: binary,
+        binaryIdentity: binary,
+      }),
     watcher: new HerdrSocketClient({
       socketPath,
       protocol: 17,

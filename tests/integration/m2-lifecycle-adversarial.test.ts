@@ -118,3 +118,86 @@ test("M2 concurrent deadline reconcile cleans registration once and revokes gene
   assert.equal(store.state.herdrResources?.["agent-1"]?.generation, 2);
   assert.deepEqual(await readdir(prompts), []);
 });
+
+test("M2 concurrent broker registration attempts produce one transition and cleanup", async () => {
+  const root = await mkdtemp(join(tmpdir(), "m2-register-race-"));
+  const prompts = join(root, "prompts");
+  const cli = {
+    requireMutationCapabilities: () => undefined,
+    createTab: async () => ({ tab_id: "tab-1", root_pane_id: "pane-1" }),
+    startPi: async () => ({ pane_id: "pane-1" }),
+    snapshot: async () => ({
+      panes: [
+        { id: "pane-1", occupant: { agentId: "agent-1", generation: 1 } },
+      ],
+      tabs: [],
+      workspaces: [],
+      agents: [],
+      worktrees: [],
+    }),
+  } as never;
+  const store = new EventStore(join(root, "events.ndjson"));
+  await store.open();
+  const service = new HerdrService({
+    store,
+    cli,
+    provisioner: new HerdrProvisioner(cli, prompts, () => [], true),
+  });
+  const result = await service.provision({
+    agentId: "agent-1",
+    parentAgentId: "parent",
+    role: "worker",
+    workspaceId: "workspace",
+    cwd: root,
+    profileId: "test-runner",
+    isolation: "shared-readonly",
+    prompt: "register",
+  });
+  const attempts = await Promise.allSettled([
+    service.register(
+      "agent-1",
+      { paneId: "pane-1", generation: 1 },
+      undefined,
+      result.token.digest,
+    ),
+    service.register(
+      "agent-1",
+      { paneId: "pane-1", generation: 1 },
+      undefined,
+      result.token.digest,
+    ),
+  ]);
+  assert.equal(attempts.filter((x) => x.status === "fulfilled").length, 1);
+  assert.equal(attempts.filter((x) => x.status === "rejected").length, 1);
+  assert.equal(store.state.herdrResources?.["agent-1"]?.state, "registered");
+  assert.deepEqual(await readdir(prompts), []);
+});
+
+test("M2 repeated normal reconcile has stable durable state and no mutation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "m2-reconcile-repeat-"));
+  let snapshots = 0;
+  let mutations = 0;
+  const cli = {
+    snapshot: async () => {
+      snapshots++;
+      return { panes: [], tabs: [], workspaces: [], agents: [], worktrees: [] };
+    },
+    requireMutationCapabilities: () => {
+      mutations++;
+    },
+  } as never;
+  const store = new EventStore(join(root, "events.ndjson"));
+  await store.open();
+  const service = new HerdrService({
+    store,
+    cli,
+    provisioner: new HerdrProvisioner(cli, join(root, "prompts")),
+  });
+  await Promise.all([
+    service.reconcile(),
+    service.reconcile(),
+    service.reconcile(),
+  ]);
+  assert.equal(snapshots, 3);
+  assert.equal(mutations, 0);
+});

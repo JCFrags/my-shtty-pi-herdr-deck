@@ -82,16 +82,74 @@ test("M2 production broker and CLI registration proves proof, late deadline, and
     );
     assert.ok(tokenPath);
     const rawToken = (await readFile(join(prompts, tokenPath!), "utf8")).trim();
-    const wrong = await request(broker, "wrong-proof", "herdr.register", {
-      agentId,
-      paneId: "pane-1",
-      terminalId: "terminal-1",
-      sessionId: "session-1",
-      generation: 1,
-      tokenProof: "0".repeat(64),
-    });
+    const capture: string[] = [];
+    const identityCases = [
+      {
+        paneId: "wrong-pane",
+        terminalId: "terminal-1",
+        sessionId: "session-1",
+        generation: 1,
+      },
+      {
+        paneId: "pane-1",
+        terminalId: "wrong-terminal",
+        sessionId: "session-1",
+        generation: 1,
+      },
+      {
+        paneId: "pane-1",
+        terminalId: "terminal-1",
+        sessionId: "wrong-session",
+        generation: 1,
+      },
+      {
+        paneId: "pane-1",
+        terminalId: "terminal-1",
+        sessionId: "session-1",
+        generation: 2,
+      },
+    ];
+    for (const [index, identity] of identityCases.entries()) {
+      await assert.rejects(() =>
+        brokerRequest(paths.socket, paths.secret, "herdr.register", {
+          agentId,
+          ...identity,
+          tokenProof: digest,
+        }),
+      );
+      const response = await request(
+        broker,
+        `wrong-identity-${index}`,
+        "herdr.register",
+        {
+          agentId,
+          ...identity,
+          tokenProof: digest,
+        },
+        capture,
+      );
+      assert.equal(response.ok, false);
+    }
+    const wrong = await request(
+      broker,
+      "wrong-proof",
+      "herdr.register",
+      {
+        agentId,
+        paneId: "pane-1",
+        terminalId: "terminal-1",
+        sessionId: "session-1",
+        generation: 1,
+        tokenProof: "0".repeat(64),
+      },
+      capture,
+    );
     assert.equal(wrong.ok, false);
     assert.equal((await readdir(prompts)).length, 2);
+    assert.equal(
+      capture.every((entry) => !entry.includes(rawToken)),
+      true,
+    );
     const registered = await brokerRequest(
       paths.socket,
       paths.secret,
@@ -137,14 +195,20 @@ test("M2 production broker and CLI registration proves proof, late deadline, and
         registrationDeadline: new Date(0).toISOString(),
       },
     });
-    const late = await request(broker, "late-register", "herdr.register", {
-      agentId: lateId,
-      paneId: "pane-1",
-      terminalId: "terminal-1",
-      sessionId: "session-1",
-      generation: 1,
-      tokenProof: lateDigest,
-    });
+    const late = await request(
+      broker,
+      "late-register",
+      "herdr.register",
+      {
+        agentId: lateId,
+        paneId: "pane-1",
+        terminalId: "terminal-1",
+        sessionId: "session-1",
+        generation: 1,
+        tokenProof: lateDigest,
+      },
+      capture,
+    );
     assert.equal(late.ok, false);
     assert.equal(late.ok, false);
 
@@ -177,6 +241,7 @@ async function request(
   id: string,
   method: string,
   params: Record<string, unknown>,
+  capture: string[] = [],
 ): Promise<Record<string, unknown>> {
   const socket = createConnection(broker.paths.socket);
   let buffer = "";
@@ -227,12 +292,19 @@ async function request(
     }) + "\n",
   );
   await wait((frame) => frame.type === "hello_result" && frame.ok === true);
-  socket.write(
-    JSON.stringify({ v: 1, type: "request", id, method, params }) + "\n",
-  );
+  const requestFrame = JSON.stringify({
+    v: 1,
+    type: "request",
+    id,
+    method,
+    params,
+  });
+  capture.push(requestFrame);
+  socket.write(requestFrame + "\n");
   const result = await wait(
     (frame) => frame.type === "response" && frame.id === id,
   );
+  capture.push(JSON.stringify(result));
   socket.destroy();
   return result;
 }

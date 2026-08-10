@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { HerdrProvisioner } from "../../src/herdr/provisioner.js";
+import { HerdrService } from "../../src/herdr/service.js";
+import { EventStore } from "../../src/state/event-store.js";
 
 const cases = [
   ["missing-pane", "pane.close"],
@@ -70,6 +72,8 @@ test("M2 compensation retains each missing or replaced resource", async () => {
         calls.push("worktree.remove");
       },
     } as never;
+    const store = new EventStore(join(root, "events.ndjson"));
+    await store.open();
     const provisioner = new HerdrProvisioner(
       cli,
       join(root, "prompts"),
@@ -84,8 +88,9 @@ test("M2 compensation retains each missing or replaced resource", async () => {
         changedFiles: [],
       }),
     );
+    const service = new HerdrService({ store, cli, provisioner });
     await assert.rejects(() =>
-      provisioner.provision({
+      service.provision({
         agentId: "agent-1",
         parentAgentId: "parent",
         role: "worker",
@@ -102,5 +107,10 @@ test("M2 compensation retains each missing or replaced resource", async () => {
       false,
       `${fault}: ${calls.join(",")}`,
     );
+    assert.equal(
+      store.state.herdrResources?.["agent-1"]?.cleanupOutcome,
+      "retained",
+    );
+    assert.equal(store.state.herdrResources?.["agent-1"]?.unknown, true);
   }
 });
