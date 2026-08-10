@@ -80,7 +80,8 @@ export async function verifyManagedTokenFile(
     // read another inode after a replacement.
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     const stat = await handle.stat();
-    if (!stat.isFile() || (stat.mode & 0o077) !== 0) return false;
+    if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0)
+      return false;
     if (!sameIdentity(stat, expectedIdentity)) return false;
     if (expectedIdentity === undefined && !isClaimed(path, stat)) return false;
     const value = (await handle.readFile("utf8")).trimEnd();
@@ -138,7 +139,7 @@ export async function deletePromptFile(
     // here, so never unlink a pathname that may now name a replacement.
     handle = await open(path, constants.O_WRONLY | constants.O_NOFOLLOW);
     const stat = await handle.stat();
-    if (!stat.isFile() || (stat.mode & 0o077) !== 0) return;
+    if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0) return;
     if (!sameIdentity(stat, expectedIdentity)) return;
     if (expectedIdentity === undefined && !isClaimed(path, stat)) return;
     for (let offset = 0; offset < stat.size;) {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import {
+  link,
   mkdtemp,
   readFile,
   symlink,
@@ -14,6 +15,7 @@ import test from "node:test";
 import {
   createManagedToken,
   createManagedTokenFile,
+  createPromptFile,
   managedFileIdentity,
 } from "../../src/herdr/token-files.js";
 
@@ -63,6 +65,34 @@ test("M2 claimed token inode survives a separate Node process restart", async ()
   );
   await child(modulePath, "delete", path, token.digest, identity);
   assert.equal(await readFile(path, "utf8"), "");
+});
+
+test("M2 separate process refuses hard-link sentinel custody attacks", async () => {
+  const root = await mkdtemp(join(tmpdir(), "m2-token-hardlink-"));
+  const token = createManagedToken();
+  const tokenPath = await createManagedTokenFile(root, "agent", token);
+  const tokenIdentity = await managedFileIdentity(tokenPath);
+  const tokenSentinel = join(root, "token-sentinel");
+  await link(tokenPath, tokenSentinel);
+  await unlink(tokenPath);
+  await link(tokenSentinel, tokenPath);
+  const modulePath = join(process.cwd(), "dist/src/herdr/token-files.js");
+  assert.equal(
+    await child(modulePath, "verify", tokenPath, token.digest, tokenIdentity),
+    "false",
+  );
+  assert.equal(await readFile(tokenPath, "utf8"), token.token + "\n");
+  assert.equal(await readFile(tokenSentinel, "utf8"), token.token + "\n");
+
+  const promptPath = await createPromptFile(root, "agent", "prompt sentinel\n");
+  const promptIdentity = await managedFileIdentity(promptPath);
+  const promptSentinel = join(root, "prompt-sentinel");
+  await link(promptPath, promptSentinel);
+  await unlink(promptPath);
+  await link(promptSentinel, promptPath);
+  await child(modulePath, "delete", promptPath, "unused", promptIdentity);
+  assert.equal(await readFile(promptPath, "utf8"), "prompt sentinel\n");
+  assert.equal(await readFile(promptSentinel, "utf8"), "prompt sentinel\n");
 });
 
 test("M2 separate process refuses replacement and symlink custody attacks", async () => {
