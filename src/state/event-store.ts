@@ -1,0 +1,15 @@
+import { chmod, mkdir, open, readFile, rename, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
+import { createId } from "../shared/ids.js";
+import { canonicalJson, sha256 } from "../shared/canonical-json.js";
+import { OrchestratorError } from "../shared/errors.js";
+import { emptyState, reduce } from "./reducer.js";
+import type { EventInput, OrchestrationState, StoredEvent } from "./types.js";
+export class EventStore { readonly path: string; #state: OrchestrationState; #events: StoredEvent[] = []; readonly #actor: { principalId: string; kind: string }; constructor(path: string, actor = { principalId: "prn_system", kind: "system" }) { this.path = path; this.#state = emptyState(); this.#actor = actor; }
+ async open(): Promise<void> { await mkdir(dirname(this.path), { recursive: true, mode: 0o700 }); try { const text = await readFile(this.path, "utf8"); for (const [index, line] of text.split("\n").entries()) { if (!line) continue; let event: StoredEvent; try { event = JSON.parse(line) as StoredEvent; } catch { throw new OrchestratorError("STATE_CORRUPT", `Invalid event at line ${index + 1}.`); } this.verifyEvent(event, this.#events.at(-1)); this.#events.push(event); this.#state = reduce(this.#state, event); } } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; await writeFile(this.path, "", { mode: 0o600 }); } }
+ get state(): OrchestrationState { return this.#state; } get events(): readonly StoredEvent[] { return this.#events; }
+ async append(input: EventInput): Promise<StoredEvent> { const seq = this.#events.length + 1; const base = { schemaVersion: 1 as const, seq, id: createId("evt"), timestamp: new Date().toISOString(), type: input.type, actor: input.actor ?? this.#actor, entityRefs: input.entityRefs ?? {}, payload: input.payload, prevHash: this.#events.at(-1)?.hash ?? "0".repeat(64) }; const event = { ...base, hash: sha256(canonicalJson(base)) }; const line = `${canonicalJson(event)}\n`; const handle = await open(this.path, "a", 0o600); try { await handle.write(line, undefined, "utf8"); await handle.sync(); } finally { await handle.close(); } this.#events.push(event); this.#state = reduce(this.#state, event); return event; }
+ verify(): { valid: boolean; lastSeq: number; lastHash: string } { let previous: StoredEvent | undefined; for (const event of this.#events) { this.verifyEvent(event, previous); previous = event; } return { valid: true, lastSeq: this.#events.length, lastHash: previous?.hash ?? "0".repeat(64) }; }
+ private verifyEvent(event: StoredEvent, previous?: StoredEvent): void { if (event.schemaVersion !== 1 || event.seq !== (previous?.seq ?? 0) + 1 || event.prevHash !== (previous?.hash ?? "0".repeat(64)) || event.hash !== sha256(canonicalJson({ ...event, hash: undefined }))) throw new OrchestratorError("STATE_CORRUPT", `Event chain is invalid at sequence ${event.seq}.`); }
+}
+export async function writeSnapshot(path: string, state: OrchestrationState): Promise<void> { const tmp = `${path}.tmp`; await writeFile(tmp, `${canonicalJson(state)}\n`, { mode: 0o600 }); await rename(tmp, path); await chmod(path, 0o600); }

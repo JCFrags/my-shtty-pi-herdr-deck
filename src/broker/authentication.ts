@@ -1,0 +1,4 @@
+import { timingSafeEqual, createHash } from "node:crypto"; import type { PrincipalKind } from "../shared/protocol/frames.js";
+export interface Principal { id: string; kind: PrincipalKind; permissions: readonly string[]; }
+export function verifySecret(expected: string, received: string): boolean { const a = createHash("sha256").update(expected).digest(); const b = createHash("sha256").update(received).digest(); return timingSafeEqual(a, b); }
+export function authenticate(secret: string, received: string, kind: PrincipalKind = "human"): Principal { if (!verifySecret(secret, received)) throw new Error("AUTH_FAILED"); const permissions = kind === "human" ? ["read:state", "read:results", "read:audit", "manage:all", "configure", "repair"] : ["read:state"]; return { id: `prn_${kind}`, kind, permissions }; }
