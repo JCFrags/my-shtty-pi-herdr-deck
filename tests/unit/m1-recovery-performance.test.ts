@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, unlink, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -7,6 +7,8 @@ import test from "node:test";
 import { EventStore } from "../../src/state/event-store.js";
 import { canonicalJson, sha256 } from "../../src/shared/canonical-json.js";
 import { SnapshotStore } from "../../src/state/snapshot-store.js";
+
+const snapshotKey = "snapshot-test-authentication-key";
 
 test("incomplete final event enters read-only recovery", async () => {
   const root = await mkdtemp(join(tmpdir(), "orch-corrupt-"));
@@ -79,7 +81,7 @@ test("valid snapshot selects state and replays its disk suffix", async () => {
     },
   });
   const snapshot = new SnapshotStore(join(root, "snapshot.json"));
-  await snapshot.write(first.state);
+  await snapshot.write(first.state, snapshotKey);
   await first.append({
     type: "audit.action",
     actor: {
@@ -89,7 +91,7 @@ test("valid snapshot selects state and replays its disk suffix", async () => {
     payload: { action: "suffix" },
   });
   const recovered = new EventStore(path);
-  await recovered.open(await snapshot.read());
+  await recovered.open(await snapshot.read(snapshotKey));
   assert.equal(recovered.state.tasks[id]?.title, "snapshot");
   assert.equal(recovered.state.lastEventSeq, 2);
   assert.equal(recovered.replayReductionCount, 1);
@@ -117,8 +119,8 @@ test("snapshots verify their checksum and state cursor", async () => {
   const store = new EventStore(join(root, "events.jsonl"));
   await store.open();
   const snapshot = new SnapshotStore(join(root, "snapshot.json"));
-  await snapshot.write(store.state);
-  assert.equal((await snapshot.read())?.lastEventSeq, 0);
+  await snapshot.write(store.state, snapshotKey);
+  assert.equal((await snapshot.read(snapshotKey))?.lastEventSeq, 0);
 });
 
 test("snapshot cursor must match its event chain", async () => {
@@ -139,17 +141,77 @@ test("snapshot cursor must match its event chain", async () => {
     ...store.state,
     lastEventHash: "f".repeat(64),
   };
-  await snapshots.write(mismatched);
+  await snapshots.write(mismatched, snapshotKey);
   const recovered = new EventStore(path);
-  await recovered.open(await snapshots.read());
+  await recovered.open(await snapshots.read(snapshotKey));
   assert.equal(recovered.readOnly, true);
   assert.match(recovered.corruption ?? "", /Snapshot cursor/);
 
   await unlink(path);
   const missing = new EventStore(path);
-  await missing.open(await snapshots.read());
+  await missing.open(await snapshots.read(snapshotKey));
   assert.equal(missing.readOnly, true);
   assert.match(missing.corruption ?? "", /event log is missing/);
+});
+
+test("authenticated snapshot rejects forged non-genesis state", async () => {
+  const root = await mkdtemp(join(tmpdir(), "orch-snapshot-forged-"));
+  const eventPath = join(root, "events.jsonl");
+  const snapshotPath = join(root, "snapshot.json");
+  const store = new EventStore(eventPath);
+  await store.open();
+  const id = "tsk_00000000000000000000000000";
+  await store.append({
+    type: "task.created",
+    actor: {
+      principalId: "prn_00000000000000000000000001",
+      kind: "human",
+    },
+    entityRefs: { taskId: id },
+    payload: {
+      id,
+      title: "canonical",
+      objective: "snapshot",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    },
+  });
+  const snapshots = new SnapshotStore(snapshotPath);
+  await snapshots.write(store.state, snapshotKey);
+  const forged = JSON.parse(await readFile(snapshotPath, "utf8")) as Record<
+    string,
+    unknown
+  >;
+  const forgedState = forged.state as typeof store.state;
+  forged.state = {
+    ...forgedState,
+    tasks: {
+      ...forgedState.tasks,
+      [id]: { ...forgedState.tasks[id]!, title: "forged" },
+    },
+  };
+  const {
+    authentication: _authentication,
+    checksum: _checksum,
+    ...base
+  } = forged;
+  forged.checksum = sha256(canonicalJson(base));
+  await writeFile(snapshotPath, canonicalJson(forged), { mode: 0o600 });
+  await assert.rejects(snapshots.read(snapshotKey), /verification failed/);
+
+  const recovered = new EventStore(eventPath);
+  const candidate = await snapshots
+    .read(snapshotKey)
+    .catch((error: unknown) => {
+      recovered.readOnly = true;
+      recovered.corruption =
+        error instanceof Error
+          ? error.message
+          : "Snapshot verification failed.";
+      return undefined;
+    });
+  await recovered.open(candidate);
+  assert.equal(recovered.readOnly, true);
+  assert.equal(recovered.state.tasks[id]?.title, "canonical");
 });
 
 test("replays a 100000-event snapshot plus suffix under 5 seconds and 256 MiB RSS", async () => {
@@ -205,16 +267,19 @@ test("replays a 100000-event snapshot plus suffix under 5 seconds and 256 MiB RS
       ];
     }),
   );
-  await new SnapshotStore(snapshotPath).write({
-    schemaVersion: 1,
-    lastEventSeq: 99_000,
-    lastEventHash: snapshotHash,
-    tasks,
-    runs: {},
-    agents: {},
-    workflows: {},
-    idempotency: {},
-  });
+  await new SnapshotStore(snapshotPath).write(
+    {
+      schemaVersion: 1,
+      lastEventSeq: 99_000,
+      lastEventHash: snapshotHash,
+      tasks,
+      runs: {},
+      agents: {},
+      workflows: {},
+      idempotency: {},
+    },
+    snapshotKey,
+  );
   lines.length = 0;
   const child = spawnSync(
     process.execPath,
@@ -222,7 +287,7 @@ test("replays a 100000-event snapshot plus suffix under 5 seconds and 256 MiB RS
       "--expose-gc",
       "--input-type=module",
       "-e",
-      `import { EventStore } from './dist/src/state/event-store.js'; import { SnapshotStore } from './dist/src/state/snapshot-store.js'; const start = performance.now(); const store = new EventStore(process.argv[1]); await store.open(await new SnapshotStore(process.argv[2]).read()); global.gc?.(); console.log(JSON.stringify({ elapsed: performance.now() - start, events: store.events.length, seq: store.state.lastEventSeq, tasks: Object.keys(store.state.tasks).length, reductions: store.replayReductionCount, rss: process.memoryUsage().rss }));`,
+      `import { EventStore } from './dist/src/state/event-store.js'; import { SnapshotStore } from './dist/src/state/snapshot-store.js'; const start = performance.now(); const store = new EventStore(process.argv[1]); await store.open(await new SnapshotStore(process.argv[2]).read('snapshot-test-authentication-key')); global.gc?.(); console.log(JSON.stringify({ elapsed: performance.now() - start, events: store.events.length, seq: store.state.lastEventSeq, tasks: Object.keys(store.state.tasks).length, reductions: store.replayReductionCount, rss: process.memoryUsage().rss }));`,
       path,
       snapshotPath,
     ],

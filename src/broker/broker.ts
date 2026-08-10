@@ -212,6 +212,12 @@ export class Broker {
     this.store = new EventStore(paths.events);
     this.snapshotStore = new SnapshotStore(paths.snapshot);
   }
+  async readSnapshot(): Promise<
+    import("../state/snapshot-store.js").Snapshot | undefined
+  > {
+    const key = this.#secret || (await this.#loadSecret());
+    return this.snapshotStore.read(key);
+  }
   async start(): Promise<void> {
     await ensurePrivateDirectory(this.paths.root);
     await ensurePrivateDirectory(this.paths.runtime);
@@ -220,7 +226,7 @@ export class Broker {
       await safeStaleSocket(this.paths.socket);
       this.#secret = await this.#loadSecret();
       const snapshot = await this.snapshotStore
-        .read()
+        .read(this.#secret)
         .catch((error: unknown) => {
           this.store.readOnly = true;
           this.store.corruption =
@@ -722,7 +728,9 @@ export class Broker {
       } else throw new OrchestratorError("NOT_FOUND", "Method was not found.");
       assertInvariants(this.store.state);
       if (committedEvent)
-        await this.snapshotStore.write(this.store.state).catch(() => undefined);
+        await this.snapshotStore
+          .write(this.store.state, this.#secret)
+          .catch(() => undefined);
       const response = {
         v: 1,
         type: "response",
@@ -759,7 +767,7 @@ export class Broker {
           .catch(() => undefined);
         if (denied) {
           await this.snapshotStore
-            .write(this.store.state)
+            .write(this.store.state, this.#secret)
             .catch(() => undefined);
           for (const subscriber of this.#clients)
             if (
@@ -827,7 +835,9 @@ export class Broker {
         entityRefs: {},
         payload: { action },
       });
-      await this.snapshotStore.write(this.store.state).catch(() => undefined);
+      await this.snapshotStore
+        .write(this.store.state, this.#secret)
+        .catch(() => undefined);
       for (const subscriber of this.#clients)
         if (
           subscriber.subscribed &&

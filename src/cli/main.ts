@@ -2,7 +2,7 @@ import { doctor } from "../broker/doctor.js";
 import { Broker } from "../broker/broker.js";
 import { ensurePrivateDirectory, resolvePaths } from "../shared/paths.js";
 async function openStore(broker: Broker): Promise<void> {
-  const snapshot = await broker.snapshotStore.read().catch((error: unknown) => {
+  const snapshot = await broker.readSnapshot().catch((error: unknown) => {
     broker.store.readOnly = true;
     broker.store.corruption =
       error instanceof Error ? error.message : "Snapshot verification failed.";
