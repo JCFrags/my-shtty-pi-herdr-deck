@@ -116,6 +116,9 @@ export interface OrchestrationState {
       parentGitHead?: string;
       parentGitBranch?: string;
       parentGitChangedFiles?: string[];
+      worktreeGitRoot?: string;
+      worktreeGitHead?: string;
+      worktreeGitBranch?: string;
     }
   >;
   idempotency: Record<

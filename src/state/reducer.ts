@@ -174,6 +174,15 @@ export function reduce(
           p.parentGitChangedFiles.every((x) => typeof x === "string")
             ? { parentGitChangedFiles: p.parentGitChangedFiles as string[] }
             : {}),
+          ...(typeof p.worktreeGitRoot === "string"
+            ? { worktreeGitRoot: p.worktreeGitRoot }
+            : {}),
+          ...(typeof p.worktreeGitHead === "string"
+            ? { worktreeGitHead: p.worktreeGitHead }
+            : {}),
+          ...(typeof p.worktreeGitBranch === "string"
+            ? { worktreeGitBranch: p.worktreeGitBranch }
+            : {}),
         },
       };
       break;

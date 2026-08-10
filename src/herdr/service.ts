@@ -129,8 +129,9 @@ export class HerdrService {
       });
       try {
         const result = await this.#provisioner.provision(input);
+        let afterGit: GitEvidence | undefined;
         if (this.#gitEvidence && result.worktreePath) {
-          const afterGit = await this.#gitEvidence(
+          afterGit = await this.#gitEvidence(
             result.worktreePath,
             input.projectBase,
           );
@@ -166,6 +167,13 @@ export class HerdrService {
                   parentGitHead: beforeGit.head,
                   parentGitBranch: beforeGit.branch,
                   parentGitChangedFiles: beforeGit.changedFiles,
+                }
+              : {}),
+            ...(afterGit
+              ? {
+                  worktreeGitRoot: afterGit.repositoryRoot,
+                  worktreeGitHead: afterGit.head,
+                  worktreeGitBranch: afterGit.branch,
                 }
               : {}),
           },
@@ -298,13 +306,26 @@ export class HerdrService {
         if (!resource.worktreePath || !this.#gitEvidence)
           throw new Error("HERDR_GIT_EVIDENCE_UNKNOWN");
         const evidence = await this.#gitEvidence(resource.worktreePath);
-        if (evidence.dirty) {
+        if (
+          evidence.dirty ||
+          evidence.repositoryRoot !== resource.worktreePath ||
+          (resource.worktreeGitHead &&
+            evidence.head !== resource.worktreeGitHead) ||
+          (resource.worktreeGitBranch &&
+            evidence.branch !== resource.worktreeGitBranch)
+        ) {
           await this.recordLifecycle(
             agentId,
-            "dirty",
-            "retained_dirty_worktree",
+            evidence.dirty ? "dirty" : "replaced",
+            evidence.dirty
+              ? "retained_dirty_worktree"
+              : "retained_git_mismatch",
           );
-          throw new Error("HERDR_DIRTY_WORKTREE");
+          throw new Error(
+            evidence.dirty
+              ? "HERDR_DIRTY_WORKTREE"
+              : "HERDR_GIT_IDENTITY_MISMATCH",
+          );
         }
       }
       if (resource?.state === "closed") return;
@@ -387,6 +408,7 @@ export class HerdrService {
           agentId,
           "timed_out",
           "registration_deadline_cleanup",
+          true,
         );
       }).catch(() => undefined);
     }, delay);
@@ -441,6 +463,7 @@ export class HerdrService {
           agentId,
           "timed_out",
           "registration_deadline_cleanup",
+          true,
         );
       }
     }

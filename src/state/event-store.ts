@@ -534,6 +534,13 @@ export class EventStore {
             "replaced",
             "orphaned",
             "unknown",
+            "parentGitRoot",
+            "parentGitHead",
+            "parentGitBranch",
+            "parentGitChangedFiles",
+            "worktreeGitRoot",
+            "worktreeGitHead",
+            "worktreeGitBranch",
           ].filter((key) => Object.hasOwn(p, key)),
         ) &&
         p.agentId === refs.agentId &&
