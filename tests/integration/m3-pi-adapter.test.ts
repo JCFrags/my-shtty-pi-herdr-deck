@@ -118,6 +118,8 @@ test("M3 fake Pi registers, heartbeats, and does not duplicate a connection", as
       ["agent.register_managed", "agent.heartbeat"],
     );
     assert.deepEqual(
+      (broker.requests[1]!.params as { agentId: string; state: { turnIndex: number } }).agentId, assignment.agentId);
+    assert.deepEqual(
       (broker.requests[1]!.params as { state: { turnIndex: number } }).state,
       { sessionId: assignment.piSessionId, activity: "idle", turnIndex: 2 },
     );

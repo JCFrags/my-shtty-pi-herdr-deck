@@ -13,6 +13,7 @@ export class LifecycleCorrelator {
   pending(): PiAssignment | undefined {
     return this.#state.kind === "pending" || this.#state.kind === "accepted" ? this.#state.assignment : undefined;
   }
+  activeAssignment(): PiAssignment | undefined { return this.#state.kind === "accepted" || this.#state.kind === "bound" ? this.#state.assignment : undefined; }
   deliver(assignment: PiAssignment, safe: PiSafeState): "accepted" | "already_accepted" {
     if (assignment.agentId !== safe.agentId || assignment.generation !== safe.generation || assignment.piSessionId !== safe.sessionId)
       throw new Error("PI_IDENTITY_MISMATCH");
@@ -52,6 +53,7 @@ export class LifecycleCorrelator {
   }
   cancel(): void { if (this.#state.kind !== "none") this.#state = { kind: "none" }; }
   exportState(): CorrelationState { return this.#state; }
+  restorePersisted(kind: "accepted" | "bound" | "settled", assignment: PiAssignment, safe: PiSafeState, agentCycleId?: string, firstTurnIndex?: number): void { if (assignment.agentId !== safe.agentId || assignment.generation !== safe.generation || assignment.piSessionId !== safe.sessionId) return; if (kind === "accepted") this.#state = { kind, assignment, acceptedAt: new Date().toISOString() }; else if (agentCycleId && Number.isSafeInteger(firstTurnIndex)) this.#state = { kind, assignment, piSessionId: safe.sessionId, agentCycleId, firstTurnIndex: firstTurnIndex as number }; }
   restoreAssignment(assignment: PiAssignment, safe: PiSafeState): void { if (assignment.agentId === safe.agentId && assignment.generation === safe.generation && assignment.piSessionId === safe.sessionId) this.#state = { kind: "accepted", assignment, acceptedAt: new Date().toISOString() }; }
   restoreState(state: CorrelationState, safe: PiSafeState): void { if (state.kind === "none") return; const assignment = state.assignment; if (assignment.agentId !== safe.agentId || assignment.generation !== safe.generation || assignment.piSessionId !== safe.sessionId) return; if (state.kind === "pending") this.#state = { kind: "pending", assignment, customEntryWritten: true }; else if (state.kind === "accepted") this.#state = state; else this.#state = state; }
   private matches(event: PiLifecycleEvent): boolean {
