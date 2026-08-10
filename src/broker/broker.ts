@@ -36,6 +36,17 @@ import { OrchestratorError } from "../shared/errors.js";
 import { assertInvariants } from "../state/invariants.js";
 import { SnapshotStore } from "../state/snapshot-store.js";
 import type { HerdrService } from "../herdr/service.js";
+import {
+  validateQuestion,
+  validateResult,
+  payloadHash,
+} from "../results/validation.js";
+import type { ResultBody, QuestionBody } from "../results/types.js";
+import {
+  planWorkflow,
+  validateWorkflow,
+  type WorkflowDefinition,
+} from "../scheduler/workflows.js";
 interface SubscriptionFilter {
   events?: string[];
   agentIds?: string[];
@@ -64,6 +75,11 @@ function safeText(value: unknown, max = 4096): value is string {
     value.length > 0 &&
     value.length <= max &&
     !/[\u0000-\u001f\u007f]/u.test(value)
+  );
+}
+function isTerminal(value: unknown): boolean {
+  return ["succeeded", "failed", "cancelled", "timed_out", "lost"].includes(
+    String(value),
   );
 }
 function subscriptionId(): string {
@@ -841,8 +857,8 @@ export class Broker {
                   agents: Object.values(this.store.state.agents),
                   tasks: Object.values(this.store.state.tasks),
                   workflows: Object.values(this.store.state.workflows),
-                  questions: [],
-                  results: [],
+                  questions: Object.values(this.store.state.questions ?? {}),
+                  results: Object.values(this.store.state.results ?? {}),
                 },
               }
             : {}),
@@ -1006,6 +1022,664 @@ export class Broker {
           "Pi control is available only through a connected adapter.",
           { retryable: true },
         );
+      } else if (request.method === "result.publish") {
+        requirePermission(principal, "manage:self");
+        const p = request.params;
+        if (
+          !exactKeys(p, [
+            "agentId",
+            "taskId",
+            "runId",
+            "assignmentGeneration",
+            "result",
+          ]) ||
+          !safeText(p.agentId) ||
+          !safeText(p.taskId) ||
+          !safeText(p.runId) ||
+          !Number.isSafeInteger(p.assignmentGeneration)
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Result correlation is invalid.",
+          );
+        if (principal.kind === "pi_child" && principal.agentId !== p.agentId)
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "Result agent does not match the authenticated child.",
+          );
+        const run = this.store.state.runs[p.runId];
+        if (
+          !run ||
+          run.taskId !== p.taskId ||
+          run.agentId !== p.agentId ||
+          run.assignmentGeneration !== p.assignmentGeneration ||
+          isTerminal(run.state)
+        )
+          throw new OrchestratorError(
+            "RUN_MISMATCH",
+            "Run identity or assignment generation does not match.",
+          );
+        validateResult(p.result);
+        const body = p.result as ResultBody;
+        const hash = payloadHash(body);
+        const prior = Object.values(this.store.state.results ?? {}).find(
+          (item) => item.runId === run.id,
+        );
+        if (prior) {
+          if (prior.payloadHash !== hash)
+            throw new OrchestratorError(
+              "RESULT_ALREADY_PUBLISHED",
+              "A different terminal result is already published.",
+            );
+          result = { resultId: prior.id, state: "already_published" };
+        } else {
+          const id = createId("res");
+          const publishedAt = new Date().toISOString();
+          committedEvent = await this.store.append({
+            type: "result.published",
+            actor: { principalId: principal.id, kind: principal.kind },
+            entityRefs: {
+              taskId: run.taskId,
+              runId: run.id,
+              agentId: p.agentId,
+              resultId: id,
+            },
+            payload: {
+              resultId: id,
+              payloadHash: hash,
+              status: body.status,
+              assignmentGeneration: p.assignmentGeneration,
+              payload: body,
+              publishedAt,
+              piSettled: run.settled,
+            },
+          });
+          await this.store.append({
+            type: "result.validated",
+            actor: { principalId: principal.id, kind: principal.kind },
+            entityRefs: { resultId: id, runId: run.id },
+            payload: {
+              piSettled: run.settled,
+              schemaValid: true,
+              correlationValid: true,
+            },
+          });
+          if (run.settled)
+            await this.store.append({
+              type: "run.state_changed",
+              actor: { principalId: principal.id, kind: principal.kind },
+              entityRefs: { runId: run.id, taskId: run.taskId },
+              payload: {
+                runId: run.id,
+                state: body.status === "succeeded" ? "succeeded" : body.status,
+              },
+            });
+          result = {
+            resultId: id,
+            state: run.settled ? body.status : "result_pending",
+          };
+        }
+      } else if (request.method === "result.get") {
+        requirePermission(principal, "read:results");
+        if (
+          !exactKeys(request.params, ["resultId"]) ||
+          !safeText(request.params.resultId)
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Result ID is invalid.",
+          );
+        const item = this.store.state.results?.[request.params.resultId];
+        if (!item)
+          throw new OrchestratorError("NOT_FOUND", "Result was not found.");
+        const task = this.store.state.tasks[item.taskId];
+        if (
+          principal.kind === "pi_child" &&
+          task?.parentAgentId !== principal.agentId &&
+          item.agentId !== principal.agentId
+        )
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "Result is outside the descendant scope.",
+          );
+        result = item;
+      } else if (request.method === "question.open") {
+        requirePermission(principal, "manage:self");
+        const p = request.params;
+        if (
+          !exactKeys(p, [
+            "agentId",
+            "taskId",
+            "runId",
+            "assignmentGeneration",
+            "question",
+          ]) ||
+          !safeText(p.agentId) ||
+          !safeText(p.taskId) ||
+          !safeText(p.runId) ||
+          !Number.isSafeInteger(p.assignmentGeneration)
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Question correlation is invalid.",
+          );
+        if (principal.kind === "pi_child" && principal.agentId !== p.agentId)
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "Question agent does not match the authenticated child.",
+          );
+        const run = this.store.state.runs[p.runId];
+        if (
+          !run ||
+          run.taskId !== p.taskId ||
+          run.agentId !== p.agentId ||
+          run.assignmentGeneration !== p.assignmentGeneration ||
+          run.state !== "working"
+        )
+          throw new OrchestratorError(
+            "RUN_MISMATCH",
+            "Run identity or assignment generation does not match.",
+          );
+        if (
+          Object.values(this.store.state.questions ?? {}).some(
+            (q) => q.runId === run.id && q.state === "open",
+          )
+        )
+          throw new OrchestratorError(
+            "LIMIT_EXCEEDED",
+            "A run may have only one open question.",
+          );
+        validateQuestion(p.question);
+        const q = p.question as QuestionBody;
+        const id = createId("qst");
+        const askedAt = new Date().toISOString();
+        committedEvent = await this.store.append({
+          type: "question.opened",
+          actor: { principalId: principal.id, kind: principal.kind },
+          entityRefs: {
+            questionId: id,
+            taskId: run.taskId,
+            runId: run.id,
+            agentId: run.agentId!,
+          },
+          payload: {
+            questionId: id,
+            assignmentGeneration: p.assignmentGeneration,
+            payload: q,
+            askedAt,
+          },
+        });
+        await this.store.append({
+          type: "run.state_changed",
+          actor: { principalId: principal.id, kind: principal.kind },
+          entityRefs: { runId: run.id, taskId: run.taskId },
+          payload: { runId: run.id, state: "blocked" },
+        });
+        result = {
+          ...(this.store.state.questions?.[id] ?? {}),
+          id,
+          payload: q,
+          askedAt,
+        };
+      } else if (request.method === "question.answer") {
+        requirePermission(principal, "read:state");
+        const p = request.params;
+        if (
+          !exactKeys(p, ["questionId", "answer"]) ||
+          !safeText(p.questionId) ||
+          !p.answer ||
+          typeof p.answer !== "object"
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Question answer is invalid.",
+          );
+        const question = this.store.state.questions?.[p.questionId];
+        if (!question)
+          throw new OrchestratorError(
+            "QUESTION_NOT_FOUND",
+            "Question was not found.",
+          );
+        if (question.state !== "open")
+          throw new OrchestratorError(
+            "QUESTION_ALREADY_ANSWERED",
+            "Question is already terminal.",
+          );
+        const body = question.payload as QuestionBody | undefined;
+        const answer = p.answer as { optionId?: unknown; text?: unknown };
+        if (
+          answer.optionId !== undefined &&
+          !body?.options.some((o) => o.id === answer.optionId)
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Answer option is not present.",
+          );
+        if (
+          answer.optionId === undefined &&
+          (!body?.allowFreeform ||
+            typeof answer.text !== "string" ||
+            answer.text.length > 16_384)
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Free-form answer is not allowed or is invalid.",
+          );
+        const run = this.store.state.runs[question.runId];
+        if (
+          principal.kind === "pi_parent" &&
+          run?.agentId &&
+          principal.agentId !== run.agentId
+        ) {
+          let current: string | undefined = run.agentId;
+          let allowed = false;
+          for (let depth = 0; depth < 5 && current; depth++) {
+            if (current === principal.agentId) {
+              allowed = true;
+              break;
+            }
+            current = this.store.state.agents[current]?.parentAgentId;
+          }
+          if (!allowed)
+            throw new OrchestratorError(
+              "PERMISSION_DENIED",
+              "Question is outside the descendant scope.",
+            );
+        }
+        committedEvent = await this.store.append({
+          type: "question.answered",
+          actor: { principalId: principal.id, kind: principal.kind },
+          entityRefs: {
+            questionId: question.id,
+            taskId: question.taskId,
+            runId: question.runId,
+          },
+          payload: {
+            questionId: question.id,
+            answeredBy: principal.id,
+            answeredAt: new Date().toISOString(),
+            answer: {
+              ...(typeof answer.optionId === "string"
+                ? { optionId: answer.optionId }
+                : {}),
+              ...(typeof answer.text === "string" ? { text: answer.text } : {}),
+            },
+          },
+        });
+        await this.store.append({
+          type: "run.state_changed",
+          actor: { principalId: principal.id, kind: principal.kind },
+          entityRefs: { runId: question.runId, taskId: question.taskId },
+          payload: { runId: question.runId, state: "working" },
+        });
+        result = this.store.state.questions?.[question.id];
+      } else if (request.method === "question.timeout") {
+        requirePermission(principal, "manage:all");
+        if (
+          !exactKeys(request.params, ["questionId"]) ||
+          !safeText(request.params.questionId)
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Question ID is invalid.",
+          );
+        const question =
+          this.store.state.questions?.[request.params.questionId];
+        if (!question)
+          throw new OrchestratorError(
+            "QUESTION_NOT_FOUND",
+            "Question was not found.",
+          );
+        if (question.state !== "open") {
+          result = question;
+        } else {
+          committedEvent = await this.store.append({
+            type: "question.timed_out",
+            actor: { principalId: principal.id, kind: principal.kind },
+            entityRefs: {
+              questionId: question.id,
+              taskId: question.taskId,
+              runId: question.runId,
+            },
+            payload: { questionId: question.id },
+          });
+          await this.store.append({
+            type: "run.state_changed",
+            actor: { principalId: principal.id, kind: principal.kind },
+            entityRefs: { runId: question.runId, taskId: question.taskId },
+            payload: { runId: question.runId, state: "failed" },
+          });
+          result = this.store.state.questions?.[question.id];
+        }
+      } else if (request.method === "task.cancel") {
+        requirePermission(principal, "delegate");
+        if (
+          Object.keys(request.params).some(
+            (key) => !["taskId", "reason", "cascade"].includes(key),
+          ) ||
+          !safeText(request.params.taskId) ||
+          !safeText(request.params.reason, 256) ||
+          (request.params.cascade !== undefined &&
+            typeof request.params.cascade !== "boolean")
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Task cancellation is invalid.",
+          );
+        const task = this.store.state.tasks[request.params.taskId];
+        if (!task)
+          throw new OrchestratorError("TASK_NOT_FOUND", "Task was not found.");
+        committedEvent = await this.store.append({
+          type: "task.cancel_requested",
+          actor: { principalId: principal.id, kind: principal.kind },
+          entityRefs: { taskId: task.id },
+          payload: {
+            taskId: task.id,
+            reason: request.params.reason,
+            cascade: request.params.cascade === true,
+          },
+        });
+        result = { taskId: task.id, state: "cancelled" };
+      } else if (request.method === "task.collect") {
+        requirePermission(principal, "read:results");
+        if (
+          Object.keys(request.params).some(
+            (key) => !["taskIds", "maxBytes"].includes(key),
+          ) ||
+          !Array.isArray(request.params.taskIds) ||
+          request.params.taskIds.length > 64
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Task collection is invalid.",
+          );
+        const maxBytes =
+          request.params.maxBytes === undefined
+            ? 32_768
+            : request.params.maxBytes;
+        if (
+          !Number.isSafeInteger(maxBytes) ||
+          Number(maxBytes) < 1 ||
+          Number(maxBytes) > 262_144
+        )
+          throw new OrchestratorError(
+            "LIMIT_EXCEEDED",
+            "Collection output limit is invalid.",
+          );
+        const items = (request.params.taskIds as unknown[]).map((id) =>
+          typeof id === "string"
+            ? (Object.values(this.store.state.results ?? {}).find(
+                (r) => r.taskId === id,
+              ) ?? { taskId: id, result: null })
+            : { taskId: "invalid", result: null },
+        );
+        result = {
+          items,
+          truncated:
+            Buffer.byteLength(JSON.stringify(items)) > Number(maxBytes),
+        };
+      } else if (request.method === "workflow.create") {
+        requirePermission(principal, "delegate");
+        const p = request.params;
+        if (
+          Object.keys(p).some(
+            (key) =>
+              !["definition", "objective", "parentAgentId", "dryRun"].includes(
+                key,
+              ),
+          ) ||
+          !p.definition ||
+          typeof p.definition !== "object" ||
+          !safeText(p.objective, 65_536) ||
+          (!safeText(p.parentAgentId) && !principal.agentId)
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Workflow parameters are invalid.",
+          );
+        const parentAgentId = safeText(p.parentAgentId)
+          ? p.parentAgentId
+          : principal.agentId!;
+        try {
+          validateWorkflow(p.definition as WorkflowDefinition);
+        } catch {
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Workflow definition is invalid.",
+          );
+        }
+        const plan = planWorkflow(p.definition as WorkflowDefinition, {
+          objective: p.objective as string,
+          dryRun: p.dryRun === true,
+        });
+        const taskIds = plan.steps.map((step) => step.taskId);
+        committedEvent = await this.store.append({
+          type: "workflow.created",
+          actor: { principalId: principal.id, kind: principal.kind },
+          entityRefs: { workflowId: plan.workflowId },
+          payload: {
+            workflowId: plan.workflowId,
+            taskIds,
+            parentAgentId,
+            mode: plan.mode,
+          },
+        });
+        for (const step of plan.steps)
+          await this.store.append({
+            type: "task.created_m3",
+            actor: { principalId: principal.id, kind: principal.kind },
+            entityRefs: { taskId: step.taskId },
+            payload: {
+              taskId: step.taskId,
+              title:
+                (p.definition as WorkflowDefinition).steps.find(
+                  (x) => x.key === step.key,
+                )?.title ?? step.key,
+              objective: step.objective,
+              createdAt: new Date().toISOString(),
+              parentAgentId,
+              profileId: step.profileId,
+              dependencies: step.dependsOn
+                .map((key) => plan.steps.find((x) => x.key === key)?.taskId)
+                .filter((x): x is string => Boolean(x)),
+            },
+          });
+        result = {
+          workflowId: plan.workflowId,
+          state: p.dryRun === true ? "created" : "created",
+          tasks: plan.steps.map((s) => ({
+            key: s.key,
+            taskId: s.taskId,
+            state: "queued",
+          })),
+        };
+      } else if (request.method === "workflow.get") {
+        requirePermission(principal, "read:state");
+        if (
+          !exactKeys(request.params, ["workflowId"]) ||
+          !safeText(request.params.workflowId)
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Workflow ID is invalid.",
+          );
+        const workflow = this.store.state.workflows[request.params.workflowId];
+        if (!workflow)
+          throw new OrchestratorError(
+            "WORKFLOW_NOT_FOUND",
+            "Workflow was not found.",
+          );
+        result = {
+          ...workflow,
+          tasks: workflow.taskIds
+            .map((id) => this.store.state.tasks[id])
+            .filter(Boolean),
+        };
+      } else if (request.method === "workflow.list") {
+        requirePermission(principal, "read:state");
+        if (Object.keys(request.params).length)
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Workflow list parameters must be empty.",
+          );
+        result = {
+          items: Object.values(this.store.state.workflows),
+          nextCursor: null,
+          snapshotSeq: this.store.state.lastEventSeq,
+        };
+      } else if (request.method === "workflow.cancel") {
+        requirePermission(principal, "delegate");
+        if (
+          Object.keys(request.params).some(
+            (key) => !["workflowId", "cascade"].includes(key),
+          ) ||
+          !safeText(request.params.workflowId)
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Workflow cancellation is invalid.",
+          );
+        const workflow = this.store.state.workflows[request.params.workflowId];
+        if (!workflow)
+          throw new OrchestratorError(
+            "WORKFLOW_NOT_FOUND",
+            "Workflow was not found.",
+          );
+        committedEvent = await this.store.append({
+          type: "workflow.state_changed",
+          actor: { principalId: principal.id, kind: principal.kind },
+          entityRefs: { workflowId: workflow.id },
+          payload: { workflowId: workflow.id, state: "cancelled" },
+        });
+        if (request.params.cascade !== false)
+          for (const taskId of workflow.taskIds) {
+            const task = this.store.state.tasks[taskId];
+            if (task && !isTerminal(task.state))
+              await this.store.append({
+                type: "task.cancel_requested",
+                actor: { principalId: principal.id, kind: principal.kind },
+                entityRefs: { taskId },
+                payload: {
+                  taskId,
+                  reason: "workflow_cancelled",
+                  cascade: true,
+                },
+              });
+          }
+        result = { workflowId: workflow.id, state: "cancelled" };
+      } else if (
+        request.method === "scheduler.admit" ||
+        request.method === "scheduler.block"
+      ) {
+        requirePermission(principal, "delegate");
+        if (
+          Object.keys(request.params).some(
+            (key) => !["taskId", "reason", "provision"].includes(key),
+          ) ||
+          !safeText(request.params.taskId)
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Scheduler parameters are invalid.",
+          );
+        const task = this.store.state.tasks[request.params.taskId];
+        if (!task)
+          throw new OrchestratorError("TASK_NOT_FOUND", "Task was not found.");
+        if (request.method === "scheduler.block") {
+          committedEvent = await this.store.append({
+            type: "scheduler.blocked",
+            actor: { principalId: principal.id, kind: principal.kind },
+            entityRefs: { taskId: task.id },
+            payload: {
+              taskId: task.id,
+              reason: safeText(request.params.reason, 256)
+                ? request.params.reason
+                : "dependency_blocked",
+            },
+          });
+          result = {
+            taskId: task.id,
+            admitted: false,
+            reason: request.params.reason ?? "dependency_blocked",
+          };
+        } else {
+          committedEvent = await this.store.append({
+            type: "scheduler.admitted",
+            actor: { principalId: principal.id, kind: principal.kind },
+            entityRefs: { taskId: task.id },
+            payload: { taskId: task.id },
+          });
+          await this.store.append({
+            type: "task.state_changed",
+            actor: { principalId: principal.id, kind: principal.kind },
+            entityRefs: { taskId: task.id },
+            payload: { to: "provisioning" },
+          });
+          result = { taskId: task.id, admitted: true, state: "provisioning" };
+        }
+      } else if (request.method === "run.create") {
+        requirePermission(principal, "delegate");
+        if (
+          Object.keys(request.params).some(
+            (key) =>
+              ![
+                "taskId",
+                "agentId",
+                "assignmentGeneration",
+                "agentGeneration",
+                "piSessionId",
+                "terminalId",
+              ].includes(key),
+          ) ||
+          !safeText(request.params.taskId) ||
+          !safeText(request.params.agentId) ||
+          !Number.isSafeInteger(request.params.assignmentGeneration)
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Run parameters are invalid.",
+          );
+        const task = this.store.state.tasks[request.params.taskId];
+        const agent = this.store.state.agents[request.params.agentId];
+        if (!task)
+          throw new OrchestratorError("TASK_NOT_FOUND", "Task was not found.");
+        if (!agent)
+          throw new OrchestratorError(
+            "AGENT_NOT_FOUND",
+            "Agent was not found.",
+          );
+        const runId = createId("run");
+        committedEvent = await this.store.append({
+          type: "run.created",
+          actor: { principalId: principal.id, kind: principal.kind },
+          entityRefs: { runId, taskId: task.id, agentId: agent.id },
+          payload: {
+            runId,
+            taskId: task.id,
+            agentId: agent.id,
+            assignmentGeneration: request.params.assignmentGeneration,
+            agentGeneration: agent.generation,
+            ...(safeText(request.params.piSessionId)
+              ? { piSessionId: request.params.piSessionId }
+              : {}),
+            ...(safeText(request.params.terminalId)
+              ? { terminalId: request.params.terminalId }
+              : {}),
+          },
+        });
+        await this.store.append({
+          type: "run.state_changed",
+          actor: { principalId: principal.id, kind: principal.kind },
+          entityRefs: { runId, taskId: task.id },
+          payload: { runId, state: "working" },
+        });
+        result = {
+          runId,
+          taskId: task.id,
+          agentId: agent.id,
+          assignmentGeneration: request.params.assignmentGeneration,
+          state: "working",
+        };
       } else if (request.method === "task.create_m3") {
         requirePermission(principal, "delegate");
         const p = request.params;

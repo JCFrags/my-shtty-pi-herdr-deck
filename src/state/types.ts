@@ -96,6 +96,10 @@ export interface ResultRecord {
   status: "succeeded" | "failed" | "cancelled";
   payloadHash: string;
   piSettled: boolean;
+  assignmentGeneration?: number;
+  payload?: unknown;
+  validation?: Record<string, unknown>;
+  publishedAt?: string;
 }
 export interface QuestionRecord {
   id: string;
@@ -103,7 +107,12 @@ export interface QuestionRecord {
   runId: string;
   agentId: string;
   state: "open" | "answered" | "cancelled" | "timed_out";
+  assignmentGeneration?: number;
+  payload?: unknown;
+  askedAt?: string;
+  answeredAt?: string;
   answeredBy?: string;
+  answer?: { optionId?: string; text?: string };
 }
 export interface Workflow {
   id: string;

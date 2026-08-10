@@ -575,13 +575,31 @@ export class EventStore {
         "run.pi_settled",
         "run.state_changed",
         "task.cancel_requested",
+        "result.published",
+        "result.validated",
+        "run.result_recovery_requested",
+        "run.result_missing",
+        "question.opened",
+        "question.answered",
+        "question.timed_out",
+        "workflow.created",
+        "workflow.state_changed",
+        "scheduler.admitted",
+        "scheduler.blocked",
+        "task.collected",
       ].includes(event.type)
     ) {
-      const refId = refs.agentId ?? refs.taskId ?? refs.runId;
+      const refId =
+        refs.agentId ??
+        refs.taskId ??
+        refs.runId ??
+        refs.workflowId ??
+        refs.resultId ??
+        refs.questionId;
       valid =
         typeof refId === "string" &&
         Object.keys(p).every(
-          (key) => key.length <= 64 && !/[\\u0000-\\u001f\\u007f]/u.test(key),
+          (key) => key.length <= 64 && !/[\u0000-\u001f\u007f]/u.test(key),
         );
     } else if (
       event.type === "audit.action" ||

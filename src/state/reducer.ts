@@ -1,6 +1,12 @@
 import { OrchestratorError } from "../shared/errors.js";
 import type { EventInput, OrchestrationState, StoredEvent } from "./types.js";
-import type { TaskState, AgentState, RunState, Run } from "./types.js";
+import type {
+  TaskState,
+  AgentState,
+  RunState,
+  Run,
+  Workflow,
+} from "./types.js";
 export const emptyState = (): OrchestrationState => ({
   schemaVersion: 1,
   lastEventSeq: 0,
@@ -43,6 +49,11 @@ const known = new Set([
   "question.opened",
   "question.answered",
   "question.timed_out",
+  "workflow.created",
+  "workflow.state_changed",
+  "scheduler.admitted",
+  "scheduler.blocked",
+  "task.collected",
 ]);
 export function reduce(
   state: OrchestrationState,
@@ -107,9 +118,22 @@ export function reduce(
         );
       const task = next.tasks[taskId];
       const to = p.to as TaskState;
+      const allowed = new Set([
+        "draft",
+        "queued",
+        "provisioning",
+        "assigned",
+        "running",
+        "blocked",
+        "collecting",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "timed_out",
+      ]);
       if (
         !task ||
-        (to !== "queued" && to !== "cancelled") ||
+        !allowed.has(String(to)) ||
         (taskTerminal.has(task.state) && task.state !== to)
       )
         throw new OrchestratorError(
@@ -339,9 +363,22 @@ export function reduce(
           taskId: event.entityRefs.taskId,
           runId: event.entityRefs.runId,
           agentId: event.entityRefs.agentId,
-          status: "succeeded",
+          status:
+            p.status === "failed" || p.status === "cancelled"
+              ? p.status
+              : "succeeded",
           payloadHash: p.payloadHash,
-          piSettled: false,
+          piSettled: p.piSettled === true,
+          ...(Number.isSafeInteger(p.assignmentGeneration)
+            ? { assignmentGeneration: p.assignmentGeneration as number }
+            : {}),
+          ...(Object.hasOwn(p, "payload") ? { payload: p.payload } : {}),
+          ...(p.validation && typeof p.validation === "object"
+            ? { validation: p.validation as Record<string, unknown> }
+            : {}),
+          ...(typeof p.publishedAt === "string"
+            ? { publishedAt: p.publishedAt }
+            : {}),
         },
       };
       break;
@@ -362,7 +399,52 @@ export function reduce(
     }
     case "run.result_recovery_requested":
     case "run.result_missing":
+    case "scheduler.admitted":
+    case "scheduler.blocked":
+    case "task.collected":
       break;
+    case "workflow.created": {
+      const id = String(p.workflowId);
+      if (!id || next.workflows[id])
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Workflow already exists.",
+        );
+      next.workflows = {
+        ...next.workflows,
+        [id]: {
+          id,
+          state: "created",
+          taskIds: Array.isArray(p.taskIds)
+            ? p.taskIds.filter((x): x is string => typeof x === "string")
+            : [],
+        },
+      };
+      break;
+    }
+    case "workflow.state_changed": {
+      const id = String(event.entityRefs?.workflowId ?? p.workflowId),
+        workflow = next.workflows[id];
+      if (!workflow)
+        throw new OrchestratorError("STATE_CORRUPT", "Workflow is missing.");
+      const state = String(p.state) as Workflow["state"];
+      if (
+        ![
+          "created",
+          "running",
+          "blocked",
+          "succeeded",
+          "failed",
+          "cancelled",
+        ].includes(state)
+      )
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Workflow state is invalid.",
+        );
+      next.workflows = { ...next.workflows, [id]: { ...workflow, state } };
+      break;
+    }
     case "question.opened": {
       const id = String(p.questionId);
       if (!id || next.questions![id])
@@ -387,6 +469,11 @@ export function reduce(
           runId: event.entityRefs.runId,
           agentId: event.entityRefs.agentId,
           state: "open",
+          ...(Number.isSafeInteger(p.assignmentGeneration)
+            ? { assignmentGeneration: p.assignmentGeneration as number }
+            : {}),
+          ...(Object.hasOwn(p, "payload") ? { payload: p.payload } : {}),
+          ...(typeof p.askedAt === "string" ? { askedAt: p.askedAt } : {}),
         },
       };
       break;
@@ -405,6 +492,14 @@ export function reduce(
           state: "answered",
           ...(typeof p.answeredBy === "string"
             ? { answeredBy: p.answeredBy }
+            : {}),
+          ...(typeof p.answeredAt === "string"
+            ? { answeredAt: p.answeredAt }
+            : {}),
+          ...(Object.hasOwn(p, "answer") &&
+          p.answer &&
+          typeof p.answer === "object"
+            ? { answer: p.answer as { optionId?: string; text?: string } }
             : {}),
         },
       };
