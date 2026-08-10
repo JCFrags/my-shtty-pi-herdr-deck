@@ -25,7 +25,7 @@ test("parent tool identity is adapter-owned and broker state is refreshed per ca
   const tools: Array<{ name: string; execute: (...args: never[]) => Promise<unknown> }> = [];
   const calls: string[] = [];
   const api = { registerTool(definition: typeof tools[number]) { tools.push(definition); } };
-  const client = { principal: { id: "principal_1", kind: "pi_parent" as const, permissions: ["read:state"] }, request: async (method: string, params: Record<string, unknown>) => { calls.push(`${method}:${String(params.parentAgentId ?? "")}`); return {}; } };
+  const client = { connected: true, principal: { id: "principal_1", kind: "pi_parent" as const, permissions: ["read:state"] }, request: async (method: string, params: Record<string, unknown>) => { calls.push(`${method}:${String(params.parentAgentId ?? "")}`); return {}; } };
   registerParentTools(api as never, fakeAdapter() as never, client as never);
   const listTool = tools.find((tool) => tool.name === "agent_list");
   assert.ok(listTool);

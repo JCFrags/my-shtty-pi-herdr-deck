@@ -183,7 +183,6 @@ export class HerdrProvisioner {
       throw new Error(
         `Managed environment override rejected: ${forbidden.join(", ")}`,
       );
-    const env = { ...managed, ...(input.env ?? {}) };
     let prompt: string | undefined;
     let tabId: string | undefined;
     let paneId: string | undefined;
@@ -205,6 +204,7 @@ export class HerdrProvisioner {
       );
       managed.PI_HERDR_ORCH_TOKEN_FILE = tokenFile;
       tokenFileIdentity = await managedFileIdentity(tokenFile);
+      const env = { ...managed, ...(input.env ?? {}) };
       promptFileIdentity = prompt
         ? await managedFileIdentity(prompt)
         : undefined;

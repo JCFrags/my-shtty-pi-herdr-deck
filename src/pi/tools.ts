@@ -26,6 +26,7 @@ const questionSchema = {
 const parentInputSchema = { type: "object", additionalProperties: true, maxProperties: 32 };
 
 interface ToolDefinition { name: string; label: string; description: string; parameters: unknown; execute: (toolCallId: string, params: Record<string, unknown>, signal: AbortSignal, onUpdate: unknown, context: PiContextLike) => Promise<{ content: Array<{ type: "text"; text: string }>; details?: unknown; isError?: boolean }>; }
+export interface PiToolBinding { adapter: PiAdapter | undefined; client: PiBrokerClient | undefined; }
 function register(api: PiApiLike, definition: ToolDefinition): void { api.registerTool?.(definition); }
 function textResult(value: unknown): { content: Array<{ type: "text"; text: string }>; details: unknown } { const safe = boundedSecretFree(value); const encoded = JSON.stringify(safe); return { content: [{ type: "text", text: encoded.length <= DEFAULT_PARENT_TOOL_LIMITS.maxResponseBytes ? encoded : encoded.slice(0, DEFAULT_PARENT_TOOL_LIMITS.maxResponseBytes) + "…" }], details: safe }; }
 function assertBoundedBody(value: Record<string, unknown>): void { const encoded = JSON.stringify(value); if (encoded.length > MAX_BODY_BYTES) throw new Error("LIMIT_EXCEEDED"); }
@@ -34,10 +35,11 @@ function stripModelIdentity(input: Record<string, unknown>, agentId: string): Re
   return { ...copy, parentAgentId: agentId };
 }
 
-export function registerManagedChildTools(api: PiApiLike, adapter: PiAdapter, client: PiBrokerClient): void {
+export function registerManagedChildTools(api: PiApiLike, adapterOrBinding: PiAdapter | PiToolBinding, client?: PiBrokerClient): void {
+  const binding: PiToolBinding = client ? { adapter: adapterOrBinding as PiAdapter, client } : adapterOrBinding as PiToolBinding;
   register(api, { name: "orchestrator_result", label: "Publish orchestrator result", description: "Publish the single structured terminal result for the current managed task. Correlation identity is supplied by the adapter.", parameters: resultSchema, async execute(_id, params, signal) {
     if (signal.aborted) throw new Error("CANCELLED");
-    const assignment = adapter.assignmentForTools(); if (!assignment) throw new Error("RUN_MISMATCH");
+    const adapter = binding.adapter; const client = binding.client; if (!adapter || !client || !client.connected) throw new Error("AGENT_DISCONNECTED"); const assignment = adapter.assignmentForTools(); if (!assignment) throw new Error("RUN_MISMATCH");
     assertBoundedBody(params);
     await client.request("agent.get", { agentId: assignment.agentId });
     const result = await client.request("result.publish", { agentId: assignment.agentId, taskId: assignment.taskId, runId: assignment.runId, assignmentGeneration: assignment.assignmentGeneration, result: params });
@@ -45,7 +47,7 @@ export function registerManagedChildTools(api: PiApiLike, adapter: PiAdapter, cl
   } });
   register(api, { name: "orchestrator_ask", label: "Ask orchestrator question", description: "Ask one blocking structured question for the current managed task. Correlation identity is supplied by the adapter.", parameters: questionSchema, async execute(_id, params, signal) {
     if (signal.aborted) throw new Error("CANCELLED");
-    const assignment = adapter.assignmentForTools(); if (!assignment) throw new Error("RUN_MISMATCH");
+    const adapter = binding.adapter; const client = binding.client; if (!adapter || !client || !client.connected) throw new Error("AGENT_DISCONNECTED"); const assignment = adapter.assignmentForTools(); if (!assignment) throw new Error("RUN_MISMATCH");
     assertBoundedBody(params);
     await client.request("agent.get", { agentId: assignment.agentId });
     const result = await client.request("question.open", { agentId: assignment.agentId, taskId: assignment.taskId, runId: assignment.runId, assignmentGeneration: assignment.assignmentGeneration, question: params });
@@ -53,16 +55,17 @@ export function registerManagedChildTools(api: PiApiLike, adapter: PiAdapter, cl
   } });
 }
 
-export function registerParentTools(api: PiApiLike, adapter: PiAdapter, client: PiBrokerClient): void {
-  const principalFromClient = (): ToolPrincipal => { const p = client.principal; return { id: p?.id ?? `pi:${adapter.safeState().agentId}`, kind: "pi_parent", agentId: adapter.safeState().agentId, permissions: p?.permissions ?? ["read:state", "delegate"] }; };
-  const broker = { invoke: async (method: string, params: Record<string, unknown>, principal: ToolPrincipal, idempotencyKey?: string) => client.request(method, { ...params, principalId: principal.id, parentAgentId: principal.agentId, ...(idempotencyKey ? { idempotencyKey } : {}) }) };
+export function registerParentTools(api: PiApiLike, adapterOrBinding: PiAdapter | PiToolBinding, client?: PiBrokerClient): void {
+  const binding: PiToolBinding = client ? { adapter: adapterOrBinding as PiAdapter, client } : adapterOrBinding as PiToolBinding;
+  const principalFromClient = (): ToolPrincipal => { const adapter = binding.adapter; const client = binding.client; if (!adapter || !client || !client.connected) throw new Error("AGENT_DISCONNECTED"); const p = client.principal; return { id: p?.id ?? `pi:${adapter.safeState().agentId}`, kind: "pi_parent", agentId: adapter.safeState().agentId, permissions: p?.permissions ?? ["read:state", "delegate"] }; };
+  const broker = { invoke: async (method: string, params: Record<string, unknown>, principal: ToolPrincipal, idempotencyKey?: string) => { const client = binding.client; if (!client?.connected) throw new Error("AGENT_DISCONNECTED"); return client.request(method, { ...params, principalId: principal.id, parentAgentId: principal.agentId, ...(idempotencyKey ? { idempotencyKey } : {}) }); } };
   const service = new ParentToolService(broker);
   const permissions = new Set(principalFromClient().permissions);
   for (const tool of PARENT_TOOL_NAMES) {
     if (tool === "delegate" && !permissions.has("delegate") && !permissions.has("manage:all")) continue;
     register(api, { name: tool, label: `Orchestrator ${tool}`, description: `Use broker method for ${tool}. The broker checks current state and parent scope on every call.`, parameters: { type: "object", additionalProperties: false, properties: { input: parentInputSchema, idempotencyKey: { type: "string", minLength: 1, maxLength: 256 } }, required: ["input"] }, async execute(_id, params, signal) {
       const raw = params.input; if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("INVALID_REQUEST");
-      const principal = principalFromClient(); const state = adapter.safeState(); await client.request("agent.get", { agentId: state.agentId });
+      const principal = principalFromClient(); const adapter = binding.adapter; const client = binding.client; if (!adapter || !client) throw new Error("AGENT_DISCONNECTED"); const state = adapter.safeState(); await client.request("agent.get", { agentId: state.agentId });
       const request: ParentToolRequest = { tool: tool as ParentToolName, input: stripModelIdentity(raw as Record<string, unknown>, state.agentId), ...(typeof params.idempotencyKey === "string" ? { idempotencyKey: params.idempotencyKey } : {}) };
       if (!isParentToolRequest(request)) throw new Error("INVALID_REQUEST");
       const response = await service.execute(request, principal, signal); if (!response.ok) throw new Error(response.error?.code ?? "REQUEST_FAILED"); return textResult(response.result);
@@ -70,4 +73,4 @@ export function registerParentTools(api: PiApiLike, adapter: PiAdapter, client: 
   }
 }
 
-export function registerOrchestratorTools(api: PiApiLike, adapter: PiAdapter, client: PiBrokerClient, managed: boolean): void { if (managed) registerManagedChildTools(api, adapter, client); else registerParentTools(api, adapter, client); }
+export function registerOrchestratorTools(api: PiApiLike, binding: PiToolBinding, managed: boolean): void { if (managed) registerManagedChildTools(api, binding); else registerParentTools(api, binding); }
