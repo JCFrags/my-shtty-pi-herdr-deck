@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jcfrags.local/pi-herdr-orchestrator/schemas/parent-tool-request-v1.json",
+  "title": "Parent tool request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tool", "input"],
+  "properties": {
+    "tool": { "enum": ["delegate", "agent_spawn", "agent_list", "agent_get", "agent_prompt", "agent_steer", "agent_wait", "agent_result", "agent_answer", "agent_interrupt", "agent_stop", "agent_close", "task_list", "task_get", "task_collect", "task_cancel"] },
+    "input": { "type": "object", "maxProperties": 32, "additionalProperties": true },
+    "idempotencyKey": { "type": "string", "minLength": 1, "maxLength": 256 }
+  }
+}
