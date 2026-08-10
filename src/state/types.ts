@@ -76,6 +76,8 @@ export interface Agent {
   currentAssignmentGeneration?: number;
   tokenDigest?: string;
 }
+export interface ResultRecord { id: string; taskId: string; runId: string; agentId: string; status: "succeeded" | "failed" | "cancelled"; payloadHash: string; piSettled: boolean; }
+export interface QuestionRecord { id: string; taskId: string; runId: string; agentId: string; state: "open" | "answered" | "cancelled" | "timed_out"; answeredBy?: string; }
 export interface Workflow {
   id: string;
   state:
@@ -90,6 +92,8 @@ export interface OrchestrationState {
   runs: Record<string, Run>;
   agents: Record<string, Agent>;
   workflows: Record<string, Workflow>;
+  results?: Record<string, ResultRecord>;
+  questions?: Record<string, QuestionRecord>;
   herdrResources?: Record<
     string,
     {

@@ -9,6 +9,8 @@ export const emptyState = (): OrchestrationState => ({
   runs: {},
   agents: {},
   workflows: {},
+  results: {},
+  questions: {},
   herdrResources: {},
   idempotency: {},
 });
@@ -21,6 +23,14 @@ const known = new Set([
   "herdr.provision.intent",
   "herdr.provision.outcome",
   "herdr.reconciled",
+  "result.published",
+  "result.validated",
+  "run.pi_settled",
+  "run.result_recovery_requested",
+  "run.result_missing",
+  "question.opened",
+  "question.answered",
+  "question.timed_out",
 ]);
 export function reduce(
   state: OrchestrationState,
@@ -35,6 +45,8 @@ export function reduce(
     ...state,
     lastEventSeq: "seq" in event ? event.seq : state.lastEventSeq,
     lastEventHash: "hash" in event ? event.hash : state.lastEventHash,
+    results: state.results ?? {},
+    questions: state.questions ?? {},
   };
   const p = event.payload as Record<string, unknown>;
   const taskId = event.entityRefs?.taskId;
@@ -99,6 +111,36 @@ export function reduce(
     case "audit.action":
     case "audit.authorization_denied":
       break;
+    case "result.published": {
+      const id = String(p.resultId); if (!id || next.results![id]) throw new OrchestratorError("STATE_CORRUPT", "Result already exists or has no ID.");
+      if (!event.entityRefs?.taskId || !event.entityRefs.runId || !event.entityRefs.agentId || typeof p.payloadHash !== "string") throw new OrchestratorError("STATE_CORRUPT", "Result correlation is invalid.");
+      next.results = { ...next.results, [id]: { id, taskId: event.entityRefs.taskId, runId: event.entityRefs.runId, agentId: event.entityRefs.agentId, status: "succeeded", payloadHash: p.payloadHash, piSettled: false } };
+      break;
+    }
+    case "result.validated": {
+      const id = event.entityRefs?.resultId; if (!id || !next.results![id]) throw new OrchestratorError("STATE_CORRUPT", "Result validation has no result.");
+      const result = next.results![id]; next.results = { ...next.results, [id]: { ...result, piSettled: p.piSettled === true } }; break;
+    }
+    case "run.pi_settled": {
+      const id = event.entityRefs?.runId; if (!id) throw new OrchestratorError("STATE_CORRUPT", "Run settle has no run.");
+      const result = Object.values(next.results!).find((item) => item.runId === id); if (result) next.results = { ...next.results, [result.id]: { ...result, piSettled: true } }; break;
+    }
+    case "run.result_recovery_requested":
+    case "run.result_missing":
+      break;
+    case "question.opened": {
+      const id = String(p.questionId); if (!id || next.questions![id]) throw new OrchestratorError("STATE_CORRUPT", "Question already exists or has no ID.");
+      if (!event.entityRefs?.taskId || !event.entityRefs.runId || !event.entityRefs.agentId) throw new OrchestratorError("STATE_CORRUPT", "Question correlation is invalid.");
+      next.questions = { ...next.questions, [id]: { id, taskId: event.entityRefs.taskId, runId: event.entityRefs.runId, agentId: event.entityRefs.agentId, state: "open" } }; break;
+    }
+    case "question.answered": {
+      const id = event.entityRefs?.questionId; if (!id || !next.questions![id] || next.questions![id].state !== "open") throw new OrchestratorError("STATE_CORRUPT", "Question answer is not valid.");
+      next.questions = { ...next.questions, [id]: { ...next.questions![id], state: "answered", ...(typeof p.answeredBy === "string" ? { answeredBy: p.answeredBy } : {}) } }; break;
+    }
+    case "question.timed_out": {
+      const id = event.entityRefs?.questionId; if (!id || !next.questions![id] || next.questions![id].state !== "open") throw new OrchestratorError("STATE_CORRUPT", "Question timeout is not valid.");
+      next.questions = { ...next.questions, [id]: { ...next.questions![id], state: "timed_out" } }; break;
+    }
     case "herdr.provision.intent": {
       const agentId = String(p.agentId);
       if (!agentId)
