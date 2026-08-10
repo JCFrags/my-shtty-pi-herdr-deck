@@ -719,6 +719,19 @@ export class Broker {
       this.#clients.delete(client);
     });
   }
+  async #enqueueMutation<T>(action: () => Promise<T>): Promise<T> {
+    const previous = this.#mutationTail;
+    let release!: () => void;
+    this.#mutationTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await action();
+    } finally {
+      release();
+    }
+  }
   async #request(client: Client, request: RequestFrame): Promise<void> {
     const now = Date.now();
     if (now - client.requestWindowStarted >= 1_000) {
@@ -743,17 +756,7 @@ export class Broker {
       client.socket.destroy();
       return;
     }
-    const previous = this.#mutationTail;
-    let release!: () => void;
-    this.#mutationTail = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    await previous;
-    try {
-      await this.#requestUnlocked(client, request);
-    } finally {
-      release();
-    }
+    await this.#enqueueMutation(() => this.#requestUnlocked(client, request));
   }
   async #requestUnlocked(client: Client, request: RequestFrame): Promise<void> {
     const principal = client.principal!;
@@ -3533,9 +3536,9 @@ export class Broker {
     const timer = this.#setTimeout(
       () => {
         this.#questionTimers.delete(question.id);
-        void this.#terminalizeQuestionTimeout(question.id).catch(
-          () => undefined,
-        );
+        void this.#enqueueMutation(() =>
+          this.#terminalizeQuestionTimeout(question.id),
+        ).catch(() => undefined);
       },
       Math.max(0, deadline - this.#now()),
     );
