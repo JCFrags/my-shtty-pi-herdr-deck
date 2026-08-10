@@ -19,3 +19,13 @@
 - Lock records now include nonce, expected socket, PID, and Linux `/proc/<pid>/stat` start identity. Lock and recovery guard identities are revalidated before stale unlink and release.
 - Focused tests cover regular-path refusal, lock metadata, real socket session-key rejection, concurrent append, incomplete/oversized recovery, verified snapshots, and 100,000-event replay with 1,000 task records plus audit events.
 - Complete validation at `e82a752`: 56 unit tests, 1 integration test, lint, typecheck, schema check, package smoke, and diff check passed.
+
+## Fresh rereview correction evidence (`86f433f`)
+
+- Socket cleanup uses same-directory atomic quarantine and identity verification. Stop releases the owned lock in a finally path after replacement detection.
+- Secret reads and exclusive creation use private no-follow helpers. Restart preserves the one trailing LF secret format.
+- M1 hello fails closed for declared `pi_parent` and `pi_child` until verified M3 identity registration exists. Synthetic task creation rejects arbitrary parent claims.
+- Snapshot selection occurs before event recovery. EventStore verifies the full disk chain and reduces only the suffix after a valid snapshot cursor. Disk history serves subscriptions below the in-memory replay ring floor.
+- Accepted M1 events are the task skeleton, strict task state changes, audit, status, and recovery events. Run/result/idempotency standalone events are unsupported and fail closed. Event append performs full schema/hash/chain verification before reduce/fsync.
+- `events.subscribe` validates cursor, filters, and includeSnapshot; returns the documented subscription shape and sends bounded canonical event frames for disk replay/live mutation. Snapshot writes occur only after committed mutations and do not change a committed success on snapshot failure.
+- Focused evidence: 13 correction tests pass, including snapshot suffix, disk history, invalid event schema, secret restart, parent fail-closed auth, lock identity, and socket/session regressions. Full validation evidence is recorded in STATUS and REPORT.
