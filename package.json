@@ -39,7 +39,7 @@
     "test:schemas": "node scripts/schema-check.mjs",
     "schemas:check": "node scripts/schema-check.mjs",
     "check": "npm run typecheck && npm run schemas:check",
-    "lint": "prettier --check \"src/shared/**/*.ts\" \"src/state/**/*.ts\" \"src/broker/**/*.ts\" \"src/cli/**/*.ts\" tests/unit/core-m1.test.ts tests/unit/m1-recovery-performance.test.ts tests/unit/m2-herdr.test.ts"
+    "lint": "prettier --check \"src/shared/**/*.ts\" \"src/state/**/*.ts\" \"src/broker/**/*.ts\" \"src/cli/**/*.ts\" tests/unit/core-m1.test.ts tests/unit/m1-recovery-performance.test.ts tests/unit/m2-herdr.test.ts tests/integration/fake-stack.test.ts tests/integration/m2-faults.test.ts"
   },
   "dependencies": {
     "@pi-herdr-deck/tui": "npm:@earendil-works/pi-tui@0.83.0"

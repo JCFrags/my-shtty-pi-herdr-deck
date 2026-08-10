@@ -78,6 +78,7 @@ export class HerdrService {
           state: "registered",
           ...(result.paneId ? { paneId: result.paneId } : {}),
           ...(result.tabId ? { tabId: result.tabId } : {}),
+          ...(result.worktreeId ? { worktreeId: result.worktreeId } : {}),
         },
       });
       return result;

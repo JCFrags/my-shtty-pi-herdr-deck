@@ -24,6 +24,7 @@ export interface ProvisionResult {
   token: ManagedToken;
   tabId?: string;
   paneId?: string;
+  worktreeId?: string;
   worktreePath?: string;
   unusedTabId?: string;
 }
@@ -133,13 +134,16 @@ export class HerdrProvisioner {
       const sr = started as Record<string, unknown>;
       await deletePromptFile(prompt);
       prompt = undefined;
+      if (unusedTabId && unusedTabId !== tabId) {
+        await this.cli.closeTab(unusedTabId);
+      }
       return {
         name,
         token,
         tabId,
-        ...(typeof sr.pane_id === "string" ? { paneId: sr.pane_id } : {}),
+        paneId: typeof sr.pane_id === "string" ? sr.pane_id : paneId,
+        ...(worktreeId ? { worktreeId } : {}),
         ...(worktreePath ? { worktreePath } : {}),
-        ...(unusedTabId ? { unusedTabId } : {}),
       };
     } catch (error) {
       if (prompt) await deletePromptFile(prompt).catch(() => undefined);
