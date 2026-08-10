@@ -112,6 +112,50 @@ test("registration retention inventory is redacted and bounded", async () => {
   );
 });
 
+test("registration retention admission serializes concurrent provisions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "m2-retention-concurrent-"));
+  let sequence = 0;
+  const cli = {
+    createTab: async () => {
+      sequence += 1;
+      return { tab_id: `tab-${sequence}`, root_pane_id: `pane-${sequence}` };
+    },
+    startPi: async (input: { paneId: string }) => ({ pane_id: input.paneId }),
+  } as never;
+  const provisioner = new HerdrProvisioner(cli, root, () => [], true);
+  const aliasProvisioner = new HerdrProvisioner(
+    cli,
+    join(root, "."),
+    () => [],
+    true,
+  );
+  const attempts = await Promise.allSettled(
+    Array.from({ length: 65 }, (_, index) =>
+      (index % 2 === 0 ? provisioner : aliasProvisioner).provision({
+        agentId: `agent-${index}`,
+        parentAgentId: "parent",
+        role: "worker",
+        workspaceId: "workspace",
+        cwd: root,
+        profileId: "profile",
+        isolation: "shared-readonly",
+        prompt: "bounded prompt",
+      }),
+    ),
+  );
+  assert.equal(
+    attempts.filter((result) => result.status === "fulfilled").length,
+    64,
+  );
+  assert.equal(
+    attempts.filter((result) => result.status === "rejected").length,
+    1,
+  );
+  const status = await provisioner.registrationRetentionStatus();
+  assert.equal(status.files, 128);
+  assert.equal(status.files <= status.maxFiles, true);
+});
+
 test("registration retention age and unsafe files fail provisioning closed", async () => {
   const root = await mkdtemp(join(tmpdir(), "m2-retention-age-"));
   const old = join(root, ".prompt-old");
@@ -134,9 +178,10 @@ test("registration retention age and unsafe files fail provisioning closed", asy
     /HERDR_REGISTRATION_RETENTION_EXPIRED/,
   );
   await symlink(old, join(root, ".token-unsafe"));
+  await writeFile(join(root, ".unexpected"), "unexpected\n", { mode: 0o600 });
   assert.equal(
     (await provisioner.registrationRetentionStatus()).unsafeFiles,
-    1,
+    2,
   );
 });
 

@@ -3,7 +3,7 @@ import { branchSlug, herdrName, label } from "./names.js";
 import type { GitEvidence } from "../git/porcelain.js";
 import { open, readdir } from "node:fs/promises";
 import { constants } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   createManagedToken,
   createManagedTokenFile,
@@ -52,6 +52,26 @@ export interface RegistrationRetentionStatus {
 const RETENTION_MAX_FILES = 128;
 const RETENTION_MAX_BYTES = 32 * 1024 * 1024;
 const RETENTION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const retentionAdmissions = new Map<string, Promise<void>>();
+async function withRetentionAdmission<T>(
+  root: string,
+  action: () => Promise<T>,
+): Promise<T> {
+  const previous = retentionAdmissions.get(root) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  retentionAdmissions.set(root, current);
+  await previous;
+  try {
+    return await action();
+  } finally {
+    release();
+    if (retentionAdmissions.get(root) === current)
+      retentionAdmissions.delete(root);
+  }
+}
 export class HerdrProvisioner {
   constructor(
     readonly cli: HerdrCli,
@@ -63,9 +83,7 @@ export class HerdrProvisioner {
   async registrationRetentionStatus(): Promise<RegistrationRetentionStatus> {
     let names: string[];
     try {
-      names = (await readdir(this.promptRoot)).filter(
-        (name) => name.startsWith(".prompt-") || name.startsWith(".token-"),
-      );
+      names = await readdir(this.promptRoot);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT")
         return {
@@ -91,7 +109,12 @@ export class HerdrProvisioner {
         const stat = await handle.stat();
         bytes += stat.size;
         oldestMtimeMs = Math.min(oldestMtimeMs ?? stat.mtimeMs, stat.mtimeMs);
-        if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0)
+        if (
+          (!name.startsWith(".prompt-") && !name.startsWith(".token-")) ||
+          !stat.isFile() ||
+          stat.nlink !== 1 ||
+          (stat.mode & 0o077) !== 0
+        )
           unsafeFiles += 1;
       } catch {
         unsafeFiles += 1;
@@ -125,6 +148,13 @@ export class HerdrProvisioner {
       throw new Error("HERDR_REGISTRATION_RETENTION_BUDGET_EXCEEDED");
   }
   async provision(input: ProvisionInput): Promise<ProvisionResult> {
+    return await withRetentionAdmission(resolve(this.promptRoot), () =>
+      this.provisionWithRetentionAdmission(input),
+    );
+  }
+  private async provisionWithRetentionAdmission(
+    input: ProvisionInput,
+  ): Promise<ProvisionResult> {
     await this.requireRegistrationRetentionBudget(input.prompt);
     const token = createManagedToken();
     const name = herdrName(input.role, input.agentId, this.liveNames());
