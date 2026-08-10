@@ -154,7 +154,7 @@ export class FakePiBroker {
         } else if (frame.type === "request") {
           this.requests.push(frame);
           const method = frame.method as string;
-          socket.write(encodeFrame({ v: 1, type: "response", id: frame.id, ok: true, result: method.startsWith("agent.register_") ? { agentId: typeof (frame.params as Record<string, unknown> | undefined)?.agentId === "string" ? (frame.params as Record<string, unknown>).agentId : "agt_registered", generation: 1, connectionGeneration: 1, heartbeatMs: 5000, permissions: ["read:state"] } : { accepted: true } }));
+          socket.write(encodeFrame({ v: 1, type: "response", id: frame.id, method, ok: true, result: method.startsWith("agent.register_") ? { agentId: typeof (frame.params as Record<string, unknown> | undefined)?.agentId === "string" ? (frame.params as Record<string, unknown>).agentId : "agt_registered", generation: 1, connectionGeneration: 1, heartbeatMs: 5000, permissions: ["read:state"] } : { accepted: true } }));
         }
       }
     });

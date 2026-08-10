@@ -51,6 +51,9 @@ export class LifecycleCorrelator {
     return "manual";
   }
   cancel(): void { if (this.#state.kind !== "none") this.#state = { kind: "none" }; }
+  exportState(): CorrelationState { return this.#state; }
+  restoreAssignment(assignment: PiAssignment, safe: PiSafeState): void { if (assignment.agentId === safe.agentId && assignment.generation === safe.generation && assignment.piSessionId === safe.sessionId) this.#state = { kind: "accepted", assignment, acceptedAt: new Date().toISOString() }; }
+  restoreState(state: CorrelationState, safe: PiSafeState): void { if (state.kind === "none") return; const assignment = state.assignment; if (assignment.agentId !== safe.agentId || assignment.generation !== safe.generation || assignment.piSessionId !== safe.sessionId) return; if (state.kind === "pending") this.#state = { kind: "pending", assignment, customEntryWritten: true }; else if (state.kind === "accepted") this.#state = state; else this.#state = state; }
   private matches(event: PiLifecycleEvent): boolean {
     const assignment = this.#state.kind === "settled" || this.#state.kind === "bound" ? this.#state.assignment : this.pending();
     return !!assignment && assignment.agentId === event.agentId && assignment.generation === event.generation && assignment.piSessionId === event.piSessionId && (assignment.assignmentGeneration === event.assignmentGeneration || event.assignmentGeneration === undefined);

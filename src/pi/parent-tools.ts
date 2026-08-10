@@ -1,7 +1,7 @@
 export type ParentToolName = "delegate" | "agent_spawn" | "agent_list" | "agent_get" | "agent_prompt" | "agent_steer" | "agent_wait" | "agent_result" | "agent_answer" | "agent_interrupt" | "agent_stop" | "agent_close" | "task_list" | "task_get" | "task_collect" | "task_cancel";
 export interface ToolPrincipal { readonly id: string; readonly kind: "human" | "pi_parent" | "pi_child"; readonly agentId?: string; readonly permissions: readonly string[]; }
 export interface ParentToolRequest { readonly tool: ParentToolName; readonly input: Record<string, unknown>; readonly idempotencyKey?: string; }
-export interface ParentToolResponse { readonly ok: boolean; readonly result?: unknown; readonly error?: { readonly code: string; readonly message: string }; readonly retrieval?: { readonly method: string; readonly id: string; readonly nextCursor: string | null }; }
+export interface ParentToolResponse { readonly ok: boolean; readonly result?: unknown; readonly error?: { readonly code: string; readonly message: string; readonly retryable?: boolean; readonly details?: unknown; readonly remediation?: string }; readonly retrieval?: { readonly method: string; readonly id: string; readonly nextCursor: string | null }; }
 export interface ParentToolBroker {
   invoke(method: string, params: Record<string, unknown>, principal: ToolPrincipal, idempotencyKey?: string): Promise<unknown>;
 }
@@ -35,6 +35,6 @@ export class ParentToolService {
       if (!safeRetrieval) return { ok: false, error: { code: "RESPONSE_TOO_LARGE", message: "The broker response exceeded the safe response limit." } };
       const truncated = { truncated: true, preview: safeProjection(result, { ...this.#limits, maxResponseBytes: 0, maxItems: 8, maxTextBytes: 1024 }), retrieval: safeRetrieval };
       return { ok: true, result: truncated, retrieval: safeRetrieval };
-    } catch { return { ok: false, error: { code: "REQUEST_FAILED", message: "The broker rejected the parent tool request." } }; }
+    } catch (error) { const failure = error as Error & { code?: unknown; retryable?: unknown; details?: unknown; remediation?: unknown }; const code = typeof failure.code === "string" && /^[A-Z0-9_]{1,64}$/u.test(failure.code) ? failure.code : "REQUEST_FAILED"; const message = typeof failure.message === "string" && Buffer.byteLength(failure.message, "utf8") <= 4096 ? failure.message : "The broker rejected the parent tool request."; return { ok: false, error: { code, message, ...(typeof failure.retryable === "boolean" ? { retryable: failure.retryable } : {}), ...(failure.details !== undefined ? { details: boundedSecretFree(failure.details) } : {}), ...(typeof failure.remediation === "string" && Buffer.byteLength(failure.remediation, "utf8") <= 4096 ? { remediation: failure.remediation } : {}) } }; }
   }
 }
