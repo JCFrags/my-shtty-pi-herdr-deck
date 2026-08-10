@@ -50,6 +50,7 @@ const known = new Set([
   "question.opened",
   "question.answered",
   "question.timed_out",
+  "question.cancelled",
   "workflow.created",
   "workflow.state_changed",
   "scheduler.admitted",
@@ -565,6 +566,9 @@ export function reduce(
           ...(Number.isSafeInteger(p.assignmentGeneration)
             ? { assignmentGeneration: p.assignmentGeneration as number }
             : {}),
+          ...(typeof p.toolCallId === "string"
+            ? { toolCallId: p.toolCallId }
+            : {}),
           ...(Object.hasOwn(p, "payload") ? { payload: p.payload } : {}),
           ...(typeof p.askedAt === "string" ? { askedAt: p.askedAt } : {}),
         },
@@ -598,16 +602,23 @@ export function reduce(
       };
       break;
     }
-    case "question.timed_out": {
+    case "question.timed_out":
+    case "question.cancelled": {
       const id = event.entityRefs?.questionId;
       if (!id || !next.questions![id] || next.questions![id].state !== "open")
         throw new OrchestratorError(
           "STATE_CORRUPT",
-          "Question timeout is not valid.",
+          event.type === "question.cancelled"
+            ? "Question cancellation is not valid."
+            : "Question timeout is not valid.",
         );
       next.questions = {
         ...next.questions,
-        [id]: { ...next.questions![id], state: "timed_out" },
+        [id]: {
+          ...next.questions![id],
+          state:
+            event.type === "question.cancelled" ? "cancelled" : "timed_out",
+        },
       };
       break;
     }

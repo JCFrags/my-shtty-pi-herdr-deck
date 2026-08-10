@@ -200,13 +200,14 @@ test("broker domain wire persists correlated result, question, workflow, and rep
         taskId,
         runId: run.runId,
         assignmentGeneration: 1,
+        toolCallId: "tool-question-wire",
         question,
       }),
     );
     const operator = await connect(paths, secret, "human");
     resultOf(
       await request(operator, "question.answer", {
-        questionId: opened.id,
+        questionId: opened.questionId,
         answer: { optionId: "yes" },
       }),
     );

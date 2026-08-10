@@ -607,6 +607,7 @@ export class EventStore {
         "question.opened",
         "question.answered",
         "question.timed_out",
+        "question.cancelled",
         "workflow.created",
         "workflow.state_changed",
         "scheduler.admitted",

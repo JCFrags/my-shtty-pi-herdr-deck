@@ -117,6 +117,7 @@ export interface QuestionRecord {
   agentId: string;
   state: "open" | "answered" | "cancelled" | "timed_out";
   assignmentGeneration?: number;
+  toolCallId?: string;
   payload?: unknown;
   askedAt?: string;
   answeredAt?: string;

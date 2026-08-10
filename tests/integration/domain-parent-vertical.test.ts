@@ -554,6 +554,7 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
         taskId,
         runId,
         assignmentGeneration: 1,
+        toolCallId: "tool-question-vertical",
         question: {
           schemaVersion: 1,
           prompt: "Pick",
@@ -568,7 +569,7 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
     assert.equal(
       (
         await send(p2.socket, "question.answer", {
-          questionId: question.id,
+          questionId: question.questionId,
           answer: { optionId: "a" },
         })
       ).ok,
@@ -576,7 +577,7 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
     );
     ok(
       await send(p1.socket, "question.answer", {
-        questionId: question.id,
+        questionId: question.questionId,
         answer: { optionId: "a" },
       }),
     );
@@ -628,6 +629,7 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
     );
     ok(
       await send(child.socket, "agent.heartbeat", {
+        agentId: childId,
         adapterSeq: 7,
         state: { sessionId: "child-session", activity: "idle" },
       }),

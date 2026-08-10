@@ -42,6 +42,7 @@ import {
   payloadHash,
 } from "../results/validation.js";
 import type { ResultBody, QuestionBody } from "../results/types.js";
+import type { QuestionRecord } from "../state/types.js";
 import { DeterministicScheduler } from "../scheduler/scheduler.js";
 import { planAdmission } from "../scheduler/admission.js";
 import {
@@ -325,6 +326,7 @@ export class Broker {
   #lock: BrokerLock;
   #secret: string;
   #clients = new Set<Client>();
+  #questionTimers = new Map<string, NodeJS.Timeout>();
   #herdr?: HerdrService;
   readonly #herdrFactory:
     | ((store: EventStore, paths: ResolvedPaths) => Promise<HerdrService>)
@@ -395,6 +397,8 @@ export class Broker {
           return undefined;
         });
       await this.store.open(snapshot);
+      for (const question of Object.values(this.store.state.questions ?? {}))
+        if (question.state === "open") this.#scheduleQuestionTimeout(question);
       if (this.#herdrFactory)
         this.#herdr = await this.#herdrFactory(this.store, this.paths);
       if (this.#herdr) await this.#herdr.startupReconcile();
@@ -1496,7 +1500,8 @@ export class Broker {
         const p = request.params;
         if (
           principal.kind !== "pi_child" ||
-          !exactKeys(p, ["adapterSeq", "state"]) ||
+          !exactKeys(p, ["agentId", "adapterSeq", "state"]) ||
+          p.agentId !== agentId ||
           !Number.isSafeInteger(p.adapterSeq) ||
           Number(p.adapterSeq) <= 0 ||
           !safeBoundedRecord(p.state)
@@ -2096,12 +2101,14 @@ export class Broker {
             "taskId",
             "runId",
             "assignmentGeneration",
+            "toolCallId",
             "question",
           ]) ||
           !safeText(p.agentId) ||
           !safeText(p.taskId) ||
           !safeText(p.runId) ||
-          !Number.isSafeInteger(p.assignmentGeneration)
+          !Number.isSafeInteger(p.assignmentGeneration) ||
+          !safeText(p.toolCallId, 256)
         )
           throw new OrchestratorError(
             "INVALID_REQUEST",
@@ -2118,7 +2125,7 @@ export class Broker {
           run.taskId !== p.taskId ||
           run.agentId !== p.agentId ||
           run.assignmentGeneration !== p.assignmentGeneration ||
-          run.state !== "working"
+          !["working", "blocked"].includes(run.state)
         )
           throw new OrchestratorError(
             "RUN_MISMATCH",
@@ -2129,7 +2136,29 @@ export class Broker {
             "PERMISSION_DENIED",
             "Run is outside the descendant scope.",
           );
-        if (
+        const existing = Object.values(this.store.state.questions ?? {}).find(
+          (q) => q.runId === run.id,
+        );
+        if (existing && existing.toolCallId === p.toolCallId) {
+          if (
+            existing.taskId !== run.taskId ||
+            existing.agentId !== run.agentId ||
+            existing.assignmentGeneration !== p.assignmentGeneration
+          )
+            throw new OrchestratorError(
+              "RUN_MISMATCH",
+              "Question correlation does not match the existing tool call.",
+            );
+          this.#scheduleQuestionTimeout(existing);
+          result = {
+            questionId: existing.id,
+            runId: existing.runId,
+            assignmentGeneration: existing.assignmentGeneration,
+            toolCallId: existing.toolCallId,
+            state: existing.state,
+            ...(existing.answer ? { answer: existing.answer } : {}),
+          };
+        } else if (
           Object.values(this.store.state.questions ?? {}).some(
             (q) => q.runId === run.id && q.state === "open",
           )
@@ -2154,6 +2183,7 @@ export class Broker {
           payload: {
             questionId: id,
             assignmentGeneration: p.assignmentGeneration,
+            toolCallId: p.toolCallId,
             payload: q,
             askedAt,
           },
@@ -2164,11 +2194,13 @@ export class Broker {
           entityRefs: { runId: run.id, taskId: run.taskId },
           payload: { runId: run.id, state: "blocked" },
         });
+        this.#scheduleQuestionTimeout(this.store.state.questions![id]!);
         result = {
-          ...(this.store.state.questions?.[id] ?? {}),
-          id,
-          payload: q,
-          askedAt,
+          questionId: id,
+          runId: run.id,
+          assignmentGeneration: p.assignmentGeneration,
+          toolCallId: p.toolCallId,
+          state: "open",
         };
       } else if (request.method === "question.answer") {
         requirePermission(principal, "read:state");
@@ -2240,53 +2272,6 @@ export class Broker {
               "Question is outside the descendant scope.",
             );
         }
-        if (
-          run?.agentId &&
-          [...this.#clients].some(
-            (item) =>
-              item.principal?.kind === "pi_child" &&
-              item.principal.agentId === run.agentId,
-          )
-        ) {
-          const adapter = this.store.state.agents[run.agentId];
-          const delivered = await this.#sendAdapterRequest(
-            run.agentId,
-            "question.deliver_answer",
-            {
-              questionId: question.id,
-              runId: question.runId,
-              answer: {
-                ...(typeof answer.optionId === "string"
-                  ? { optionId: answer.optionId }
-                  : {}),
-                ...(typeof answer.text === "string"
-                  ? { text: answer.text }
-                  : {}),
-              },
-            },
-            {
-              generation: adapter!.generation,
-              ...(adapter!.connectionGeneration !== undefined
-                ? { connectionGeneration: adapter!.connectionGeneration }
-                : {}),
-              ...(adapter!.piSessionId
-                ? { piSessionId: adapter!.piSessionId }
-                : {}),
-              runId: question.runId,
-            },
-          );
-          if (
-            !delivered ||
-            typeof delivered !== "object" ||
-            !["accepted", "already_accepted"].includes(
-              String((delivered as Record<string, unknown>).status),
-            )
-          )
-            throw new OrchestratorError(
-              "PI_COMMAND_REJECTED",
-              "The managed adapter rejected the answer.",
-            );
-        }
         committedEvent = await this.store.append({
           type: "question.answered",
           actor: { principalId: principal.id, kind: principal.kind },
@@ -2314,6 +2299,16 @@ export class Broker {
           payload: { runId: question.runId, state: "working" },
         });
         result = this.store.state.questions?.[question.id];
+        deferred.push(
+          this.#deferQuestionDelivery(
+            this.store.state.questions?.[question.id] ?? question,
+            "answered",
+            result && typeof result === "object"
+              ? (result as { answer?: { optionId?: string; text?: string } })
+                  .answer
+              : undefined,
+          ),
+        );
       } else if (request.method === "question.timeout") {
         requirePermission(principal, "manage:all");
         if (
@@ -2351,6 +2346,7 @@ export class Broker {
             payload: { runId: question.runId, state: "failed" },
           });
           result = this.store.state.questions?.[question.id];
+          deferred.push(this.#deferQuestionDelivery(question, "timed_out"));
         }
       } else if (request.method === "task.cancel") {
         requirePermission(principal, "delegate");
@@ -2385,6 +2381,32 @@ export class Broker {
             cascade: request.params.cascade === true,
           },
         });
+        for (const question of Object.values(
+          this.store.state.questions ?? {},
+        ).filter((item) => item.taskId === task.id && item.state === "open")) {
+          await this.store.append({
+            type: "question.cancelled",
+            actor: { principalId: principal.id, kind: principal.kind },
+            entityRefs: {
+              questionId: question.id,
+              taskId: question.taskId,
+              runId: question.runId,
+            },
+            payload: { questionId: question.id },
+          });
+          await this.store.append({
+            type: "run.state_changed",
+            actor: { principalId: principal.id, kind: principal.kind },
+            entityRefs: { runId: question.runId, taskId: question.taskId },
+            payload: { runId: question.runId, state: "cancelled" },
+          });
+          deferred.push(
+            this.#deferQuestionDelivery(
+              this.store.state.questions?.[question.id] ?? question,
+              "cancelled",
+            ),
+          );
+        }
         result = { taskId: task.id, state: "cancelled" };
         if (task.workflowId)
           deferred.push(async () =>
@@ -2840,6 +2862,19 @@ export class Broker {
           dryRun: p.dryRun === true,
         });
         const taskIds = plan.steps.map((step) => step.taskId);
+        const queueLimit = new DeterministicScheduler().limits.maxQueuedTasks;
+        if (
+          !p.dryRun &&
+          Object.values(this.store.state.tasks).filter(
+            (task) => task.state === "queued",
+          ).length +
+            plan.steps.length >
+            queueLimit
+        )
+          throw new OrchestratorError(
+            "LIMIT_EXCEEDED",
+            "The global task queue is full.",
+          );
         if (p.dryRun !== true)
           committedEvent = await this.store.append({
             type: "workflow.created",
@@ -3421,6 +3456,96 @@ export class Broker {
   }
   async #canAccessTask(principal: Principal, taskId: string): Promise<boolean> {
     return this.#canAccessTaskSync(principal, taskId);
+  }
+  #scheduleQuestionTimeout(question: QuestionRecord): void {
+    if (this.#questionTimers.has(question.id)) return;
+    const payload = question.payload as { timeoutMs?: unknown } | undefined;
+    const timeoutMs =
+      typeof payload?.timeoutMs === "number" &&
+      Number.isSafeInteger(payload.timeoutMs)
+        ? payload.timeoutMs
+        : 300_000;
+    const timer = setTimeout(() => {
+      this.#questionTimers.delete(question.id);
+      void (async () => {
+        const current = this.store.state.questions?.[question.id];
+        if (!current || current.state !== "open") return;
+        await this.store.append({
+          type: "question.timed_out",
+          actor: {
+            principalId: "prn_00000000000000000000000000",
+            kind: "system",
+          },
+          entityRefs: {
+            questionId: current.id,
+            taskId: current.taskId,
+            runId: current.runId,
+          },
+          payload: { questionId: current.id },
+        });
+        await this.store.append({
+          type: "run.state_changed",
+          actor: {
+            principalId: "prn_00000000000000000000000000",
+            kind: "system",
+          },
+          entityRefs: { runId: current.runId, taskId: current.taskId },
+          payload: { runId: current.runId, state: "failed" },
+        });
+        await this.#deferQuestionDelivery(
+          this.store.state.questions?.[current.id] ?? current,
+          "timed_out",
+        )();
+      })().catch(() => undefined);
+    }, timeoutMs);
+    timer.unref();
+    this.#questionTimers.set(question.id, timer);
+  }
+  #deferQuestionDelivery(
+    question: QuestionRecord,
+    state: "answered" | "cancelled" | "timed_out",
+    answer?: { optionId?: string; text?: string },
+  ): () => Promise<void> {
+    return async () => {
+      const timer = this.#questionTimers.get(question.id);
+      if (timer) {
+        clearTimeout(timer);
+        this.#questionTimers.delete(question.id);
+      }
+      const agent = this.store.state.agents[question.agentId];
+      const connected = [...this.#clients].some(
+        (item) =>
+          item.principal?.kind === "pi_child" &&
+          item.principal.agentId === question.agentId,
+      );
+      if (!agent || !connected || !question.toolCallId) return;
+      const delivered = await this.#sendAdapterRequest(
+        question.agentId,
+        "question.deliver_answer",
+        {
+          questionId: question.id,
+          runId: question.runId,
+          toolCallId: question.toolCallId,
+          state,
+          ...(answer ? { answer } : {}),
+        },
+        {
+          generation: agent.generation,
+          ...(agent.connectionGeneration !== undefined
+            ? { connectionGeneration: agent.connectionGeneration }
+            : {}),
+          ...(agent.piSessionId ? { piSessionId: agent.piSessionId } : {}),
+          runId: question.runId,
+        },
+      );
+      if (
+        !delivered ||
+        typeof delivered !== "object" ||
+        Object.keys(delivered as object).length !== 1 ||
+        (delivered as Record<string, unknown>).accepted !== true
+      )
+        this.#queueAudit("question_terminal_delivery_rejected");
+    };
   }
   async #sendAdapterRequest(
     agentId: string,
