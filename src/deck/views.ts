@@ -1,29 +1,42 @@
 import type { Agent, Task } from "../state/types.js";
-import type { DeckState, DeckNotification } from "./types.js";
-const clip = (s: string, width: number): string =>
-  width <= 0
-    ? ""
-    : s.length <= width
-      ? s
-      : width === 1
-        ? "…"
-        : `${s.slice(0, width - 1)}…`;
+import type { DeckState, DeckNotification, DeckResult } from "./types.js";
+
+const clip = (s: string, width: number): string => {
+  const safeWidth = Math.max(0, width);
+  if (safeWidth === 0) return "";
+  if (s.length <= safeWidth) return s;
+  if (safeWidth === 1) return "…";
+  return `${s.slice(0, safeWidth - 1)}…`;
+};
+
 const stateIcon = (state: string): string =>
-  (
-    ({
-      working: "▶",
-      blocked: "!",
-      failed: "×",
-      succeeded: "✓",
-      cancelled: "-",
-      idle: "○",
-      stopped: "■",
-      orphaned: "?",
-      replaced: "≠",
-    }) as Record<string, string>
-  )[state] ?? "·";
+  ({
+    provisioning: "…",
+    starting: "↻",
+    working: "▶",
+    blocked: "!",
+    failed: "×",
+    succeeded: "✓",
+    cancelled: "-",
+    timed_out: "⌛",
+    idle: "○",
+    stopping: "↘",
+    stopped: "■",
+    orphaned: "?",
+    replaced: "≠",
+    draft: "·",
+    queued: "…",
+    assigned: "→",
+    running: "▶",
+    collecting: "…",
+  })[state] ?? "·";
+
 const pad = (s: string, n: number): string =>
   s.length >= n ? s : s + " ".repeat(n - s.length);
+
+const fitLines = (lines: readonly string[], width: number): string[] =>
+  lines.map((line) => clip(line, width));
+
 export function renderAgents(
   state: DeckState,
   width: number,
@@ -38,7 +51,7 @@ export function renderAgents(
     ]);
   const lines = [
     "AGENTS",
-    "State symbols: ▶ working  ○ idle  ! blocked  × failed  ? orphaned  ≠ replaced",
+    "State: ▶ working | ○ idle | ! blocked | × failed | ✓ succeeded | ? orphaned | ≠ replaced",
   ];
   const visit = (parent: string | undefined, depth: number): void => {
     for (const agent of [...(children.get(parent) ?? [])].sort((a, b) =>
@@ -49,13 +62,14 @@ export function renderAgents(
         ? `run:${agent.currentRunId}`
         : "no active run";
       const label = `${marker}${"  ".repeat(depth)}${stateIcon(agent.state)} ${pad(agent.displayName ?? agent.herdrName ?? agent.id, 20)} ${pad(agent.profileId ?? "default", 14)} ${clip(task, 24)} ${agent.coarseStatus ?? agent.state}`;
-      lines.push(clip(label, width));
+      lines.push(label);
       visit(agent.id, depth + 1);
     }
   };
   visit(undefined, 0);
-  return lines;
+  return fitLines(lines, width);
 }
+
 export function renderTasks(
   state: DeckState,
   width: number,
@@ -74,60 +88,82 @@ export function renderTasks(
       : undefined;
     const assignee = run?.agentId ?? "unassigned";
     lines.push(
-      clip(
-        `${stateIcon(task.state)} ${pad(task.state, 12)} ${pad(task.id, 27)} ${pad(task.title, 30)} ${assignee}${task.resultId ? ` result:${task.resultId}` : ""}`,
-        width,
-      ),
+      `${stateIcon(task.state)} ${pad(task.state, 12)} ${pad(task.id, 27)} ${pad(task.title, 30)} ${assignee}${task.resultId ? ` result:${task.resultId}` : ""}`,
     );
   }
   if (tasks.length === 0) lines.push("No tasks match the current filter.");
-  return lines;
+  return fitLines(lines, width);
 }
+
 export function renderAgentInspector(
   agent: Agent | undefined,
   state: DeckState,
-  _width: number,
+  width: number,
 ): string[] {
-  if (!agent) return ["AGENT INSPECTOR", "No agent selected."];
+  if (!agent) return fitLines(["AGENT INSPECTOR", "No agent selected."], width);
   const run = agent.currentRunId
     ? state.runs.get(agent.currentRunId)
     : undefined;
-  return [
-    "AGENT INSPECTOR",
-    `Identity: ${agent.id}`,
-    `State: ${stateIcon(agent.state)} ${agent.state}`,
-    `Profile: ${agent.profileId ?? "default"}`,
-    `Pane: ${agent.paneId ?? "unavailable"}`,
-    `Workspace: ${agent.workspaceId ?? "unavailable"}`,
-    `Task/run: ${run?.taskId ?? "none"} / ${run?.id ?? "none"}`,
-    `Generation: ${agent.generation}`,
-    `Current tool: ${agent.detectedKind ?? "unavailable"}`,
-    "Actions: focus · interrupt · restart · stop · close",
-    "Unavailable fields are shown as unavailable, not inferred.",
-  ];
+  return fitLines(
+    [
+      "AGENT INSPECTOR",
+      `Identity: ${agent.id}`,
+      `State: ${stateIcon(agent.state)} ${agent.state}`,
+      `Profile: ${agent.profileId ?? "default"}`,
+      `Pane: ${agent.paneId ?? "unavailable"}`,
+      `Workspace: ${agent.workspaceId ?? "unavailable"}`,
+      `Task/run: ${run?.taskId ?? "none"} / ${run?.id ?? "none"}`,
+      `Generation: ${agent.generation}`,
+      `Current tool: ${agent.detectedKind ?? "unavailable"}`,
+      "Actions: focus · interrupt · restart · stop · close",
+      "Unavailable fields are shown as unavailable, not inferred.",
+    ],
+    width,
+  );
 }
+
 export function renderTaskDetail(
   task: Task | undefined,
   state: DeckState,
   width: number,
 ): string[] {
-  if (!task) return ["TASK DETAIL", "No task selected."];
+  if (!task) return fitLines(["TASK DETAIL", "No task selected."], width);
   const run = task.currentRunId ? state.runs.get(task.currentRunId) : undefined;
   const result = task.resultId ? state.results.get(task.resultId) : undefined;
-  return [
-    "TASK DETAIL",
-    `ID: ${task.id}`,
-    `State: ${stateIcon(task.state)} ${task.state}`,
-    `Title: ${clip(task.title, width - 7)}`,
-    `Objective: ${clip(task.objective, width - 11)}`,
-    `Run: ${run?.id ?? "none"} (${run?.state ?? "none"})`,
-    `Result: ${result?.id ?? "not available"}`,
-    `Evidence: ${result?.evidence?.join(", ") ?? "none"}`,
-    `Tests: ${result?.tests?.join(", ") ?? "none"}`,
-    `Artifacts: ${result?.artifacts?.join(", ") ?? "none"}`,
-    `Unresolved: ${result?.unresolved?.join(", ") ?? "none"}`,
-  ].map((line) => clip(line, width));
+  return fitLines(
+    [
+      "TASK DETAIL",
+      `ID: ${task.id}`,
+      `State: ${stateIcon(task.state)} ${task.state}`,
+      `Title: ${task.title}`,
+      `Objective: ${task.objective}`,
+      `Run: ${run?.id ?? "none"} (${run?.state ?? "none"})`,
+      ...renderResultLines(result),
+    ],
+    width,
+  );
 }
+
+export function renderResultDetail(
+  result: DeckResult | undefined,
+  width: number,
+): string[] {
+  return fitLines(["RESULT DETAIL", ...renderResultLines(result)], width);
+}
+
+function renderResultLines(result: DeckResult | undefined): string[] {
+  if (!result) return ["Result: not available"];
+  return [
+    `Result: ${result.id}`,
+    `Result status: ${result.status}`,
+    `Summary: ${result.summary ?? "none"}`,
+    `Evidence: ${result.evidence?.join(", ") ?? "none"}`,
+    `Tests: ${result.tests?.join(", ") ?? "none"}`,
+    `Artifacts: ${result.artifacts?.join(", ") ?? "none"}`,
+    `Unresolved: ${result.unresolved?.join(", ") ?? "none"}`,
+  ];
+}
+
 export function renderNotifications(
   notifications: readonly DeckNotification[],
   width: number,
@@ -135,10 +171,7 @@ export function renderNotifications(
   const lines = ["NOTIFICATIONS"];
   for (const item of notifications.slice(0, 8))
     lines.push(
-      clip(
-        `${stateIcon(item.kind)} [${item.kind}] ${item.text} (event ${item.id}, seq ${item.seq})`,
-        width,
-      ),
+      `${stateIcon(item.kind)} [${item.kind}] ${item.text} (event ${item.id}, seq ${item.seq})`,
     );
-  return lines;
+  return fitLines(lines, width);
 }

@@ -25,37 +25,46 @@ export interface ActionTarget {
   sessionId?: string;
   generation?: number;
 }
-const guards: Record<DeckAction, (target: ActionTarget) => string | undefined> =
-  {
-    focus: (t) => (t.paneId ? undefined : "Pane identity is unavailable."),
-    prompt: (t) => (t.agent ? undefined : "Select an agent first."),
-    steer: (t) =>
-      t.agent?.state === "working"
-        ? undefined
-        : "Steer requires a working agent.",
-    followUp: (t) =>
-      t.agent?.state === "working"
-        ? undefined
-        : "Follow-up requires a working agent.",
-    answer: (t) => (t.questionId ? undefined : "Select a question first."),
-    interrupt: (t) => (t.paneId ? undefined : "Pane identity is unavailable."),
-    compact: (t) =>
-      t.agent && t.paneId ? undefined : "Agent identity is unavailable.",
-    restart: (t) =>
-      t.agent && t.paneId ? undefined : "Agent identity is unavailable.",
-    stop: (t) => (t.paneId ? undefined : "Pane identity is unavailable."),
-    close: (t) => (t.paneId ? undefined : "Pane identity is unavailable."),
-    cancelTask: (t) => (t.task ? undefined : "Select a task first."),
-    openWorktree: (t) => (t.agent ? undefined : "Select an agent first."),
-    copyId: () => undefined,
-    refresh: () => undefined,
-  };
+
+type Guard = (target: ActionTarget) => string | undefined;
+const requireAgent = (target: ActionTarget): string | undefined =>
+  target.agent ? undefined : "Select an agent first.";
+const requirePane = (target: ActionTarget): string | undefined =>
+  target.paneId ? undefined : "Pane identity is unavailable.";
+const requireAgentAndPane = (target: ActionTarget): string | undefined =>
+  requireAgent(target) ?? requirePane(target) ?? undefined;
+
+const guards: Record<DeckAction, Guard> = {
+  focus: requirePane,
+  prompt: requireAgent,
+  steer: (t) =>
+    t.agent?.state === "working"
+      ? undefined
+      : "Steer requires a working agent.",
+  followUp: (t) =>
+    t.agent?.state === "working"
+      ? undefined
+      : "Follow-up requires a working agent.",
+  answer: (t) => (t.questionId ? undefined : "Select a question first."),
+  interrupt: requirePane,
+  compact: requireAgentAndPane,
+  restart: requireAgentAndPane,
+  stop: requirePane,
+  close: requirePane,
+  cancelTask: (t) => (t.task ? undefined : "Select a task first."),
+  openWorktree: requireAgent,
+  copyId: (t) =>
+    t.agent || t.task ? undefined : "Select an agent or task first.",
+  refresh: () => undefined,
+};
 
 export class DeckActions {
   constructor(private readonly client: BrokerClient) {}
+
   authorize(action: DeckAction, target: ActionTarget): string | undefined {
     return guards[action](target);
   }
+
   async run(
     action: DeckAction,
     target: ActionTarget,
@@ -106,6 +115,7 @@ export class DeckActions {
         );
     }
   }
+
   private guard(target: ActionTarget): Record<string, unknown> {
     return {
       paneId: target.paneId,
