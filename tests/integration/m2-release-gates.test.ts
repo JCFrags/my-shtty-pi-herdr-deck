@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -44,8 +51,34 @@ test("token verification rejects replacement text", async () => {
   await writeFile(path, "wrong\n");
   assert.equal(await verifyManagedTokenFile(path, token.digest), false);
 });
-test("token cleanup is idempotent", async () => {
+test("token cleanup wipes the claimed inode and rejects a replacement symlink", async () => {
   const root = await mkdtemp(join(tmpdir(), "m2-token-clean-"));
+  const token = createManagedToken();
+  const path = await createManagedTokenFile(root, agentId(), token);
+  const saved = join(root, "saved");
+  await rename(path, saved);
+  await writeFile(path, "replacement\n");
+  await deletePromptFile(path);
+  assert.equal(await readFile(path, "utf8"), "replacement\n");
+  assert.equal(await readFile(saved, "utf8"), token.token + "\n");
+  await rename(path, join(root, "replacement-saved"));
+  await rename(saved, path);
+  await deletePromptFile(path);
+  assert.equal(await readFile(path, "utf8"), "");
+  const target = join(root, "sentinel");
+  await writeFile(target, "keep\n");
+  await symlink(target, path + ".link");
+  await assert.rejects(
+    () => deletePromptFile(path + ".link"),
+    /ELOOP|symbolic/,
+  );
+  assert.equal(await readFile(target, "utf8"), "keep\n");
+  await deletePromptFile(path);
+  assert.equal(await readFile(path, "utf8"), "");
+});
+
+test("token cleanup is idempotent for a missing path", async () => {
+  const root = await mkdtemp(join(tmpdir(), "m2-token-clean-missing-"));
   const path = join(root, "missing");
   await deletePromptFile(path);
   await deletePromptFile(path);

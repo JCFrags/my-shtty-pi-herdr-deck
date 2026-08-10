@@ -371,67 +371,16 @@ export class HerdrService {
         this.#cli.closePane(guard.paneId),
       );
       if (resource?.worktreeId) {
-        const removalCheck = await this.worktreeRemovalCheck(resource);
-        if (!removalCheck.safe) {
-          await this.recordLifecycle(
-            agentId,
-            removalCheck.reason === "dirty" ? "dirty" : "replaced",
-            removalCheck.reason === "dirty"
-              ? "retained_dirty_worktree"
-              : "retained_resource_mismatch",
-          );
-          throw new Error(
-            removalCheck.reason === "dirty"
-              ? "HERDR_DIRTY_WORKTREE"
-              : "HERDR_RESOURCE_IDENTITY_MISMATCH",
-          );
-        }
-        try {
-          await this.#cli.removeWorktree(resource.worktreeId);
-        } catch (error) {
-          await this.recordLifecycle(
-            agentId,
-            "failed",
-            "retained_remove_failed",
-          );
-          throw error;
-        }
+        // Herdr has no compare-and-remove operation. Retain the worktree;
+        // removing its path after pane.close could delete a replacement.
       }
       if (!agentId.startsWith("pane:"))
-        await this.recordLifecycle(agentId, "closed", "close_succeeded");
+        await this.recordLifecycle(
+          agentId,
+          "closed",
+          resource?.worktreeId ? "retained_worktree" : "close_succeeded",
+        );
     });
-  }
-  private async worktreeRemovalCheck(resource: {
-    worktreeId?: string;
-    worktreePath?: string;
-    worktreeGitRoot?: string;
-    worktreeGitHead?: string;
-    worktreeGitBranch?: string;
-  }): Promise<{ safe: boolean; reason?: "dirty" | "mismatch" }> {
-    if (!resource.worktreeId || !resource.worktreePath || !this.#gitEvidence)
-      return { safe: false, reason: "mismatch" };
-    const snapshot = await this.#cli.snapshot().catch(() => undefined);
-    const worktree = snapshot?.worktrees.find(
-      (item) => item.id === resource.worktreeId,
-    );
-    if (!worktree || worktree.path !== resource.worktreePath)
-      return { safe: false, reason: "mismatch" };
-    const evidence = await this.#gitEvidence(resource.worktreePath).catch(
-      () => undefined,
-    );
-    if (!evidence || evidence.dirty)
-      return { safe: false, reason: evidence?.dirty ? "dirty" : "mismatch" };
-    if (
-      evidence.repositoryRoot !== resource.worktreePath ||
-      (resource.worktreeGitRoot &&
-        evidence.repositoryRoot !== resource.worktreeGitRoot) ||
-      (resource.worktreeGitHead &&
-        evidence.head !== resource.worktreeGitHead) ||
-      (resource.worktreeGitBranch &&
-        evidence.branch !== resource.worktreeGitBranch)
-    )
-      return { safe: false, reason: "mismatch" };
-    return { safe: true };
   }
   private async withAgentLock<T>(
     agentId: string,

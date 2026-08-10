@@ -1,4 +1,4 @@
-import { mkdir, unlink, open, lstat, readFile } from "node:fs/promises";
+import { mkdir, open } from "node:fs/promises";
 import { constants } from "node:fs";
 import { timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
@@ -7,6 +7,18 @@ export interface ManagedToken {
   token: string;
   digest: string;
   generation: number;
+}
+interface FileClaim {
+  dev: number;
+  ino: number;
+}
+const fileClaims = new Map<string, FileClaim>();
+function claim(path: string, stat: { dev: number; ino: number }): void {
+  fileClaims.set(path, { dev: stat.dev, ino: stat.ino });
+}
+function isClaimed(path: string, stat: { dev: number; ino: number }): boolean {
+  const expected = fileClaims.get(path);
+  return expected !== undefined && expected.dev === stat.dev && expected.ino === stat.ino;
 }
 export function createManagedToken(generation = 1): ManagedToken {
   const token = randomToken();
@@ -28,6 +40,7 @@ export async function createManagedTokenFile(
     0o600,
   );
   try {
+    claim(path, await h.stat());
     await h.writeFile(token.token + "\n", "utf8");
     await h.sync();
   } finally {
@@ -39,13 +52,24 @@ export async function verifyManagedTokenFile(
   path: string,
   expectedDigest: string,
 ): Promise<boolean> {
-  const stat = await lstat(path);
-  if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0)
-    return false;
-  const value = (await readFile(path, "utf8")).trimEnd();
-  const actual = Buffer.from(tokenDigest(value), "utf8");
-  const expected = Buffer.from(expectedDigest, "utf8");
-  return actual.length === expected.length && timingSafeEqual(actual, expected);
+  let handle;
+  try {
+    // Open the claimed inode before any await. Do not verify one pathname and
+    // read another inode after a replacement.
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const stat = await handle.stat();
+    if (!stat.isFile() || (stat.mode & 0o077) !== 0) return false;
+    claim(path, stat);
+    const value = (await handle.readFile("utf8")).trimEnd();
+    const actual = Buffer.from(tokenDigest(value), "utf8");
+    const expected = Buffer.from(expectedDigest, "utf8");
+    return actual.length === expected.length && timingSafeEqual(actual, expected);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
 }
 
 export async function createPromptFile(
@@ -66,6 +90,7 @@ export async function createPromptFile(
     0o600,
   );
   try {
+    claim(path, await h.stat());
     await h.writeFile(content, "utf8");
     await h.sync();
   } finally {
@@ -74,7 +99,25 @@ export async function createPromptFile(
   return path;
 }
 export async function deletePromptFile(path: string): Promise<void> {
-  await unlink(path).catch((e: NodeJS.ErrnoException) => {
-    if (e.code !== "ENOENT") throw e;
-  });
+  let handle;
+  try {
+    // This is a claimed-inode wipe. There is no safe compare-and-unlink API
+    // here, so never unlink a pathname that may now name a replacement.
+    handle = await open(path, constants.O_WRONLY | constants.O_NOFOLLOW);
+    const stat = await handle.stat();
+    if (!stat.isFile() || (stat.mode & 0o077) !== 0) return;
+    if (!isClaimed(path, stat)) return;
+    for (let offset = 0; offset < stat.size; ) {
+      const length = Math.min(64 * 1024, stat.size - offset);
+      await handle.write(Buffer.alloc(length), 0, length, offset);
+      offset += length;
+    }
+    await handle.truncate(0);
+    await handle.sync();
+    fileClaims.delete(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
 }

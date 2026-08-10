@@ -174,16 +174,8 @@ export class HerdrProvisioner {
     } catch (error) {
       if (prompt) await deletePromptFile(prompt).catch(() => undefined);
       if (tokenFile) await deletePromptFile(tokenFile).catch(() => undefined);
-      // Revalidate each resource immediately before destructive compensation.
-      // Missing or ambiguous snapshots are not proof of ownership.
-      if (
-        worktreeId &&
-        (await this.ownsWorktree(worktreeId, worktreePath)).safe &&
-        !!worktreePath &&
-        !!this.gitEvidence &&
-        !(await this.gitEvidence(worktreePath)).dirty
-      )
-        await this.cli.removeWorktree(worktreeId).catch(() => undefined);
+      // Herdr has no compare-and-remove operation. Retain every worktree;
+      // removing a path after an await could delete a replacement worktree.
       if (
         unusedTabId &&
         unusedTabId !== tabId &&
@@ -201,18 +193,8 @@ export class HerdrProvisioner {
     result: ProvisionResult,
     expectedAgentId: string,
   ): Promise<void> {
-    if (
-      result.worktreeId &&
-      (await this.ownsWorktree(result.worktreeId, result.worktreePath)).safe &&
-      result.worktreePath &&
-      this.gitEvidence
-    ) {
-      const evidence = await this.gitEvidence(result.worktreePath).catch(
-        () => undefined,
-      );
-      if (evidence && !evidence.dirty)
-        await this.cli.removeWorktree(result.worktreeId).catch(() => undefined);
-    }
+    // Herdr has no compare-and-remove operation. Retain the worktree during
+    // compensation rather than risking removal of a replacement path.
     if (
       result.unusedTabId &&
       result.unusedTabId !== result.tabId &&
@@ -255,20 +237,6 @@ export class HerdrProvisioner {
           !!tab &&
           !!expectedPaneId &&
           tab.panes.some((p) => p.id === expectedPaneId),
-      };
-    } catch {
-      return { safe: false };
-    }
-  }
-  private async ownsWorktree(
-    id: string,
-    expectedPath?: string,
-  ): Promise<{ safe: boolean }> {
-    try {
-      const snapshot = await this.cli.snapshot();
-      const worktree = snapshot.worktrees.find((item) => item.id === id);
-      return {
-        safe: !!worktree && !!expectedPath && worktree.path === expectedPath,
       };
     } catch {
       return { safe: false };

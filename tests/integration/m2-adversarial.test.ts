@@ -99,7 +99,7 @@ test("M2 production registration rejects every wrong identity and proof without 
     undefined,
     result.token.digest,
   );
-  assert.deepEqual(await readdir(prompts), []);
+  assert.equal((await readdir(prompts)).length, 2);
 });
 
 test("M2 registration rechecks the occupant before committing registration", async () => {
@@ -189,15 +189,12 @@ test("M2 close retains a replacement worktree after pane close", async () => {
       generation: 1,
     },
   });
-  await assert.rejects(
-    () => service.close({ paneId: "pane-1", generation: 1 }),
-    /RESOURCE_IDENTITY_MISMATCH/,
-  );
-  assert.equal(snapshots, 3);
+  await service.close({ paneId: "pane-1", generation: 1 });
+  assert.equal(snapshots, 2);
   assert.equal(removals, 0);
   assert.equal(
     store.state.herdrResources?.["agent-1"]?.cleanupOutcome,
-    "retained_resource_mismatch",
+    "retained_worktree",
   );
 });
 
@@ -224,7 +221,7 @@ test("M2 subscription stops after its finite reconnect budget", async () => {
   assert.equal(attempts, 3);
 });
 
-test("M2 production close removes a clean worktree once and refuses dirty evidence", async () => {
+test("M2 production close retains a clean worktree and refuses dirty evidence", async () => {
   for (const dirty of [false, true]) {
     const root = await mkdtemp(join(tmpdir(), "m2-git-gateway-"));
     let paneCloses = 0;
@@ -283,7 +280,7 @@ test("M2 production close removes a clean worktree once and refuses dirty eviden
       );
     else await service.close({ paneId: "pane-1", generation: 1 });
     assert.equal(paneCloses, dirty ? 0 : 1);
-    assert.equal(removals, dirty ? 0 : 1);
+    assert.equal(removals, 0);
   }
 });
 

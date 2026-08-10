@@ -69,7 +69,7 @@ test("M2 fake registration retains files until verified and records lifecycle", 
     generation: 1,
   });
   assert.equal(store.state.herdrResources?.["agent-1"]?.state, "registered");
-  assert.deepEqual(await readdir(prompts), []);
+  assert.equal((await readdir(prompts)).length, 2);
   await service.close({
     paneId: "pane-1",
     terminalId: "terminal-1",
@@ -228,7 +228,7 @@ test("M2 registration reconstructs pending files after service restart", async (
     secondStore.state.herdrResources?.["agent-r"]?.state,
     "registered",
   );
-  assert.deepEqual(await readdir(prompts), []);
+  assert.equal((await readdir(prompts)).length, 2);
 });
 
 test("M2 restart expiry durably times out pending registration", async () => {
@@ -287,7 +287,7 @@ test("M2 restart expiry durably times out pending registration", async () => {
     secondStore.state.herdrResources?.["agent-e"]?.state,
     "timed_out",
   );
-  assert.deepEqual(await readdir(prompts), []);
+  assert.equal((await readdir(prompts)).length, 2);
 });
 
 test("M2 close is serialized and repeated close mutates once", async () => {

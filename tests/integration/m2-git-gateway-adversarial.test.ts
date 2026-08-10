@@ -91,7 +91,7 @@ test("M2 Git gateway rejects unknown, head, and path mismatch before mutation", 
   }
 });
 
-test("M2 normal removal preserves parent HEAD and porcelain", async () => {
+test("M2 retained worktree preserves parent HEAD and porcelain", async () => {
   const root = await mkdtemp(join(tmpdir(), "m2-git-parent-preserve-"));
   const parent = { head: "parent-head", porcelain: ["1 .M file"] };
   const before = structuredClone(parent);
@@ -152,11 +152,11 @@ test("M2 normal removal preserves parent HEAD and porcelain", async () => {
     },
   });
   await service.close({ paneId: "pane-1", generation: 1 });
-  assert.equal(removed, 1);
+  assert.equal(removed, 0);
   assert.deepEqual(parent, before);
 });
 
-test("M2 real Git gateway preserves parent HEAD and porcelain for removal and compensation", async () => {
+test("M2 real Git gateway retains worktree and preserves parent HEAD and porcelain", async () => {
   const root = await mkdtemp(join(tmpdir(), "m2-real-git-"));
   const parent = join(root, "parent");
   const worktree = join(root, "worktree");
@@ -238,7 +238,7 @@ test("M2 real Git gateway preserves parent HEAD and porcelain for removal and co
   });
   await service.close({ paneId: "pane-1", generation: 1 });
   const after = await collectGitEvidence(parent);
-  assert.equal(removed, 1);
+  assert.equal(removed, 0);
   assert.equal(after.head, before.head);
   assert.deepEqual(after.entries, before.entries);
   assert.deepEqual(after.changedFiles, before.changedFiles);

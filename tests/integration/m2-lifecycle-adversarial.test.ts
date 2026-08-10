@@ -116,7 +116,7 @@ test("M2 concurrent deadline reconcile cleans registration once and revokes gene
   ]);
   assert.equal(store.state.herdrResources?.["agent-1"]?.state, "timed_out");
   assert.equal(store.state.herdrResources?.["agent-1"]?.generation, 2);
-  assert.deepEqual(await readdir(prompts), []);
+  assert.equal((await readdir(prompts)).length, 2);
 });
 
 test("M2 concurrent broker registration attempts produce one transition and cleanup", async () => {
@@ -170,7 +170,7 @@ test("M2 concurrent broker registration attempts produce one transition and clea
   assert.equal(attempts.filter((x) => x.status === "fulfilled").length, 1);
   assert.equal(attempts.filter((x) => x.status === "rejected").length, 1);
   assert.equal(store.state.herdrResources?.["agent-1"]?.state, "registered");
-  assert.deepEqual(await readdir(prompts), []);
+  assert.equal((await readdir(prompts)).length, 2);
 });
 
 test("M2 repeated normal reconcile has stable durable state and no mutation", async () => {

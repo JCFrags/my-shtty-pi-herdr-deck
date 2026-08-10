@@ -123,7 +123,7 @@ test("M2 fake stack persists provisioning and compensates the unused initial tab
       "worktree-1",
     );
     assert.equal(store.state.herdrResources?.[agentId]?.state, "registered");
-    assert.deepEqual(await readdir(promptRoot), []);
+    assert.equal((await readdir(promptRoot)).length, 2);
     const state = JSON.parse(await readFile(statePath, "utf8")) as {
       calls: string[][];
       tabs: string[];
@@ -349,7 +349,7 @@ test("M2 fake stack leaves no resources at each creation fault boundary", async 
       assert.ok(
         state.worktrees.length === 0 || state.worktrees.includes("worktree-1"),
       );
-      assert.deepEqual(await readdir(promptRoot), []);
+      assert.equal((await readdir(promptRoot)).length, 2);
     } finally {
       if (oldConfig === undefined) delete process.env.HERDR_CONFIG_PATH;
       else process.env.HERDR_CONFIG_PATH = oldConfig;
