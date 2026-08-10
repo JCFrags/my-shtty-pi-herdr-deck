@@ -1,8 +1,10 @@
-import { mkdir, open, rename } from "node:fs/promises";
+import { lstat, mkdir, open, rename } from "node:fs/promises";
 import { dirname } from "node:path";
 import { constants } from "node:fs";
+import type { Stats } from "node:fs";
 import {
   createPrivateExclusive,
+  openPrivateRegular,
   readPrivateLines,
 } from "../shared/private-fs.js";
 import { createId, isEntityId } from "../shared/ids.js";
@@ -52,6 +54,16 @@ function validTimestamp(value: unknown): boolean {
     return false;
   }
 }
+interface FileIdentity {
+  dev: number;
+  ino: number;
+  uid: number;
+  nlink: number;
+  mode: number;
+  size: number;
+  mtimeMs: number;
+  ctimeMs: number;
+}
 export class EventStore {
   readonly path: string;
   #state = emptyState();
@@ -59,7 +71,9 @@ export class EventStore {
   #lastSeq = 0;
   #lastHash = "0".repeat(64);
   #appendTail: Promise<void> = Promise.resolve();
+  #fileIdentity: FileIdentity | undefined;
   readonly #actor: { principalId: string; kind: string };
+  readonly #appendBoundary: (() => Promise<void>) | undefined;
   readOnly = false;
   corruption: string | undefined;
   constructor(
@@ -68,15 +82,18 @@ export class EventStore {
       principalId: "prn_00000000000000000000000000",
       kind: "system",
     },
+    appendBoundary?: () => Promise<void>,
   ) {
     this.path = path;
     this.#actor = actor;
+    this.#appendBoundary = appendBoundary;
   }
   async open(snapshot?: Snapshot): Promise<void> {
     await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
     try {
       let index = 0;
       let previous: StoredEvent | undefined;
+      let openedFile: FileIdentity | undefined;
       let snapshotValidationState = emptyState();
       if (snapshot) {
         if (
@@ -100,7 +117,9 @@ export class EventStore {
           this.#state = snapshot.state;
         }
       }
-      for await (const line of readPrivateLines(this.path)) {
+      for await (const line of readPrivateLines(this.path, (stat) => {
+        openedFile = this.#identityFrom(stat);
+      })) {
         if (!line || line.endsWith("\r"))
           throw new OrchestratorError(
             "STATE_CORRUPT",
@@ -145,6 +164,13 @@ export class EventStore {
           "STATE_CORRUPT",
           "Snapshot is ahead of the event log.",
         );
+      const closedFile = this.#identityFrom(await lstat(this.path));
+      if (!openedFile || !this.#sameIdentity(openedFile, closedFile, true))
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Event log changed while it was opened.",
+        );
+      this.#fileIdentity = closedFile;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
         if (snapshot && snapshot.lastEventSeq > 0) {
@@ -153,6 +179,7 @@ export class EventStore {
           return;
         }
         await createPrivateExclusive(this.path, "");
+        await this.#captureFileIdentity();
         return;
       }
       if (
@@ -183,11 +210,68 @@ export class EventStore {
   get events(): readonly StoredEvent[] {
     return this.#events;
   }
+  #identityFrom(stat: Stats): FileIdentity {
+    if (
+      !stat.isFile() ||
+      stat.nlink !== 1 ||
+      (process.getuid?.() !== undefined && stat.uid !== process.getuid()) ||
+      (stat.mode & 0o077) !== 0
+    )
+      throw new OrchestratorError("STATE_CORRUPT", "Event log file is unsafe.");
+    return {
+      dev: stat.dev,
+      ino: stat.ino,
+      uid: stat.uid,
+      nlink: stat.nlink,
+      mode: stat.mode,
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+      ctimeMs: stat.ctimeMs,
+    };
+  }
+  #sameIdentity(
+    expected: FileIdentity,
+    actual: FileIdentity,
+    includeContentMetadata: boolean,
+  ): boolean {
+    return (
+      expected.dev === actual.dev &&
+      expected.ino === actual.ino &&
+      expected.uid === actual.uid &&
+      expected.nlink === actual.nlink &&
+      (expected.mode & 0o777) === (actual.mode & 0o777) &&
+      (!includeContentMetadata ||
+        (expected.size === actual.size &&
+          expected.mtimeMs === actual.mtimeMs &&
+          expected.ctimeMs === actual.ctimeMs))
+    );
+  }
+  async #captureFileIdentity(): Promise<void> {
+    const handle = await openPrivateRegular(this.path);
+    try {
+      this.#fileIdentity = this.#identityFrom(await handle.stat());
+    } finally {
+      await handle.close();
+    }
+  }
   async readEventsFrom(fromSeq: number): Promise<StoredEvent[]> {
     const result: StoredEvent[] = [];
     let previous: StoredEvent | undefined;
+    const expectedFile = this.#fileIdentity;
+    if (!expectedFile)
+      throw new OrchestratorError(
+        "STATE_CORRUPT",
+        "Event log identity is unavailable.",
+      );
     try {
-      for await (const line of readPrivateLines(this.path)) {
+      for await (const line of readPrivateLines(this.path, (stat) => {
+        const current = this.#identityFrom(stat);
+        if (!this.#sameIdentity(expectedFile, current, true))
+          throw new OrchestratorError(
+            "STATE_CORRUPT",
+            "Event log path or contents changed after startup.",
+          );
+      })) {
         if (!line || line.endsWith("\r"))
           throw new OrchestratorError(
             "STATE_CORRUPT",
@@ -203,7 +287,9 @@ export class EventStore {
         previous = event;
         if (event.seq > fromSeq) result.push(event);
       }
+      const closedFile = this.#identityFrom(await lstat(this.path));
       if (
+        !this.#sameIdentity(expectedFile, closedFile, true) ||
         (previous?.seq ?? 0) !== this.#lastSeq ||
         (previous?.hash ?? "0".repeat(64)) !== this.#lastHash
       )
@@ -260,7 +346,10 @@ export class EventStore {
           hash: this.#lastHash,
         } as StoredEvent);
         const candidateState = reduce(this.#state, event);
+        const eventLine = `${canonicalJson(event)}\n`;
+        const expectedFile = this.#fileIdentity;
         try {
+          if (!expectedFile) throw new Error("Event log identity is missing.");
           const handle = await open(
             this.path,
             constants.O_WRONLY |
@@ -268,18 +357,28 @@ export class EventStore {
               (constants.O_NOFOLLOW ?? 0),
             0o600,
           );
-          const stat = await handle.stat();
-          if (
-            !stat.isFile() ||
-            stat.nlink !== 1 ||
-            (process.getuid?.() !== undefined && stat.uid !== process.getuid())
-          ) {
-            await handle.close();
-            throw new Error("Unsafe event log.");
-          }
           try {
-            await handle.write(`${canonicalJson(event)}\n`, undefined, "utf8");
+            const before = this.#identityFrom(await handle.stat());
+            const pathBefore = this.#identityFrom(await lstat(this.path));
+            if (
+              !this.#sameIdentity(expectedFile, before, true) ||
+              !this.#sameIdentity(expectedFile, pathBefore, true)
+            )
+              throw new Error("Event log changed before append.");
+            await this.#appendBoundary?.();
+            const written = await handle.write(eventLine, undefined, "utf8");
+            if (written.bytesWritten !== Buffer.byteLength(eventLine))
+              throw new Error("Event log append was incomplete.");
             await handle.sync();
+            const after = this.#identityFrom(await handle.stat());
+            const pathAfter = this.#identityFrom(await lstat(this.path));
+            if (
+              !this.#sameIdentity(expectedFile, after, false) ||
+              after.size !== expectedFile.size + written.bytesWritten ||
+              !this.#sameIdentity(after, pathAfter, true)
+            )
+              throw new Error("Event log changed during append.");
+            this.#fileIdentity = after;
           } finally {
             await handle.close();
           }

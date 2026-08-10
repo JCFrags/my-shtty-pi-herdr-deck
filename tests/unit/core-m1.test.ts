@@ -5,6 +5,7 @@ import {
   lstat,
   mkdtemp,
   readFile,
+  rename,
   symlink,
   unlink,
   writeFile,
@@ -191,6 +192,58 @@ test("declared Pi parent authentication fails closed before M3", () => {
   );
 });
 
+test("broker fails closed and audits managed Pi registration before M3", async () => {
+  const root = await mkdtemp(join(tmpdir(), "orch-managed-deferred-"));
+  const broker = new Broker(paths(root));
+  await broker.start();
+  const socket = createConnection(broker.paths.socket);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      socket.once("connect", resolve);
+      socket.once("error", reject);
+    });
+    socket.write(
+      `${JSON.stringify({
+        v: 1,
+        type: "hello",
+        id: "managed_1",
+        client: {
+          kind: "pi_child",
+          name: "deferred",
+          version: "0.1.0",
+          capabilities: [],
+        },
+        sessionKey: sessionKey(broker.paths.socket),
+        auth: {
+          kind: "agent_token",
+          token: "not-accepted-before-m3",
+          agentId: createId("agt"),
+          generation: 1,
+          piSessionId: "pi-session",
+        },
+      })}\n`,
+    );
+    const frame = await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error("managed handshake timeout")),
+        2_000,
+      );
+      socket.once("data", (data) => {
+        clearTimeout(timer);
+        resolve(data.toString("utf8"));
+      });
+      socket.once("error", reject);
+    });
+    assert.match(frame, /AUTH_FAILED/);
+    assert.deepEqual(broker.store.events.at(-1)?.payload, {
+      action: "authentication_failed_pi_child",
+    });
+  } finally {
+    socket.destroy();
+    await broker.stop();
+  }
+});
+
 test("broker rejects a mismatched session key at the authenticated boundary", async () => {
   const root = await mkdtemp(join(tmpdir(), "orch-session-"));
   const broker = new Broker(paths(root));
@@ -230,6 +283,9 @@ test("broker rejects a mismatched session key at the authenticated boundary", as
     );
     const frame = await result;
     assert.match(frame, /AUTH_FAILED/);
+    assert.deepEqual(broker.store.events.at(-1)?.payload, {
+      action: "authentication_failed_cli",
+    });
     await Promise.race([
       closed,
       new Promise<never>((_, reject) =>
@@ -240,6 +296,32 @@ test("broker rejects a mismatched session key at the authenticated boundary", as
     socket.destroy();
     await broker.stop();
   }
+});
+
+test("event append rejects a forced canonical-path replacement race", async () => {
+  const root = await mkdtemp(join(tmpdir(), "orch-event-race-"));
+  const path = join(root, "events.jsonl");
+  const displaced = join(root, "events.displaced.jsonl");
+  const store = new EventStore(path, undefined, async () => {
+    await rename(path, displaced);
+    await writeFile(path, "", { mode: 0o600 });
+    await chmod(path, 0o600);
+  });
+  await store.open();
+  await assert.rejects(
+    store.append({
+      type: "audit.action",
+      actor: {
+        principalId: "prn_00000000000000000000000001",
+        kind: "human",
+      },
+      payload: { action: "forced_replacement" },
+    }),
+    /read-only/,
+  );
+  assert.equal(store.state.lastEventSeq, 0);
+  assert.equal(await readFile(path, "utf8"), "");
+  assert.match(await readFile(displaced, "utf8"), /forced_replacement/);
 });
 
 test("event validation rejects noncanonical M1 payloads before append", async () => {

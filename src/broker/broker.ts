@@ -6,6 +6,7 @@ import {
 } from "node:net";
 import { chmod, lstat, rename, unlink } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
+import { dirname, join } from "node:path";
 import {
   createPrivateExclusive,
   readPrivateRegular,
@@ -64,6 +65,12 @@ interface SocketIdentity {
   ino: number;
   uid: number;
 }
+function socketQuarantine(path: string, label: string): string {
+  return join(
+    dirname(path),
+    `.q-${label}-${process.pid}-${randomBytes(6).toString("hex")}`,
+  );
+}
 async function listening(path: string): Promise<boolean> {
   return await new Promise((resolve, reject) => {
     const socket = createConnection(path);
@@ -106,7 +113,7 @@ export async function safeStaleSocket(
     throw new Error("Broker socket ownership or mode is unsafe.");
   if (await listening(path)) throw new Error("Broker socket is already live.");
 
-  const quarantine = `${path}.quarantine.${process.pid}.${randomBytes(8).toString("hex")}`;
+  const quarantine = socketQuarantine(path, "stale");
   await rename(path, quarantine);
   const restore = async (): Promise<void> => {
     try {
@@ -151,7 +158,7 @@ async function quarantineForClose(
   path: string,
   expected: SocketIdentity,
 ): Promise<CloseQuarantine | undefined> {
-  const quarantine = `${path}.closing.${process.pid}.${randomBytes(8).toString("hex")}`;
+  const quarantine = socketQuarantine(path, "close");
   try {
     await rename(path, quarantine);
   } catch (error) {
@@ -368,11 +375,14 @@ export class Broker {
                     "Session key does not match the broker socket.",
                   );
                 if (
-                  (item.value.client.kind === "pi_child" &&
-                    item.value.auth.kind !== "agent_token") ||
-                  (item.value.client.kind !== "pi_child" &&
-                    item.value.auth.kind !== "client_secret")
+                  item.value.client.kind === "pi_parent" ||
+                  item.value.client.kind === "pi_child"
                 )
+                  throw new OrchestratorError(
+                    "AUTH_FAILED",
+                    "Managed Pi registration is not available before M3.",
+                  );
+                if (item.value.auth.kind !== "client_secret")
                   throw new OrchestratorError(
                     "AUTH_FAILED",
                     "Authentication kind does not match client kind.",
@@ -381,10 +391,6 @@ export class Broker {
                   this.#secret,
                   item.value.auth.secret ?? "",
                   item.value.client.kind,
-                  undefined,
-                  item.value.auth.token,
-                  item.value.auth.generation,
-                  item.value.auth.piSessionId,
                 );
                 clearTimeout(authenticationTimer);
                 this.#writeFrame(client, {
@@ -403,6 +409,9 @@ export class Broker {
                   limits: { maxLineBytes: 1_048_576 },
                 });
               } catch (error) {
+                await this.#recordAudit(
+                  `authentication_failed_${item.value.client.kind}`,
+                ).catch(() => undefined);
                 this.#writeFrame(client, {
                   v: 1,
                   type: "hello_result",
@@ -800,39 +809,37 @@ export class Broker {
           tasks.includes(event.entityRefs.taskId)))
     );
   }
-  #queueAudit(action: string): void {
+  async #recordAudit(action: string): Promise<void> {
     const previous = this.#mutationTail;
     let release!: () => void;
     this.#mutationTail = new Promise<void>((resolve) => {
       release = resolve;
     });
-    void previous
-      .then(async () => {
-        try {
-          if (this.store.readOnly) return;
-          const event = await this.store.append({
-            type: "audit.action",
-            actor: {
-              principalId: "prn_00000000000000000000000000",
-              kind: "system",
-            },
-            entityRefs: {},
-            payload: { action },
-          });
-          await this.snapshotStore
-            .write(this.store.state)
-            .catch(() => undefined);
-          for (const subscriber of this.#clients)
-            if (
-              subscriber.subscribed &&
-              this.#matchesFilter(subscriber.eventFilter, event)
-            )
-              this.#sendEvent(subscriber, event);
-        } finally {
-          release();
-        }
-      })
-      .catch(() => undefined);
+    await previous;
+    try {
+      if (this.store.readOnly) return;
+      const event = await this.store.append({
+        type: "audit.action",
+        actor: {
+          principalId: "prn_00000000000000000000000000",
+          kind: "system",
+        },
+        entityRefs: {},
+        payload: { action },
+      });
+      await this.snapshotStore.write(this.store.state).catch(() => undefined);
+      for (const subscriber of this.#clients)
+        if (
+          subscriber.subscribed &&
+          this.#matchesFilter(subscriber.eventFilter, event)
+        )
+          this.#sendEvent(subscriber, event);
+    } finally {
+      release();
+    }
+  }
+  #queueAudit(action: string): void {
+    void this.#recordAudit(action).catch(() => undefined);
   }
   #writeFrame(client: Client, frame: unknown): void {
     if (client.slowClosed || client.socket.destroyed) return;

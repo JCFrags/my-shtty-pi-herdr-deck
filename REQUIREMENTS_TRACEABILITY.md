@@ -1,4 +1,3 @@
-
 ## M0/M1 implementation handoff
 
 - M0: package metadata, dual binaries, strict source layout, copied schemas/examples, shared clock/ID/path/subprocess/error primitives, doctor capability report, and artifacts ignore are implemented in commit `13455b7`.
@@ -34,9 +33,9 @@
 
 - The broker quarantines the socket path before Node closes the Unix server. It restores and does not delete a replacement socket. Stale socket and lock removal now delete only the quarantined inode after owner, mode, link, record, and identity checks.
 - Secret, event, lock, recovery-guard, snapshot, and socket operations use exclusive or no-follow handles where Linux and Node expose them. A secret symlink fails closed without changing its target.
-- M1 accepts only strict task skeleton, task state, and audit events. Later run, result, registration, and lifecycle events fail closed until their owning milestone adds complete reducers and correlation.
-- Task creation and idempotency binding share one fsynced event. Request mutation is serialized. Same-input retries return the durable result after restart. Cross-parameter reuse returns `IDEMPOTENCY_CONFLICT`.
+- M1 accepts only strict task skeleton, task state, and audit events. Later run, result, registration, and lifecycle events fail closed until their owning milestone adds complete reducers and correlation. FR-030–036 and BL-034–035/BL-051–054 assign managed-child registration to M2–M3. The M1 broker now rejects these principals explicitly and audits the failed attempt; it does not present an unusable partial registration path.
+- Task creation and idempotency binding share one fsynced event. Request mutation is serialized. Same-input retries return the durable result after restart. Cross-parameter reuse returns `IDEMPOTENCY_CONFLICT`. The event store anchors the opened canonical inode and content metadata. Each append verifies the no-follow handle and pathname before and after fsync. A forced replacement race enters read-only recovery and cannot return success.
 - Recovery verifies every event and validates snapshot state against the event-chain prefix. It loads the verified snapshot as serving state and applies only the suffix to that state. The 100,000-event snapshot-plus-suffix test completes below five seconds and 256 MiB RSS.
 - Subscription replay reads retained disk history for the active event generation. It validates exact parameters, filters, future cursors, subscription IDs, replay/live filters, client count, request rate, authentication wait, and outbound bytes. Slow-client disconnects queue a canonical audit event without blocking the writer.
-- Broker and CLI verification rescan the disk chain. Invalid event or snapshot data enters read-only recovery. Unexpected internal request errors are not sent to clients.
-- Current local gates: `npm run lint`, `npm run typecheck`, and `npm run validate` pass. Validation includes 66 unit tests, one integration test, schema checks, and package smoke. Fresh independent exact-commit review remains required before M2.
+- Broker and CLI verification rescan the disk chain. Invalid event or snapshot data enters read-only recovery. Unexpected internal request errors are not sent to clients. Authentication failures append a redacted canonical audit event before the socket closes when the store is writable.
+- Current local gates: `npm run lint`, `npm run typecheck`, and `npm run validate` pass. Validation includes 68 unit tests, one integration test, schema checks, and package smoke. Fresh independent exact-commit review remains required before M2.

@@ -1,4 +1,5 @@
 import { createReadStream, constants } from "node:fs";
+import type { Stats } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { LIMITS } from "./limits.js";
 import type { FileHandle } from "node:fs/promises";
@@ -31,8 +32,12 @@ export async function readPrivateRegular(path: string): Promise<string> {
     await handle.close();
   }
 }
-export async function* readPrivateLines(path: string): AsyncGenerator<string> {
+export async function* readPrivateLines(
+  path: string,
+  observe?: (stat: Stats) => void,
+): AsyncGenerator<string> {
   const handle = await openPrivateRegular(path);
+  observe?.(await handle.stat());
   const stream = createReadStream("", { fd: handle.fd, autoClose: false });
   let buffer = Buffer.alloc(0);
   try {
