@@ -161,6 +161,19 @@ export function reduce(
           ...(typeof p.replaced === "boolean" ? { replaced: p.replaced } : {}),
           ...(typeof p.orphaned === "boolean" ? { orphaned: p.orphaned } : {}),
           ...(typeof p.unknown === "boolean" ? { unknown: p.unknown } : {}),
+          ...(typeof p.parentGitRoot === "string"
+            ? { parentGitRoot: p.parentGitRoot }
+            : {}),
+          ...(typeof p.parentGitHead === "string"
+            ? { parentGitHead: p.parentGitHead }
+            : {}),
+          ...(typeof p.parentGitBranch === "string"
+            ? { parentGitBranch: p.parentGitBranch }
+            : {}),
+          ...(Array.isArray(p.parentGitChangedFiles) &&
+          p.parentGitChangedFiles.every((x) => typeof x === "string")
+            ? { parentGitChangedFiles: p.parentGitChangedFiles as string[] }
+            : {}),
         },
       };
       break;

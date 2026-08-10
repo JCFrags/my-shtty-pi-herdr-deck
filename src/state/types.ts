@@ -112,6 +112,10 @@ export interface OrchestrationState {
       replaced?: boolean;
       orphaned?: boolean;
       unknown?: boolean;
+      parentGitRoot?: string;
+      parentGitHead?: string;
+      parentGitBranch?: string;
+      parentGitChangedFiles?: string[];
     }
   >;
   idempotency: Record<

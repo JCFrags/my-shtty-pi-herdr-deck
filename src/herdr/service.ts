@@ -159,7 +159,15 @@ export class HerdrService {
             registrationDeadline: new Date(Date.now() + 30_000).toISOString(),
             parentAgentId: input.parentAgentId,
             ownerId: input.agentId,
-            ...(beforeGit ? { dirty: beforeGit.dirty } : {}),
+            ...(beforeGit
+              ? {
+                  dirty: beforeGit.dirty,
+                  parentGitRoot: beforeGit.repositoryRoot,
+                  parentGitHead: beforeGit.head,
+                  parentGitBranch: beforeGit.branch,
+                  parentGitChangedFiles: beforeGit.changedFiles,
+                }
+              : {}),
           },
         });
         if (result.tokenFilePath) {
@@ -180,9 +188,9 @@ export class HerdrService {
               state: dirty ? "dirty" : "failed",
               reason:
                 error instanceof Error ? error.message : "provision failed",
-              ...(dirty
-                ? { dirty: true, unknown: true, cleanupOutcome: "retained" }
-                : {}),
+              cleanupOutcome: "retained",
+              unknown: true,
+              ...(dirty ? { dirty: true } : {}),
             },
           })
           .catch(() => undefined);
@@ -263,6 +271,13 @@ export class HerdrService {
         ? undefined
         : this.resources[agentId];
       if (resource?.state === "stopped" || resource?.state === "closed") return;
+      if (!agentId.startsWith("pane:"))
+        await this.recordLifecycle(
+          agentId,
+          "stopping",
+          "mutation_pending",
+          true,
+        );
       await revalidateAndRun(this.#cli, guard, () =>
         this.#cli.stopAgent(guard.paneId),
       );
@@ -279,7 +294,9 @@ export class HerdrService {
         ? undefined
         : this.resources[agentId];
       if (resource?.dirty) throw new Error("HERDR_DIRTY_WORKTREE");
-      if (resource?.worktreePath && this.#gitEvidence) {
+      if (resource?.worktreeId) {
+        if (!resource.worktreePath || !this.#gitEvidence)
+          throw new Error("HERDR_GIT_EVIDENCE_UNKNOWN");
         const evidence = await this.#gitEvidence(resource.worktreePath);
         if (evidence.dirty) {
           await this.recordLifecycle(
@@ -291,9 +308,28 @@ export class HerdrService {
         }
       }
       if (resource?.state === "closed") return;
+      if (!agentId.startsWith("pane:"))
+        await this.recordLifecycle(
+          agentId,
+          "closing",
+          "mutation_pending",
+          true,
+        );
       await revalidateAndRun(this.#cli, guard, () =>
         this.#cli.closePane(guard.paneId),
       );
+      if (resource?.worktreeId) {
+        try {
+          await this.#cli.removeWorktree(resource.worktreeId);
+        } catch (error) {
+          await this.recordLifecycle(
+            agentId,
+            "failed",
+            "retained_remove_failed",
+          );
+          throw error;
+        }
+      }
       if (!agentId.startsWith("pane:"))
         await this.recordLifecycle(agentId, "closed", "close_succeeded");
     });
@@ -366,12 +402,21 @@ export class HerdrService {
     agentId: string,
     state: string,
     cleanupOutcome: string,
+    revokeGeneration = false,
   ): Promise<void> {
+    const current = this.resources[agentId];
     await this.#store.append({
       type: "herdr.provision.outcome",
       actor: this.#actor,
       entityRefs: { agentId },
-      payload: { agentId, state, cleanupOutcome },
+      payload: {
+        agentId,
+        state,
+        cleanupOutcome,
+        ...(revokeGeneration && current?.generation !== undefined
+          ? { generation: current.generation + 1 }
+          : {}),
+      },
     });
   }
   async reconcile(snapshot?: HerdrSnapshot): Promise<Reconciliation[]> {
@@ -468,6 +513,10 @@ export async function createProductionHerdrService(
   capabilities.require(Object.keys(capabilities.mandatory));
   const cli = new HerdrCli(runner, capabilities);
   const socketPath = process.env.HERDR_SOCKET_PATH;
+  if (!socketPath)
+    throw new Error("HERDR_UNAVAILABLE: socket is not configured.");
+  const adapterIdentity = process.env.PI_HERDR_ORCH_ADAPTER_ID;
+  const expectedSchemaHash = capabilities.schemaHash;
   return new HerdrService({
     store,
     cli,
@@ -480,21 +529,23 @@ export async function createProductionHerdrService(
     ),
     gitEvidence: collectGitEvidence,
     preflight: async () => {
+      const currentSchema = await runner.json(["api", "schema", "--json"]);
+      const currentCapabilities = projectCapabilities(currentSchema, binary);
+      if (currentCapabilities.schemaHash !== expectedSchemaHash)
+        throw new Error("HERDR_SCHEMA_IDENTITY_CHANGED");
+      if (adapterIdentity !== "pi-herdr-orchestrator")
+        throw new Error("HERDR_PI_ADAPTER_IDENTITY_INVALID");
       const report = await doctor({
         herdrBinary: binary,
-        ...(socketPath ? { herdrSocket: socketPath } : {}),
-        schema,
+        herdrSocket: socketPath,
+        schema: currentSchema,
       });
       if (!report.ok) throw new Error("HERDR_DOCTOR_FAILED");
     },
-    ...(socketPath
-      ? {
-          watcher: new HerdrSocketClient({
-            socketPath,
-            protocol: 17,
-            reconnectDelaysMs: [50, 100, 250],
-          }),
-        }
-      : {}),
+    watcher: new HerdrSocketClient({
+      socketPath,
+      protocol: 17,
+      reconnectDelaysMs: [50, 100, 250],
+    }),
   });
 }

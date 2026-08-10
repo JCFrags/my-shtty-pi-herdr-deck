@@ -58,7 +58,18 @@ export async function doctor(
         exitCode: 0,
       }),
     });
-    await api.readSchema().catch(() => undefined);
+    const schemaValid = await api
+      .readSchema()
+      .then(() => true)
+      .catch(() => false);
+    checks.push(
+      check(
+        "herdr-schema",
+        schemaValid,
+        true,
+        schemaValid ? "valid" : "schema drift",
+      ),
+    );
     for (const method of [
       "session.snapshot",
       "events.subscribe",
@@ -109,18 +120,27 @@ export async function doctor(
   checks.push(
     check(
       "pi-integration",
-      !!adapter,
+      adapter === "pi-herdr-orchestrator",
       !!herdrBinary,
       adapter ?? "official adapter identity is not configured",
     ),
   );
+  const lock = process.env.PI_HERDR_ORCH_BROKER_LOCK;
+  const config = process.env.PI_HERDR_ORCH_CONFIG_PATH;
+  const profile = process.env.PI_HERDR_ORCH_PROFILE_ID;
   checks.push(
     check(
       "broker-lock-config",
-      !!process.env.PI_HERDR_ORCH_BROKER_LOCK,
-      false,
-      process.env.PI_HERDR_ORCH_BROKER_LOCK ? "configured" : "default",
+      !!lock,
+      !!herdrBinary,
+      lock ?? "not configured",
     ),
+  );
+  checks.push(
+    check("broker-config", !!config, !!herdrBinary, config ?? "not configured"),
+  );
+  checks.push(
+    check("profile", !!profile, !!herdrBinary, profile ?? "not configured"),
   );
   return {
     version: "0.1.0",
