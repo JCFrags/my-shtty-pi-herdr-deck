@@ -40,6 +40,8 @@ export class BrokerClient {
   #listeners = new Set<(status: BrokerStatus) => void>();
   #timer: NodeJS.Timeout | undefined;
   #attempt = 0;
+  #helloId: string | undefined;
+  #authenticated = false;
   #stopped = true;
 
   constructor(options: BrokerClientOptions, store = new DeckStore()) {
@@ -71,6 +73,8 @@ export class BrokerClient {
     this.#timer = undefined;
     this.#socket?.destroy();
     this.#socket = undefined;
+    this.#helloId = undefined;
+    this.#authenticated = false;
     this.#reject(new Error(reason));
     this.#setStatus("disconnected");
   }
@@ -114,15 +118,18 @@ export class BrokerClient {
         includeSnapshot: true,
       }),
     );
-    if (result.snapshot)
-      this.store.replace(snapshotFromBroker(result.snapshot));
+    this.#applySnapshot(result.snapshot);
     return result;
   }
   async refresh(): Promise<unknown> {
-    return await this.request("events.subscribe", {
-      fromSeq: this.store.state.seq,
-      includeSnapshot: true,
-    });
+    const result = record(
+      await this.request("events.subscribe", {
+        fromSeq: this.store.state.seq,
+        includeSnapshot: true,
+      }),
+    );
+    this.#applySnapshot(result.snapshot);
+    return result;
   }
   async answer(questionId: string, answer: string): Promise<unknown> {
     return await this.request("question.answer", { questionId, answer });
@@ -133,6 +140,8 @@ export class BrokerClient {
     const socket = this.#factory(this.socketPath);
     this.#socket = socket;
     this.#decoder = new NdjsonDecoder((value) => value);
+    this.#helloId = randomUUID();
+    this.#authenticated = false;
     socket.on("data", (chunk) => this.#data(socket, chunk));
     socket.once("error", () => undefined);
     socket.once("close", () => this.#close(socket));
@@ -140,7 +149,7 @@ export class BrokerClient {
       encodeFrame({
         v: 1,
         type: "hello",
-        id: randomUUID(),
+        id: this.#helloId,
         client: {
           kind: "deck",
           name: this.#name,
@@ -160,18 +169,25 @@ export class BrokerClient {
   #frame(value: unknown): void {
     const frame = record(value);
     if (frame.type === "hello_result") {
+      if (frame.id !== this.#helloId) return;
+      this.#helloId = undefined;
       if (frame.ok !== true) {
         this.#closeSocket(new Error("Broker authentication failed."));
         return;
       }
-      this.#attempt = 0;
+      this.#authenticated = true;
       this.#setStatus("connected");
-      void this.subscribe().catch(() =>
-        this.#closeSocket(new Error("Broker subscription failed.")),
-      );
+      void this.subscribe()
+        .then(() => {
+          this.#attempt = 0;
+        })
+        .catch(() =>
+          this.#closeSocket(new Error("Broker subscription failed.")),
+        );
       return;
     }
     if (frame.type === "event") {
+      if (!this.#authenticated) return;
       const event = frame as unknown as DeckEvent;
       this.store.apply(event);
       return;
@@ -196,6 +212,8 @@ export class BrokerClient {
   #close(socket: Socket): void {
     if (socket !== this.#socket) return;
     this.#socket = undefined;
+    this.#helloId = undefined;
+    this.#authenticated = false;
     this.#reject(
       new Error("Broker disconnected; in-flight request was not queued."),
     );
@@ -212,6 +230,15 @@ export class BrokerClient {
       this.#connect();
     }, delay);
     this.#timer.unref?.();
+  }
+  #applySnapshot(value: unknown): void {
+    if (!value) return;
+    const snapshot = snapshotFromBroker(value);
+    if (
+      Number.isSafeInteger(snapshot.seq) &&
+      snapshot.seq >= this.store.state.seq
+    )
+      this.store.replace(snapshot);
   }
   #reject(error: Error): void {
     for (const pending of this.#pending.values()) {
