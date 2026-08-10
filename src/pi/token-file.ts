@@ -7,6 +7,8 @@ export function siblingSecretPath(socketPath: string): string {
   return `${socketPath.slice(0, -5)}.secret`;
 }
 
+export async function readBrokerSecretFile(path: string): Promise<string> { const value = await readPrivateRegular(path); if (Buffer.byteLength(value, "utf8") > 2048 || !/^[A-Za-z0-9_-]{43}\n$/u.test(value)) throw new Error("PI_BROKER_SECRET_INVALID"); return value.slice(0, -1); }
+
 export async function readManagedTokenFile(path: string): Promise<string> {
   if (!path || path.length > MAX_TOKEN_FILE_BYTES || !path.startsWith("/") || /[\u0000-\u001f\u007f]/u.test(path)) throw new Error("PI_TOKEN_FILE_INVALID");
   let value: string;

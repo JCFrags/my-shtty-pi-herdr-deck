@@ -7,16 +7,10 @@ export interface ParentToolBroker {
 }
 export interface ParentToolLimits { readonly maxResponseBytes: number; readonly maxItems: number; readonly maxTextBytes: number; }
 export const DEFAULT_PARENT_TOOL_LIMITS: ParentToolLimits = Object.freeze({ maxResponseBytes: 32_768, maxItems: 64, maxTextBytes: 8_192 });
-function descendant(principal: ToolPrincipal, target: unknown, parents: ReadonlyMap<string, string | undefined>): boolean {
-  if (principal.permissions.includes("manage:all")) return true;
-  if (typeof principal.agentId !== "string" || typeof target !== "string") return false;
-  let current: string | undefined = target;
-  for (let depth = 0; depth <= 4 && current; depth++) { if (current === principal.agentId) return true; current = parents.get(current); }
-  return false;
-}
 const SECRET_KEY = /(?:token|secret|password|cookie|credential|private.?key|socket.?path|api.?key)/iu;
+function truncateUtf8(value: string, maxBytes: number): string { if (Buffer.byteLength(value, "utf8") <= maxBytes) return value; const marker = "…"; let end = Math.min(value.length, Math.max(0, maxBytes - Buffer.byteLength(marker, "utf8"))); while (end > 0 && Buffer.byteLength(value.slice(0, end), "utf8") > maxBytes - Buffer.byteLength(marker, "utf8")) end--; return `${value.slice(0, end)}${marker}`; }
 function safeProjection(value: unknown, limits: ParentToolLimits): unknown {
-  if (typeof value === "string") return value.length <= limits.maxTextBytes ? value : `${value.slice(0, limits.maxTextBytes)}…`;
+  if (typeof value === "string") return truncateUtf8(value, limits.maxTextBytes);
   if (Array.isArray(value)) return value.slice(0, limits.maxItems).map((item) => safeProjection(item, limits));
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).slice(0, limits.maxItems).map(([key, item]) => [key, SECRET_KEY.test(key) ? "[redacted]" : safeProjection(item, limits)]));
   return value;
@@ -26,13 +20,10 @@ import { parentToolMethod } from "./parent-tool-schema.js";
 
 function methodForTool(tool: ParentToolName): string { return parentToolMethod(tool); }
 export class ParentToolService {
-  readonly #broker: ParentToolBroker; readonly #parents: ReadonlyMap<string, string | undefined>; readonly #limits: ParentToolLimits;
-  constructor(broker: ParentToolBroker, parents: ReadonlyMap<string, string | undefined> = new Map(), limits: Partial<ParentToolLimits> = {}) { this.#broker = broker; this.#parents = parents; this.#limits = { ...DEFAULT_PARENT_TOOL_LIMITS, ...limits }; }
+  readonly #broker: ParentToolBroker; readonly #limits: ParentToolLimits;
+  constructor(broker: ParentToolBroker, limitsOrLegacy: Partial<ParentToolLimits> | ReadonlyMap<string, string | undefined> = {}, legacyLimits: Partial<ParentToolLimits> = {}) { this.#broker = broker; const limits = limitsOrLegacy instanceof Map ? legacyLimits : limitsOrLegacy; this.#limits = { ...DEFAULT_PARENT_TOOL_LIMITS, ...limits }; }
   async execute(request: ParentToolRequest, principal: ToolPrincipal, signal?: AbortSignal): Promise<ParentToolResponse> {
     if (signal?.aborted) return { ok: false, error: { code: "CANCELLED", message: "The request was cancelled." } };
-    const target = request.input.agentId ?? request.input.taskId ?? request.input.questionId ?? request.input.taskIds;
-    const targets = Array.isArray(target) ? target : [target];
-    if (!["agent_list", "task_list", "delegate"].includes(request.tool) && (targets.length === 0 || targets.some((item) => !descendant(principal, item, this.#parents)))) return { ok: false, error: { code: "PERMISSION_DENIED", message: "The target is outside the parent descendant scope." } };
     if (request.tool === "delegate" && !principal.permissions.includes("delegate") && !principal.permissions.includes("manage:all")) return { ok: false, error: { code: "PERMISSION_DENIED", message: "Delegation is not permitted for this profile." } };
     try {
       const result = safeProjection(await this.#broker.invoke(methodForTool(request.tool), request.input, principal, request.idempotencyKey), this.#limits);

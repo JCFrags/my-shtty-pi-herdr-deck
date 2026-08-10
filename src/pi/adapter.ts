@@ -1,6 +1,7 @@
 import type { PiApiLike, PiAssignment, PiContextLike, PiControl, PiLifecycleEvent, PiSafeState, PiAdapterCapabilities, PiModelLike } from "./types.js";
 import { modelChoiceFromPi } from "./types.js";
 import { LifecycleCorrelator } from "./correlation.js";
+import { createId } from "../shared/ids.js";
 
 function sessionId(context: PiContextLike): string {
   const id = context.sessionManager.getSessionId?.();
@@ -18,12 +19,15 @@ export class PiAdapter implements PiControl {
   #generation: number;
   #connectionGeneration: number | undefined;
   #capabilities: PiAdapterCapabilities;
-  constructor(api: PiApiLike, context: PiContextLike, agentId: string, generation: number) { this.#api = api; this.#context = context; this.#agentId = agentId; this.#generation = generation; this.#connectionGeneration = undefined; this.#capabilities = capabilities(api, context); }
+  #activeCycleId: string | undefined;
+  constructor(api: PiApiLike, context: PiContextLike, agentId: string, generation: number) { this.#api = api; this.#context = context; this.#agentId = agentId; this.#generation = generation; this.#connectionGeneration = undefined; this.#activeCycleId = undefined; this.#capabilities = capabilities(api, context); }
   updateContext(context: PiContextLike): void { this.#context = context; this.#capabilities = capabilities(this.#api, context); }
   bindIdentity(agentId: string, generation: number, connectionGeneration?: number): void { if (!/^[\x21-\x7e]{1,256}$/u.test(agentId) || !Number.isSafeInteger(generation) || generation < 1 || (connectionGeneration !== undefined && (!Number.isSafeInteger(connectionGeneration) || connectionGeneration < 1))) throw new Error("PI_REGISTRATION_IDENTITY_INVALID"); this.#agentId = agentId; this.#generation = generation; this.#connectionGeneration = connectionGeneration; }
   safeState(): PiSafeState { const model = this.#context.model; const usage = this.#context.getContextUsage?.(); return { agentId: this.#agentId, generation: this.#generation, ...(this.#connectionGeneration !== undefined ? { connectionGeneration: this.#connectionGeneration } : {}), sessionId: sessionId(this.#context), idle: this.#context.isIdle(), pendingMessages: this.#context.hasPendingMessages() ? 1 : 0, activity: this.#context.isIdle() ? "idle" : "working", ...(model ? { model: modelChoiceFromPi(model) } : {}), ...(this.#context.thinkingLevel ? { thinkingLevel: this.#context.thinkingLevel } : {}), ...(usage ? { contextPercent: usage.percent } : {}), activeTools: this.#api.getActiveTools?.() ?? [], capabilities: this.#capabilities }; }
   async deliver(assignment: PiAssignment): Promise<"accepted" | "already_accepted"> { const result = this.correlator.deliver(assignment, this.safeState()); if (result === "already_accepted") return result; this.#api.appendEntry?.("pi-herdr-orchestrator-assignment", { assignmentId: assignment.id, taskId: assignment.taskId, runId: assignment.runId, generation: assignment.generation, assignmentGeneration: assignment.assignmentGeneration, status: "pending" }); this.correlator.markCustomEntryWritten(); await this.prompt(renderAssignment(assignment)); this.correlator.accept(); return result; }
-  onLifecycle(event: PiLifecycleEvent): "bound" | "manual" | "ignored" | "settled" { return this.correlator.lifecycle(event); }
+  onLifecycle(event: PiLifecycleEvent): "bound" | "manual" | "ignored" | "settled" { const cycle = event.type === "agent_start" ? (this.#activeCycleId = `cyc_${createId("evt").slice(4)}`) : (event.agentCycleId ?? this.#activeCycleId); return this.correlator.lifecycle(cycle ? { ...event, agentCycleId: cycle } : event); }
+  lifecyclePayload(result: "bound" | "settled", event: PiLifecycleEvent, adapterSeq: number): Record<string, unknown> | undefined { const current = this.correlator.state; if (current.kind !== "bound" && current.kind !== "settled" || this.#connectionGeneration === undefined || !current.agentCycleId) return undefined; const turnIndex = result === "bound" ? event.turnIndex : current.firstTurnIndex; if (turnIndex === undefined) return undefined; const assignment = current.assignment; const state = this.safeState(); return { agentId: state.agentId, connectionGeneration: this.#connectionGeneration, adapterSeq, event: result === "bound" ? "turn_start" : "agent_settled", piSessionId: current.piSessionId, turnIndex, agentCycleId: current.agentCycleId, assignment: { assignmentId: assignment.id, runId: assignment.runId, generation: assignment.assignmentGeneration }, safeData: { toolName: state.currentTool ?? null, contextPercent: state.contextPercent ?? null } }; }
+  clearSettledCycle(): void { if (this.correlator.state.kind === "settled") { this.correlator.cancel(); this.#activeCycleId = undefined; } }
   assignmentForTools(): PiAssignment | undefined { return this.correlator.pending(); }
   async handleControl(method: string, params: Record<string, unknown>): Promise<{ ok: true }> {
     const state = this.safeState();
