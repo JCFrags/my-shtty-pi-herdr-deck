@@ -122,7 +122,7 @@ export interface QuestionRecord {
   askedAt?: string;
   answeredAt?: string;
   answeredBy?: string;
-  answer?: { optionId?: string; text?: string };
+  answer?: { optionId: string | null; text: string | null };
 }
 export interface Workflow {
   id: string;

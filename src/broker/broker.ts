@@ -310,6 +310,8 @@ export function sessionKeyMatches(
 }
 export interface BrokerOptions {
   herdr?: HerdrService;
+  now?: () => number;
+  setTimeout?: (callback: () => void, delayMs: number) => NodeJS.Timeout;
   herdrFactory?: (
     store: EventStore,
     paths: ResolvedPaths,
@@ -327,6 +329,8 @@ export class Broker {
   #secret: string;
   #clients = new Set<Client>();
   #questionTimers = new Map<string, NodeJS.Timeout>();
+  #now: () => number;
+  #setTimeout: (callback: () => void, delayMs: number) => NodeJS.Timeout;
   #herdr?: HerdrService;
   readonly #herdrFactory:
     | ((store: EventStore, paths: ResolvedPaths) => Promise<HerdrService>)
@@ -335,6 +339,10 @@ export class Broker {
     this.paths = paths;
     this.#lock = new BrokerLock(paths.lock, paths.socket);
     this.#secret = "";
+    this.#now = options.now ?? Date.now;
+    this.#setTimeout =
+      options.setTimeout ??
+      ((callback, delayMs) => setTimeout(callback, delayMs));
     this.store = new EventStore(paths.events);
     this.store.onAppend((event) => {
       for (const subscriber of this.#clients) {
@@ -406,7 +414,7 @@ export class Broker {
             ? payload.timeoutMs
             : 300_000;
         const askedAt = question.askedAt ? Date.parse(question.askedAt) : NaN;
-        if (Number.isFinite(askedAt) && askedAt + timeoutMs <= Date.now())
+        if (Number.isFinite(askedAt) && askedAt + timeoutMs <= this.#now())
           await this.#terminalizeQuestionTimeout(question.id);
         else this.#scheduleQuestionTimeout(question);
       }
@@ -2162,14 +2170,17 @@ export class Broker {
               "RUN_MISMATCH",
               "Question correlation does not match the existing tool call.",
             );
-          this.#scheduleQuestionTimeout(existing);
+          if (existing.state === "open")
+            this.#scheduleQuestionTimeout(existing);
           result = {
             questionId: existing.id,
             runId: existing.runId,
             assignmentGeneration: existing.assignmentGeneration,
             toolCallId: existing.toolCallId,
             state: existing.state,
-            ...(existing.answer ? { answer: existing.answer } : {}),
+            ...(existing.state === "answered" && existing.answer
+              ? { answer: existing.answer }
+              : {}),
           };
         } else if (
           Object.values(this.store.state.questions ?? {}).some(
@@ -2180,41 +2191,43 @@ export class Broker {
             "LIMIT_EXCEEDED",
             "A run may have only one open question.",
           );
-        validateQuestion(p.question);
-        const q = p.question as QuestionBody;
-        const id = createId("qst");
-        const askedAt = new Date().toISOString();
-        committedEvent = await this.store.append({
-          type: "question.opened",
-          actor: { principalId: principal.id, kind: principal.kind },
-          entityRefs: {
+        else {
+          validateQuestion(p.question);
+          const q = p.question as QuestionBody;
+          const id = createId("qst");
+          const askedAt = new Date(this.#now()).toISOString();
+          committedEvent = await this.store.append({
+            type: "question.opened",
+            actor: { principalId: principal.id, kind: principal.kind },
+            entityRefs: {
+              questionId: id,
+              taskId: run.taskId,
+              runId: run.id,
+              agentId: run.agentId!,
+            },
+            payload: {
+              questionId: id,
+              assignmentGeneration: p.assignmentGeneration,
+              toolCallId: p.toolCallId,
+              payload: q,
+              askedAt,
+            },
+          });
+          await this.store.append({
+            type: "run.state_changed",
+            actor: { principalId: principal.id, kind: principal.kind },
+            entityRefs: { runId: run.id, taskId: run.taskId },
+            payload: { runId: run.id, state: "blocked" },
+          });
+          this.#scheduleQuestionTimeout(this.store.state.questions![id]!);
+          result = {
             questionId: id,
-            taskId: run.taskId,
             runId: run.id,
-            agentId: run.agentId!,
-          },
-          payload: {
-            questionId: id,
             assignmentGeneration: p.assignmentGeneration,
             toolCallId: p.toolCallId,
-            payload: q,
-            askedAt,
-          },
-        });
-        await this.store.append({
-          type: "run.state_changed",
-          actor: { principalId: principal.id, kind: principal.kind },
-          entityRefs: { runId: run.id, taskId: run.taskId },
-          payload: { runId: run.id, state: "blocked" },
-        });
-        this.#scheduleQuestionTimeout(this.store.state.questions![id]!);
-        result = {
-          questionId: id,
-          runId: run.id,
-          assignmentGeneration: p.assignmentGeneration,
-          toolCallId: p.toolCallId,
-          state: "open",
-        };
+            state: "open",
+          };
+        }
       } else if (request.method === "question.answer") {
         requirePermission(principal, "read:state");
         const p = request.params;
@@ -2240,43 +2253,33 @@ export class Broker {
             "Question is already terminal.",
           );
         const body = question.payload as QuestionBody | undefined;
-        const answer = p.answer as { optionId?: unknown; text?: unknown };
-        if (!exactKeys(answer as Record<string, unknown>, ["optionId", "text"]))
+        const answer = p.answer as { optionId: unknown; text: unknown };
+        if (
+          Object.keys(answer).length !== 2 ||
+          !exactKeys(answer as Record<string, unknown>, ["optionId", "text"])
+        )
           throw new OrchestratorError(
             "INVALID_REQUEST",
             "Answer fields are invalid.",
           );
         if (
-          (answer.optionId !== undefined &&
-            typeof answer.optionId !== "string") ||
-          (answer.text !== undefined &&
-            answer.text !== null &&
-            typeof answer.text !== "string") ||
-          (typeof answer.text === "string" &&
-            (answer.text.length === 0 ||
-              answer.text.length > 16_384 ||
-              /[\\u0000-\\u001f\\u007f]/u.test(answer.text)))
+          (answer.optionId !== null && typeof answer.optionId !== "string") ||
+          (answer.optionId === null &&
+            (!body?.allowFreeform || typeof answer.text !== "string")) ||
+          (typeof answer.optionId === "string" &&
+            (!body?.options.some((o) => o.id === answer.optionId) ||
+              (answer.text !== null && typeof answer.text !== "string"))) ||
+          (typeof answer.optionId === "string" &&
+            answer.optionId.length === 0) ||
+          (answer.text !== null &&
+            (typeof answer.text !== "string" ||
+              answer.text.length === 0 ||
+              Buffer.byteLength(answer.text, "utf8") > 16_384 ||
+              /[\u0000-\u001f\u007f]/u.test(answer.text)))
         )
           throw new OrchestratorError(
             "INVALID_REQUEST",
-            "Answer value types are invalid.",
-          );
-        if (
-          answer.optionId !== undefined &&
-          (!body?.options.some((o) => o.id === answer.optionId) ||
-            (answer.text !== undefined && answer.text !== null))
-        )
-          throw new OrchestratorError(
-            "INVALID_REQUEST",
-            "Answer option is not present or has text.",
-          );
-        if (
-          answer.optionId === undefined &&
-          (!body?.allowFreeform || typeof answer.text !== "string")
-        )
-          throw new OrchestratorError(
-            "INVALID_REQUEST",
-            "Free-form answer is not allowed or is missing text.",
+            "Answer does not match the canonical shape.",
           );
         const run = this.store.state.runs[question.runId];
         if (
@@ -2312,10 +2315,9 @@ export class Broker {
             answeredBy: principal.id,
             answeredAt: new Date().toISOString(),
             answer: {
-              ...(typeof answer.optionId === "string"
-                ? { optionId: answer.optionId }
-                : {}),
-              ...(typeof answer.text === "string" ? { text: answer.text } : {}),
+              optionId:
+                typeof answer.optionId === "string" ? answer.optionId : null,
+              text: typeof answer.text === "string" ? answer.text : null,
             },
           },
         });
@@ -2331,8 +2333,11 @@ export class Broker {
             this.store.state.questions?.[question.id] ?? question,
             "answered",
             result && typeof result === "object"
-              ? (result as { answer?: { optionId?: string; text?: string } })
-                  .answer
+              ? (
+                  result as {
+                    answer?: { optionId: string | null; text: string | null };
+                  }
+                ).answer
               : undefined,
           ),
         );
@@ -3524,15 +3529,15 @@ export class Broker {
     const askedAt = question.askedAt ? Date.parse(question.askedAt) : NaN;
     const deadline = Number.isFinite(askedAt)
       ? askedAt + timeoutMs
-      : Date.now() + timeoutMs;
-    const timer = setTimeout(
+      : this.#now() + timeoutMs;
+    const timer = this.#setTimeout(
       () => {
         this.#questionTimers.delete(question.id);
         void this.#terminalizeQuestionTimeout(question.id).catch(
           () => undefined,
         );
       },
-      Math.max(0, deadline - Date.now()),
+      Math.max(0, deadline - this.#now()),
     );
     timer.unref();
     this.#questionTimers.set(question.id, timer);
@@ -3540,7 +3545,7 @@ export class Broker {
   #deferQuestionDelivery(
     question: QuestionRecord,
     state: "answered" | "cancelled" | "timed_out",
-    answer?: { optionId?: string; text?: string },
+    answer?: { optionId: string | null; text: string | null },
   ): () => Promise<void> {
     return async () => {
       const timer = this.#questionTimers.get(question.id);

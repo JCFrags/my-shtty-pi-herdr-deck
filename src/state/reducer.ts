@@ -596,7 +596,12 @@ export function reduce(
           ...(Object.hasOwn(p, "answer") &&
           p.answer &&
           typeof p.answer === "object"
-            ? { answer: p.answer as { optionId?: string; text?: string } }
+            ? {
+                answer: p.answer as {
+                  optionId: string | null;
+                  text: string | null;
+                },
+              }
             : {}),
         },
       };

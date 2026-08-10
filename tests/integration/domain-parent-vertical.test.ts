@@ -604,7 +604,7 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
       (
         await send(p2.socket, "question.answer", {
           questionId: question.questionId,
-          answer: { optionId: "a" },
+          answer: { optionId: "a", text: null },
         })
       ).ok,
       false,
@@ -612,7 +612,7 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
     ok(
       await send(p1.socket, "question.answer", {
         questionId: question.questionId,
-        answer: { optionId: "a" },
+        answer: { optionId: "a", text: null },
       }),
     );
     await Promise.race([
