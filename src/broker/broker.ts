@@ -52,6 +52,19 @@ interface SubscriptionFilter {
   agentIds?: string[];
   taskIds?: string[];
 }
+interface ServerResponse {
+  v: 1;
+  type: "server_response";
+  id: string;
+  ok: boolean;
+  result?: unknown;
+  error?: { code: string; message: string };
+}
+interface PendingServerRequest {
+  resolve(value: unknown): void;
+  reject(error: Error): void;
+  timer: NodeJS.Timeout;
+}
 interface Client {
   socket: Socket;
   principal?: Principal;
@@ -62,6 +75,8 @@ interface Client {
   processing: Promise<void>;
   requestWindowStarted: number;
   requestCount: number;
+  serverRequests: Map<string, PendingServerRequest>;
+  adoptedRegistration: boolean;
 }
 function exactKeys(
   value: Record<string, unknown>,
@@ -380,23 +395,59 @@ export class Broker {
       processing: Promise.resolve(),
       requestWindowStarted: Date.now(),
       requestCount: 0,
+      serverRequests: new Map(),
+      adoptedRegistration: false,
     };
     this.#clients.add(client);
     const authenticationTimer = setTimeout(() => socket.destroy(), 2_000);
     authenticationTimer.unref();
-    const decoder = new NdjsonDecoder<HelloRequest | RequestFrame>((value) => {
-      if (
-        typeof value === "object" &&
-        value !== null &&
-        (value as Record<string, unknown>).type === "hello"
-      )
-        return validateHello(value);
+    const decoder = new NdjsonDecoder<
+      HelloRequest | RequestFrame | ServerResponse
+    >((value) => {
+      const type =
+        typeof value === "object" && value !== null
+          ? (value as Record<string, unknown>).type
+          : undefined;
+      if (type === "hello") return validateHello(value);
+      if (type === "server_response") {
+        const frame = value as Record<string, unknown>;
+        if (
+          frame.v !== 1 ||
+          typeof frame.id !== "string" ||
+          typeof frame.ok !== "boolean"
+        )
+          throw new Error("Invalid server response.");
+        return frame as unknown as ServerResponse;
+      }
       return validateRequest(value);
     });
     socket.on("data", (data) => {
+      const decoded = decoder.push(data);
+      const queued = [] as typeof decoded;
+      for (const item of decoded) {
+        if (
+          item.ok &&
+          client.principal &&
+          item.value.type === "server_response"
+        ) {
+          const pending = client.serverRequests.get(item.value.id);
+          if (pending) {
+            client.serverRequests.delete(item.value.id);
+            clearTimeout(pending.timer);
+            if (item.value.ok) pending.resolve(item.value.result);
+            else
+              pending.reject(
+                new OrchestratorError(
+                  "PI_COMMAND_REJECTED",
+                  item.value.error?.message ?? "Child rejected the request.",
+                ),
+              );
+          }
+        } else queued.push(item);
+      }
       client.processing = client.processing
         .then(async () => {
-          for (const item of decoder.push(data)) {
+          for (const item of queued) {
             if (!item.ok) {
               this.#writeFrame(client, {
                 v: 1,
@@ -438,18 +489,18 @@ export class Broker {
                     );
                   const resource =
                     this.store.state.herdrResources?.[item.value.auth.agentId];
-                  const credential =
-                    resource?.tokenDigest && resource.sessionId
-                      ? {
-                          agentId: item.value.auth.agentId,
-                          generation: resource.generation ?? 0,
-                          tokenHash: resource.tokenDigest,
-                          piSessionId: resource.sessionId,
-                          ...(resource.parentAgentId
-                            ? { parentAgentId: resource.parentAgentId }
-                            : {}),
-                        }
-                      : undefined;
+                  const credential = resource?.tokenDigest
+                    ? {
+                        agentId: item.value.auth.agentId,
+                        generation: resource.generation ?? 0,
+                        tokenHash: resource.tokenDigest,
+                        piSessionId:
+                          resource.sessionId ?? item.value.auth.piSessionId,
+                        ...(resource.parentAgentId
+                          ? { parentAgentId: resource.parentAgentId }
+                          : {}),
+                      }
+                    : undefined;
                   client.principal = authenticate(
                     this.#secret,
                     "",
@@ -519,6 +570,16 @@ export class Broker {
     });
     socket.once("close", () => {
       clearTimeout(authenticationTimer);
+      for (const pending of client.serverRequests.values()) {
+        clearTimeout(pending.timer);
+        pending.reject(
+          new OrchestratorError(
+            "AGENT_DISCONNECTED",
+            "Managed adapter disconnected.",
+          ),
+        );
+      }
+      client.serverRequests.clear();
       this.#clients.delete(client);
     });
   }
@@ -564,6 +625,7 @@ export class Broker {
       let result: unknown;
       let replayEvents: import("../state/types.js").StoredEvent[] = [];
       let committedEvent: import("../state/types.js").StoredEvent | undefined;
+      const deferred: Array<() => Promise<void>> = [];
       if (
         request.method === "system.ping" ||
         request.method === "system.status"
@@ -892,6 +954,16 @@ export class Broker {
           );
         const p = request.params;
         if (
+          request.method === "agent.register_adopted" &&
+          (principal.kind !== "pi_parent" ||
+            client.adoptedRegistration ||
+            principal.agentId)
+        )
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "This parent connection cannot register another adopted agent.",
+          );
+        if (
           !safeText(p.adapterVersion, 64) ||
           !p.herdr ||
           typeof p.herdr !== "object" ||
@@ -904,10 +976,11 @@ export class Broker {
           );
         const herdr = p.herdr as Record<string, unknown>,
           pi = p.pi as Record<string, unknown>;
-        const agentId =
+        const agentId: string = (
           request.method === "agent.register_managed"
             ? (principal.agentId ?? p.agentId)
-            : createId("agt");
+            : createId("agt")
+        ) as string;
         if (
           !safeText(agentId) ||
           !safeText(herdr.paneId) ||
@@ -918,7 +991,11 @@ export class Broker {
             "Pi identity is invalid.",
           );
         const existing = this.store.state.agents[agentId];
-        if (existing && existing.piSessionId !== pi.sessionId)
+        if (
+          existing &&
+          existing.piSessionId !== undefined &&
+          existing.piSessionId !== pi.sessionId
+        )
           throw new OrchestratorError(
             "AGENT_REPLACED",
             "Pi session does not match the current agent generation.",
@@ -945,11 +1022,152 @@ export class Broker {
           });
           committedEvent = event;
         }
+        if (request.method === "agent.register_adopted") {
+          principal.agentId = agentId;
+          principal.generation =
+            this.store.state.agents[agentId]?.generation ?? 1;
+          principal.piSessionId = pi.sessionId as string;
+          client.adoptedRegistration = true;
+        }
+        if (request.method === "agent.register_managed") {
+          if (
+            this.#herdr &&
+            this.store.state.herdrResources?.[agentId]?.state === "pending"
+          )
+            await this.#herdr.register(
+              agentId,
+              {
+                paneId: herdr.paneId,
+                ...(safeText(herdr.terminalId)
+                  ? { terminalId: herdr.terminalId }
+                  : {}),
+                sessionId: pi.sessionId,
+                generation: Number(p.generation ?? 1),
+              },
+              undefined,
+            );
+          const current = this.store.state.agents[agentId];
+          if (current)
+            await this.store.append({
+              type: "agent.state_changed",
+              actor: { principalId: principal.id, kind: principal.kind },
+              entityRefs: { agentId },
+              payload: {
+                agentId,
+                state: "idle",
+                paneId: herdr.paneId,
+                piSessionId: pi.sessionId,
+                connectionGeneration: (current.connectionGeneration ?? 0) + 1,
+              },
+            });
+          const runId = this.store.state.agents[agentId]?.currentRunId;
+          const run = runId ? this.store.state.runs[runId] : undefined;
+          if (run) {
+            const connectionGeneration =
+              this.store.state.agents[agentId]?.connectionGeneration ?? 1;
+            const agentGeneration =
+              this.store.state.agents[agentId]?.generation ?? 1;
+            const assignmentId = run.assignmentId ?? createId("asg");
+            await this.store.append({
+              type: "assignment.delivered",
+              actor: { principalId: principal.id, kind: principal.kind },
+              entityRefs: { agentId, taskId: run.taskId, runId: run.id },
+              payload: {
+                assignmentId,
+                runId: run.id,
+                taskId: run.taskId,
+                agentId,
+                generation: agentGeneration,
+                assignmentGeneration: run.assignmentGeneration,
+                piSessionId: pi.sessionId,
+                connectionGeneration,
+                deliveryState: "pending",
+              },
+            });
+            deferred.push(async () => {
+              try {
+                const accepted = await this.#sendAdapterRequest(
+                  agentId,
+                  "assignment.deliver",
+                  {
+                    assignment: {
+                      id: assignmentId,
+                      taskId: run.taskId,
+                      runId: run.id,
+                      agentId,
+                      generation: agentGeneration,
+                      assignmentGeneration: run.assignmentGeneration,
+                      objective:
+                        this.store.state.tasks[run.taskId]?.objective ?? "",
+                      constraints:
+                        this.store.state.tasks[run.taskId]?.constraints ?? [],
+                      deadline:
+                        this.store.state.tasks[run.taskId]?.timeoutAt ??
+                        new Date(Date.now() + 900_000).toISOString(),
+                      resultContract: { schemaVersion: 1, required: true },
+                    },
+                  },
+                  {
+                    generation: agentGeneration,
+                    connectionGeneration,
+                    assignmentGeneration: run.assignmentGeneration,
+                    piSessionId: pi.sessionId as string,
+                    runId: run.id,
+                  },
+                );
+                if (
+                  accepted &&
+                  typeof accepted === "object" &&
+                  ["accepted", "already_accepted"].includes(
+                    String((accepted as Record<string, unknown>).status),
+                  )
+                )
+                  await this.store.append({
+                    type: "assignment.accepted",
+                    actor: { principalId: principal.id, kind: principal.kind },
+                    entityRefs: { agentId, taskId: run.taskId, runId: run.id },
+                    payload: {
+                      assignmentId,
+                      runId: run.id,
+                      taskId: run.taskId,
+                      agentId,
+                      generation: agentGeneration,
+                      assignmentGeneration: run.assignmentGeneration,
+                      piSessionId: pi.sessionId,
+                      connectionGeneration,
+                      deliveryState: "accepted",
+                    },
+                  });
+              } catch (error) {
+                await this.store
+                  .append({
+                    type: "assignment.delivery_failed",
+                    actor: { principalId: principal.id, kind: principal.kind },
+                    entityRefs: { agentId, taskId: run.taskId, runId: run.id },
+                    payload: {
+                      assignmentId,
+                      runId: run.id,
+                      taskId: run.taskId,
+                      agentId,
+                      generation: agentGeneration,
+                      assignmentGeneration: run.assignmentGeneration,
+                      reason:
+                        error instanceof Error
+                          ? error.message
+                          : "delivery_failed",
+                      retryable: true,
+                    },
+                  })
+                  .catch(() => undefined);
+              }
+            });
+          }
+        }
         result = {
           agentId,
           generation: this.store.state.agents[agentId]?.generation ?? 1,
           connectionGeneration:
-            (this.store.state.agents[agentId]?.connectionGeneration ?? 0) + 1,
+            this.store.state.agents[agentId]?.connectionGeneration ?? 1,
           heartbeatMs: 5_000,
           permissions: principal.permissions,
         };
@@ -981,12 +1199,203 @@ export class Broker {
           },
         });
         result = { accepted: true };
+      } else if (request.method === "agent.lifecycle_event") {
+        requirePermission(principal, "manage:self");
+        const p = request.params;
+        if (
+          !exactKeys(p, [
+            "agentId",
+            "connectionGeneration",
+            "adapterSeq",
+            "event",
+            "piSessionId",
+            "turnIndex",
+            "agentCycleId",
+            "assignment",
+            "safeData",
+          ]) ||
+          principal.kind !== "pi_child" ||
+          principal.agentId !== p.agentId ||
+          !Number.isSafeInteger(p.connectionGeneration) ||
+          !Number.isSafeInteger(p.adapterSeq) ||
+          !safeText(p.event, 64) ||
+          !safeText(p.piSessionId, 256)
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Lifecycle event is invalid.",
+          );
+        const lifecycleAgentId = p.agentId as string;
+        const agent = this.store.state.agents[lifecycleAgentId];
+        if (
+          !agent ||
+          agent.generation !== principal.generation ||
+          agent.connectionGeneration !== p.connectionGeneration ||
+          agent.piSessionId !== p.piSessionId
+        )
+          throw new OrchestratorError(
+            "AGENT_REPLACED",
+            "Lifecycle identity is stale.",
+          );
+        const assignment =
+          p.assignment &&
+          typeof p.assignment === "object" &&
+          !Array.isArray(p.assignment)
+            ? (p.assignment as Record<string, unknown>)
+            : undefined;
+        const progressEvent = [
+          "before_agent_start",
+          "agent_start",
+          "turn_start",
+          "agent_settled",
+        ].includes(p.event as string);
+        if (
+          !assignment ||
+          Object.keys(assignment).some(
+            (key) =>
+              ![
+                "assignmentId",
+                "taskId",
+                "runId",
+                "generation",
+                "assignmentGeneration",
+              ].includes(key),
+          )
+        ) {
+          committedEvent = await this.store.append({
+            type: "agent.state_changed",
+            actor: { principalId: principal.id, kind: principal.kind },
+            entityRefs: { agentId: agent.id },
+            payload: {
+              agentId: agent.id,
+              state: p.event === "blocked" ? "blocked" : "idle",
+            },
+          });
+          result = { accepted: false, manual: true, state: "idle" };
+        } else {
+          const assignmentId = assignment.assignmentId;
+          const runId = assignment.runId;
+          if (
+            !safeText(assignmentId) ||
+            !safeText(assignment.taskId) ||
+            !safeText(runId) ||
+            !Number.isSafeInteger(assignment.generation) ||
+            !Number.isSafeInteger(assignment.assignmentGeneration)
+          )
+            throw new OrchestratorError(
+              "RUN_MISMATCH",
+              "Lifecycle assignment correlation is invalid.",
+            );
+          const run = this.store.state.runs[runId];
+          if (
+            !run ||
+            run.agentId !== agent.id ||
+            run.taskId !== assignment.taskId ||
+            run.assignmentId !== assignmentId ||
+            assignment.generation !== agent.generation ||
+            assignment.assignmentGeneration !== run.assignmentGeneration
+          )
+            throw new OrchestratorError(
+              "RUN_MISMATCH",
+              "Lifecycle assignment identity is stale.",
+            );
+          const exactTurn =
+            Number.isSafeInteger(p.turnIndex) &&
+            Number(p.turnIndex) >= 0 &&
+            safeText(p.agentCycleId, 256);
+          if (progressEvent && !exactTurn) {
+            committedEvent = await this.store.append({
+              type: "agent.state_changed",
+              actor: { principalId: principal.id, kind: principal.kind },
+              entityRefs: { agentId: agent.id },
+              payload: { agentId: agent.id, state: "idle" },
+            });
+            result = {
+              accepted: false,
+              manual: true,
+              runId: run.id,
+              state: run.state,
+            };
+          } else if (p.event === "agent_settled") {
+            committedEvent = await this.store.append({
+              type: "run.pi_settled",
+              actor: { principalId: principal.id, kind: principal.kind },
+              entityRefs: {
+                agentId: agent.id,
+                runId: run.id,
+                taskId: run.taskId,
+              },
+              payload: {
+                agentId: agent.id,
+                runId: run.id,
+                piSessionId: p.piSessionId,
+                state: "settled",
+                turnIndex: p.turnIndex,
+                agentCycleId: p.agentCycleId,
+                terminalError: false,
+              },
+            });
+            result = {
+              accepted: true,
+              runId: run.id,
+              state: this.store.state.runs[run.id]?.state,
+            };
+          } else if (
+            ["before_agent_start", "agent_start", "turn_start"].includes(
+              p.event as string,
+            )
+          ) {
+            committedEvent = await this.store.append({
+              type: "run.pi_started",
+              actor: { principalId: principal.id, kind: principal.kind },
+              entityRefs: {
+                agentId: agent.id,
+                runId: run.id,
+                taskId: run.taskId,
+              },
+              payload: {
+                agentId: agent.id,
+                runId: run.id,
+                piSessionId: p.piSessionId,
+                state: "working",
+                turnIndex: p.turnIndex,
+                agentCycleId: p.agentCycleId,
+              },
+            });
+            result = {
+              accepted: true,
+              runId: run.id,
+              state: this.store.state.runs[run.id]?.state,
+            };
+          } else {
+            committedEvent = await this.store.append({
+              type: "agent.state_changed",
+              actor: { principalId: principal.id, kind: principal.kind },
+              entityRefs: { agentId: agent.id },
+              payload: {
+                agentId: agent.id,
+                state: p.event === "blocked" ? "blocked" : "idle",
+              },
+            });
+            result = {
+              accepted: false,
+              manual: true,
+              runId: run.id,
+              state: run.state,
+            };
+          }
+        }
       } else if (request.method === "agent.list") {
         requirePermission(principal, "read:state");
-        const items = Object.values(this.store.state.agents).map((agent) => ({
-          ...agent,
-          tokenDigest: undefined,
-        }));
+        const items = (
+          await Promise.all(
+            Object.values(this.store.state.agents).map(async (agent) =>
+              (await this.#canAccessAgent(principal, agent.id))
+                ? { ...agent, tokenDigest: undefined }
+                : undefined,
+            ),
+          )
+        ).filter((agent): agent is NonNullable<typeof agent> => Boolean(agent));
         result = {
           items,
           nextCursor: null,
@@ -1005,23 +1414,154 @@ export class Broker {
             "AGENT_NOT_FOUND",
             "Agent was not found.",
           );
+        if (!(await this.#canAccessAgent(principal, agent.id)))
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "Agent is outside the descendant scope.",
+          );
         result = { ...agent, tokenDigest: undefined };
       } else if (
         request.method === "agent.prompt" ||
         request.method === "agent.steer" ||
         request.method === "agent.follow_up" ||
         request.method === "agent.abort" ||
+        request.method === "agent.interrupt" ||
         request.method === "agent.compact" ||
         request.method === "agent.set_model" ||
         request.method === "agent.set_thinking" ||
-        request.method === "agent.set_tools"
+        request.method === "agent.set_tools" ||
+        request.method === "agent.set_tool_expansion" ||
+        request.method === "agent.wait" ||
+        request.method === "agent.stop" ||
+        request.method === "agent.close"
       ) {
-        requirePermission(principal, "manage:all");
-        throw new OrchestratorError(
-          "AGENT_DISCONNECTED",
-          "Pi control is available only through a connected adapter.",
-          { retryable: true },
-        );
+        requirePermission(principal, "manage:self");
+        const p = request.params;
+        if (
+          !safeText(p.agentId) ||
+          (p.generation !== undefined &&
+            (!Number.isSafeInteger(p.generation) ||
+              Number(p.generation) < 1)) ||
+          (p.runId !== undefined && !safeText(p.runId))
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Agent control identity is invalid.",
+          );
+        const agent = this.store.state.agents[p.agentId];
+        if (!agent)
+          throw new OrchestratorError(
+            "AGENT_NOT_FOUND",
+            "Agent was not found.",
+          );
+        const target = p.agentId as string;
+        if (
+          principal.kind === "pi_parent" &&
+          !(await this.#isDescendant(principal.agentId, target))
+        )
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "Agent is outside the descendant scope.",
+          );
+        if (
+          request.method === "agent.stop" ||
+          request.method === "agent.close"
+        ) {
+          if (!this.#herdr)
+            throw new OrchestratorError(
+              "AGENT_DISCONNECTED",
+              "Herdr is unavailable.",
+              { retryable: true },
+            );
+          const resource = this.store.state.herdrResources?.[target];
+          if (!resource?.paneId)
+            throw new OrchestratorError(
+              "AGENT_DISCONNECTED",
+              "Managed pane identity is unavailable.",
+            );
+          const guard = {
+            paneId: resource.paneId,
+            ...(resource.terminalId ? { terminalId: resource.terminalId } : {}),
+            ...(resource.sessionId ? { sessionId: resource.sessionId } : {}),
+            ...(resource.generation ? { generation: resource.generation } : {}),
+          } as never;
+          if (request.method === "agent.stop") await this.#herdr.stop(guard);
+          else await this.#herdr.close(guard);
+          result = {
+            agentId: target,
+            state: request.method === "agent.stop" ? "stopped" : "closed",
+          };
+        } else if (request.method === "agent.wait") {
+          if (
+            !p.taskId ||
+            !p.runId ||
+            !safeText(p.taskId) ||
+            !safeText(p.runId) ||
+            (p.timeoutMs !== undefined &&
+              (!Number.isSafeInteger(p.timeoutMs) ||
+                Number(p.timeoutMs) < 1 ||
+                Number(p.timeoutMs) > 30_000))
+          )
+            throw new OrchestratorError(
+              "INVALID_REQUEST",
+              "Managed wait identity is invalid.",
+            );
+          const run = this.store.state.runs[p.runId as string];
+          if (!run || run.agentId !== target || run.taskId !== p.taskId)
+            throw new OrchestratorError(
+              "RUN_MISMATCH",
+              "Wait run identity does not match.",
+            );
+          result = {
+            agentId: target,
+            taskId: run.taskId,
+            runId: run.id,
+            state: run.state,
+            settled: run.settled,
+          };
+        } else {
+          const method =
+            request.method === "agent.prompt"
+              ? "control.prompt"
+              : request.method === "agent.steer" ||
+                  request.method === "agent.follow_up"
+                ? "control.steer"
+                : request.method === "agent.abort" ||
+                    request.method === "agent.interrupt"
+                  ? "control.abort"
+                  : request.method === "agent.compact"
+                    ? "control.compact"
+                    : request.method === "agent.set_model"
+                      ? "control.set_model"
+                      : request.method === "agent.set_thinking"
+                        ? "control.set_thinking"
+                        : request.method === "agent.set_tool_expansion"
+                          ? "control.set_tool_expansion"
+                          : "control.set_tools";
+          const runId =
+            typeof p.runId === "string" ? p.runId : agent.currentRunId;
+          const run = runId ? this.store.state.runs[runId] : undefined;
+          if (p.generation !== undefined && p.generation !== agent.generation)
+            throw new OrchestratorError(
+              "AGENT_REPLACED",
+              "Agent generation is stale.",
+            );
+          const params = { ...p };
+          delete params.agentId;
+          delete params.generation;
+          delete params.runId;
+          result = await this.#sendAdapterRequest(
+            target,
+            method,
+            params,
+            {
+              generation: agent.generation,
+              ...(agent.piSessionId ? { piSessionId: agent.piSessionId } : {}),
+              ...(run ? { runId: run.id } : {}),
+            },
+            typeof p.timeoutMs === "number" ? p.timeoutMs : 10_000,
+          );
+        }
       } else if (request.method === "result.publish") {
         requirePermission(principal, "manage:self");
         const p = request.params;
@@ -1058,6 +1598,11 @@ export class Broker {
           throw new OrchestratorError(
             "RUN_MISMATCH",
             "Run identity or assignment generation does not match.",
+          );
+        if (!(await this.#canAccessAgent(principal, p.agentId)))
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "Run is outside the descendant scope.",
           );
         validateResult(p.result);
         const body = p.result as ResultBody;
@@ -1122,16 +1667,28 @@ export class Broker {
       } else if (request.method === "result.get") {
         requirePermission(principal, "read:results");
         if (
-          !exactKeys(request.params, ["resultId"]) ||
-          !safeText(request.params.resultId)
+          Object.keys(request.params).some(
+            (key) => !["resultId", "taskId"].includes(key),
+          ) ||
+          (!safeText(request.params.resultId) &&
+            !safeText(request.params.taskId))
         )
           throw new OrchestratorError(
             "INVALID_REQUEST",
             "Result ID is invalid.",
           );
-        const item = this.store.state.results?.[request.params.resultId];
+        const item = safeText(request.params.resultId)
+          ? this.store.state.results?.[request.params.resultId]
+          : Object.values(this.store.state.results ?? {}).find(
+              (candidate) => candidate.taskId === request.params.taskId,
+            );
         if (!item)
           throw new OrchestratorError("NOT_FOUND", "Result was not found.");
+        if (!(await this.#canAccessTask(principal, item.taskId)))
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "Result is outside the descendant scope.",
+          );
         const task = this.store.state.tasks[item.taskId];
         if (
           principal.kind === "pi_child" &&
@@ -1179,6 +1736,11 @@ export class Broker {
           throw new OrchestratorError(
             "RUN_MISMATCH",
             "Run identity or assignment generation does not match.",
+          );
+        if (!(await this.#canAccessAgent(principal, p.agentId)))
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "Run is outside the descendant scope.",
           );
         if (
           Object.values(this.store.state.questions ?? {}).some(
@@ -1369,6 +1931,11 @@ export class Broker {
         const task = this.store.state.tasks[request.params.taskId];
         if (!task)
           throw new OrchestratorError("TASK_NOT_FOUND", "Task was not found.");
+        if (!(await this.#canAccessTask(principal, task.id)))
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "Task is outside the descendant scope.",
+          );
         committedEvent = await this.store.append({
           type: "task.cancel_requested",
           actor: { principalId: principal.id, kind: principal.kind },
@@ -1406,18 +1973,355 @@ export class Broker {
             "LIMIT_EXCEEDED",
             "Collection output limit is invalid.",
           );
-        const items = (request.params.taskIds as unknown[]).map((id) =>
-          typeof id === "string"
-            ? (Object.values(this.store.state.results ?? {}).find(
-                (r) => r.taskId === id,
-              ) ?? { taskId: id, result: null })
-            : { taskId: "invalid", result: null },
-        );
-        result = {
-          items,
-          truncated:
-            Buffer.byteLength(JSON.stringify(items)) > Number(maxBytes),
-        };
+        for (const id of request.params.taskIds as unknown[])
+          if (
+            typeof id === "string" &&
+            !(await this.#canAccessTask(principal, id))
+          )
+            throw new OrchestratorError(
+              "PERMISSION_DENIED",
+              "Task is outside the descendant scope.",
+            );
+        const items = (request.params.taskIds as unknown[]).map((id) => {
+          if (typeof id !== "string")
+            return { taskId: "invalid", result: null, retrieval: null };
+          const task = this.store.state.tasks[id];
+          if (!task)
+            return {
+              taskId: id,
+              result: null,
+              retrieval: { method: "task.get", params: { taskId: id } },
+            };
+          const found = Object.values(this.store.state.results ?? {}).find(
+            (r) => r.taskId === id,
+          );
+          return {
+            taskId: id,
+            id: found?.id,
+            state: task.state,
+            result: found
+              ? {
+                  id: found.id,
+                  resultId: found.id,
+                  status: found.status,
+                  summary:
+                    typeof (found.payload as { summary?: unknown } | undefined)
+                      ?.summary === "string"
+                      ? (found.payload as { summary: string }).summary
+                      : undefined,
+                }
+              : null,
+            retrieval: found
+              ? { method: "result.get", params: { taskId: id } }
+              : { method: "task.get", params: { taskId: id } },
+          };
+        });
+        const bounded: unknown[] = [];
+        let used = 2;
+        let truncated = false;
+        for (const item of items) {
+          const encoded = JSON.stringify(item);
+          if (used + Buffer.byteLength(encoded) + 1 <= Number(maxBytes)) {
+            bounded.push(item);
+            used += Buffer.byteLength(encoded) + 1;
+          } else {
+            truncated = true;
+            bounded.push({
+              taskId: (item as { taskId: string }).taskId,
+              result: null,
+              truncated: true,
+              retrieval: (item as { retrieval: unknown }).retrieval,
+            });
+          }
+        }
+        let collection = { items: bounded, truncated };
+        if (Buffer.byteLength(JSON.stringify(collection)) > Number(maxBytes)) {
+          collection = {
+            items: items.map((item) => ({
+              taskId: (item as { taskId: string }).taskId,
+              truncated: true,
+              retrieval: (item as { retrieval: unknown }).retrieval,
+            })),
+            truncated: true,
+          };
+        }
+        if (Buffer.byteLength(JSON.stringify(collection)) > Number(maxBytes))
+          throw new OrchestratorError(
+            "LIMIT_EXCEEDED",
+            "Collection cannot fit the requested output bound.",
+          );
+        result = collection;
+      } else if (
+        request.method === "agent.spawn" ||
+        request.method === "delegate.execute"
+      ) {
+        requirePermission(principal, "delegate");
+        const p = request.params;
+        const allowedKeys =
+          request.method === "agent.spawn"
+            ? [
+                "task",
+                "profileId",
+                "project",
+                "isolation",
+                "budget",
+                "parentAgentId",
+                "dryRun",
+                "objective",
+              ]
+            : [
+                "mode",
+                "title",
+                "parentAgentId",
+                "steps",
+                "wait",
+                "waitUntil",
+                "timeoutMs",
+                "failureMode",
+                "dryRun",
+              ];
+        if (Object.keys(p).some((key) => !allowedKeys.includes(key)))
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Delegation request contains unknown fields.",
+          );
+        if (
+          principal.kind === "pi_parent" &&
+          safeText(p.parentAgentId) &&
+          p.parentAgentId !== principal.agentId
+        )
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "A parent cannot target another parent subtree.",
+          );
+        const parentAgentId =
+          principal.kind === "pi_parent"
+            ? principal.agentId
+            : safeText(p.parentAgentId)
+              ? p.parentAgentId
+              : undefined;
+        if (!parentAgentId)
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "A broker-bound parent identity is required.",
+          );
+        if (!(await this.#canAccessAgent(principal, parentAgentId)))
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "Parent is outside the authenticated scope.",
+          );
+        const dryRun = p.dryRun === true;
+        const steps =
+          request.method === "agent.spawn"
+            ? [
+                {
+                  key: "single",
+                  profileId: p.profileId,
+                  title:
+                    p.task &&
+                    typeof p.task === "object" &&
+                    safeText((p.task as Record<string, unknown>).title)
+                      ? (p.task as Record<string, unknown>).title
+                      : "Delegated task",
+                  objective:
+                    p.task &&
+                    typeof p.task === "object" &&
+                    safeText(
+                      (p.task as Record<string, unknown>).objective,
+                      65_536,
+                    )
+                      ? (p.task as Record<string, unknown>).objective
+                      : p.objective,
+                  constraints:
+                    p.task &&
+                    typeof p.task === "object" &&
+                    Array.isArray(
+                      (p.task as Record<string, unknown>).constraints,
+                    )
+                      ? (p.task as Record<string, unknown>).constraints
+                      : [],
+                  dependsOn: [],
+                },
+              ]
+            : Array.isArray(p.steps)
+              ? p.steps
+              : [];
+        if (
+          !Array.isArray(steps) ||
+          steps.length === 0 ||
+          steps.length > 32 ||
+          steps.some(
+            (step) =>
+              !step ||
+              typeof step !== "object" ||
+              !safeText((step as Record<string, unknown>).profileId, 64) ||
+              !safeText((step as Record<string, unknown>).objective, 65_536),
+          )
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Delegation steps are invalid.",
+          );
+        const workflowId = createId("wfl");
+        const planned = steps.map((raw) => ({
+          key: safeText((raw as Record<string, unknown>).key, 64)
+            ? ((raw as Record<string, unknown>).key as string)
+            : createId("tsk"),
+          profileId: (raw as Record<string, unknown>).profileId as string,
+          title: safeText((raw as Record<string, unknown>).title, 256)
+            ? ((raw as Record<string, unknown>).title as string)
+            : "Delegated task",
+          objective: (raw as Record<string, unknown>).objective as string,
+          constraints: Array.isArray(
+            (raw as Record<string, unknown>).constraints,
+          )
+            ? ((raw as Record<string, unknown>).constraints as unknown[])
+            : [],
+          dependsOn: Array.isArray((raw as Record<string, unknown>).dependsOn)
+            ? ((raw as Record<string, unknown>).dependsOn as unknown[])
+            : [],
+        }));
+        if (dryRun) {
+          result = {
+            workflowId,
+            state: "created",
+            plan: planned.map((step) => ({
+              key: step.key,
+              profileId: step.profileId,
+              title: step.title,
+              objective: step.objective,
+              estimatedAgentCount: 1,
+            })),
+          };
+        } else {
+          const taskIds = planned.map(() => createId("tsk"));
+          committedEvent = await this.store.append({
+            type: "workflow.created",
+            actor: { principalId: principal.id, kind: principal.kind },
+            entityRefs: { workflowId },
+            payload: {
+              workflowId,
+              taskIds,
+              parentAgentId,
+              mode:
+                request.method === "delegate.execute"
+                  ? safeText(p.mode, 32)
+                    ? p.mode
+                    : "parallel"
+                  : "single",
+            },
+          });
+          const spawned: Array<Record<string, unknown>> = [];
+          for (let index = 0; index < planned.length; index++) {
+            const step = planned[index]!;
+            const taskId = taskIds[index]!;
+            const agentId = createId("agt");
+            const runId = createId("run");
+            const assignmentId = createId("asg");
+            await this.store.append({
+              type: "task.created_m3",
+              actor: { principalId: principal.id, kind: principal.kind },
+              entityRefs: { taskId },
+              payload: {
+                taskId,
+                title: step.title,
+                objective: step.objective,
+                createdAt: new Date().toISOString(),
+                parentAgentId,
+                profileId: step.profileId,
+                dependencies: step.dependsOn
+                  .map((key) =>
+                    planned.find((candidate) => candidate.key === key),
+                  )
+                  .filter(Boolean)
+                  .map((candidate) => taskIds[planned.indexOf(candidate!)]),
+              },
+            });
+            await this.store.append({
+              type: "agent.registered",
+              actor: { principalId: principal.id, kind: principal.kind },
+              entityRefs: { agentId },
+              payload: {
+                agentId,
+                managed: true,
+                generation: 1,
+                parentAgentId,
+                profileId: step.profileId,
+                displayName: step.title,
+              },
+            });
+            await this.store.append({
+              type: "run.created",
+              actor: { principalId: principal.id, kind: principal.kind },
+              entityRefs: { runId, taskId, agentId },
+              payload: {
+                runId,
+                taskId,
+                agentId,
+                assignmentId,
+                assignmentGeneration: 1,
+                agentGeneration: 1,
+              },
+            });
+            await this.store.append({
+              type: "task.state_changed",
+              actor: { principalId: principal.id, kind: principal.kind },
+              entityRefs: { taskId },
+              payload: { to: "provisioning" },
+            });
+            if (!this.#herdr)
+              throw new OrchestratorError(
+                "HERDR_UNAVAILABLE",
+                "Injected Herdr service is unavailable.",
+              );
+            const provisionParams =
+              p.project && typeof p.project === "object"
+                ? (p.project as Record<string, unknown>)
+                : {};
+            const provisioned = await this.#herdr.provision({
+              agentId,
+              parentAgentId,
+              role: step.profileId,
+              workspaceId: safeText(provisionParams.workspaceId)
+                ? provisionParams.workspaceId
+                : "",
+              cwd: safeText(provisionParams.cwd) ? provisionParams.cwd : ".",
+              profileId: step.profileId,
+              isolation:
+                provisionParams.isolation === "worktree"
+                  ? "worktree"
+                  : "shared-readonly",
+              prompt: step.objective,
+              ...(safeText(provisionParams.projectBase)
+                ? { projectBase: provisionParams.projectBase }
+                : {}),
+              ...(safeText(provisionParams.branch)
+                ? { branch: provisionParams.branch }
+                : {}),
+            });
+            await this.store.append({
+              type: "agent.state_changed",
+              actor: { principalId: principal.id, kind: principal.kind },
+              entityRefs: { agentId },
+              payload: {
+                agentId,
+                state: "starting",
+                ...(provisioned.paneId ? { paneId: provisioned.paneId } : {}),
+              },
+            });
+            spawned.push({
+              key: step.key,
+              taskId,
+              runId,
+              agentId,
+              assignmentId,
+              assignmentGeneration: 1,
+              state: "provisioning",
+              paneId: provisioned.paneId,
+            });
+          }
+          result = { workflowId, state: "running", tasks: spawned };
+        }
       } else if (request.method === "workflow.create") {
         requirePermission(principal, "delegate");
         const p = request.params;
@@ -1431,15 +2335,24 @@ export class Broker {
           !p.definition ||
           typeof p.definition !== "object" ||
           !safeText(p.objective, 65_536) ||
-          (!safeText(p.parentAgentId) && !principal.agentId)
+          (!safeText(p.parentAgentId) && !principal.agentId) ||
+          (principal.kind === "pi_parent" && !principal.agentId)
         )
           throw new OrchestratorError(
             "INVALID_REQUEST",
             "Workflow parameters are invalid.",
           );
-        const parentAgentId = safeText(p.parentAgentId)
-          ? p.parentAgentId
-          : principal.agentId!;
+        const parentAgentId =
+          principal.kind === "pi_parent"
+            ? principal.agentId!
+            : safeText(p.parentAgentId)
+              ? p.parentAgentId
+              : principal.agentId!;
+        if (!(await this.#canAccessAgent(principal, parentAgentId)))
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "Workflow parent is outside the authenticated scope.",
+          );
         try {
           validateWorkflow(p.definition as WorkflowDefinition);
         } catch {
@@ -1453,37 +2366,42 @@ export class Broker {
           dryRun: p.dryRun === true,
         });
         const taskIds = plan.steps.map((step) => step.taskId);
-        committedEvent = await this.store.append({
-          type: "workflow.created",
-          actor: { principalId: principal.id, kind: principal.kind },
-          entityRefs: { workflowId: plan.workflowId },
-          payload: {
-            workflowId: plan.workflowId,
-            taskIds,
-            parentAgentId,
-            mode: plan.mode,
-          },
-        });
-        for (const step of plan.steps)
-          await this.store.append({
-            type: "task.created_m3",
+        if (p.dryRun !== true)
+          committedEvent = await this.store.append({
+            type: "workflow.created",
             actor: { principalId: principal.id, kind: principal.kind },
-            entityRefs: { taskId: step.taskId },
+            entityRefs: { workflowId: plan.workflowId },
             payload: {
-              taskId: step.taskId,
-              title:
-                (p.definition as WorkflowDefinition).steps.find(
-                  (x) => x.key === step.key,
-                )?.title ?? step.key,
-              objective: step.objective,
-              createdAt: new Date().toISOString(),
+              workflowId: plan.workflowId,
+              taskIds,
               parentAgentId,
-              profileId: step.profileId,
-              dependencies: step.dependsOn
-                .map((key) => plan.steps.find((x) => x.key === key)?.taskId)
-                .filter((x): x is string => Boolean(x)),
+              mode: plan.mode,
             },
           });
+        if (p.dryRun !== true)
+          for (const step of plan.steps)
+            await this.store.append({
+              type: "task.created_m3",
+              actor: { principalId: principal.id, kind: principal.kind },
+              entityRefs: { taskId: step.taskId },
+              payload: {
+                taskId: step.taskId,
+                title:
+                  (p.definition as WorkflowDefinition).steps.find(
+                    (x) => x.key === step.key,
+                  )?.title ?? step.key,
+                objective: step.objective,
+                createdAt: new Date().toISOString(),
+                parentAgentId,
+                profileId: step.profileId,
+                dependencies: step.dependsOn
+                  .map((key) => plan.steps.find((x) => x.key === key)?.taskId)
+                  .filter((x): x is string => Boolean(x)),
+              },
+            });
+        if (p.dryRun !== true) {
+          // Task events are committed only for a real workflow.
+        }
         result = {
           workflowId: plan.workflowId,
           state: p.dryRun === true ? "created" : "created",
@@ -1509,6 +2427,17 @@ export class Broker {
             "WORKFLOW_NOT_FOUND",
             "Workflow was not found.",
           );
+        if (
+          !(
+            await Promise.all(
+              workflow.taskIds.map((id) => this.#canAccessTask(principal, id)),
+            )
+          ).every(Boolean)
+        )
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "Workflow is outside the descendant scope.",
+          );
         result = {
           ...workflow,
           tasks: workflow.taskIds
@@ -1523,7 +2452,23 @@ export class Broker {
             "Workflow list parameters must be empty.",
           );
         result = {
-          items: Object.values(this.store.state.workflows),
+          items: (
+            await Promise.all(
+              Object.values(this.store.state.workflows).map(async (workflow) =>
+                (
+                  await Promise.all(
+                    workflow.taskIds.map((id) =>
+                      this.#canAccessTask(principal, id),
+                    ),
+                  )
+                ).every(Boolean)
+                  ? workflow
+                  : undefined,
+              ),
+            )
+          ).filter((workflow): workflow is NonNullable<typeof workflow> =>
+            Boolean(workflow),
+          ),
           nextCursor: null,
           snapshotSeq: this.store.state.lastEventSeq,
         };
@@ -1544,6 +2489,17 @@ export class Broker {
           throw new OrchestratorError(
             "WORKFLOW_NOT_FOUND",
             "Workflow was not found.",
+          );
+        if (
+          !(
+            await Promise.all(
+              workflow.taskIds.map((id) => this.#canAccessTask(principal, id)),
+            )
+          ).every(Boolean)
+        )
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "Workflow is outside the descendant scope.",
           );
         committedEvent = await this.store.append({
           type: "workflow.state_changed",
@@ -1657,6 +2613,7 @@ export class Broker {
             runId,
             taskId: task.id,
             agentId: agent.id,
+            assignmentId: createId("asg"),
             assignmentGeneration: request.params.assignmentGeneration,
             agentGeneration: agent.generation,
             ...(safeText(request.params.piSessionId)
@@ -1717,7 +2674,15 @@ export class Broker {
             "M1 task list parameters must be empty.",
           );
         result = {
-          items: Object.values(this.store.state.tasks),
+          items: (
+            await Promise.all(
+              Object.values(this.store.state.tasks).map(async (task) =>
+                (await this.#canAccessTask(principal, task.id))
+                  ? task
+                  : undefined,
+              ),
+            )
+          ).filter((task): task is NonNullable<typeof task> => Boolean(task)),
           nextCursor: null,
           snapshotSeq: this.store.state.lastEventSeq,
         };
@@ -1730,7 +2695,13 @@ export class Broker {
           !/^tsk_[0-9A-HJKMNP-TV-Z]{26}$/.test(request.params.taskId)
         )
           throw new OrchestratorError("INVALID_REQUEST", "Task ID is invalid.");
-        result = this.store.state.tasks[request.params.taskId] ?? null;
+        const task = this.store.state.tasks[request.params.taskId];
+        if (task && !(await this.#canAccessTask(principal, task.id)))
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "Task is outside the descendant scope.",
+          );
+        result = task ?? null;
       } else if (request.method === "task.create") {
         requirePermission(principal, "delegate");
         if (
@@ -1822,6 +2793,7 @@ export class Broker {
         result,
       };
       this.#writeFrame(client, response);
+      for (const action of deferred) void action().catch(() => undefined);
       for (const event of replayEvents) this.#sendEvent(client, event);
       if (committedEvent)
         for (const subscriber of this.#clients)
@@ -1872,6 +2844,125 @@ export class Broker {
         },
       });
     }
+  }
+  async #isDescendant(
+    parentAgentId: string | undefined,
+    targetAgentId: string,
+  ): Promise<boolean> {
+    if (!parentAgentId) return false;
+    let current: string | undefined = targetAgentId;
+    for (let depth = 0; depth <= 4 && current; depth++) {
+      if (current === parentAgentId) return true;
+      current = this.store.state.agents[current]?.parentAgentId;
+    }
+    return false;
+  }
+  #operator(principal: Principal): boolean {
+    return principal.kind !== "pi_parent" && principal.kind !== "pi_child";
+  }
+  async #canAccessAgent(
+    principal: Principal,
+    agentId: string,
+  ): Promise<boolean> {
+    return (
+      this.#operator(principal) ||
+      principal.agentId === agentId ||
+      (await this.#isDescendant(principal.agentId, agentId))
+    );
+  }
+  async #canAccessTask(principal: Principal, taskId: string): Promise<boolean> {
+    if (this.#operator(principal)) return true;
+    const task = this.store.state.tasks[taskId];
+    if (!task) return false;
+    if (principal.agentId === task.parentAgentId) return true;
+    if (
+      task.assignedAgentId &&
+      (await this.#isDescendant(principal.agentId, task.assignedAgentId))
+    )
+      return true;
+    return false;
+  }
+  async #sendAdapterRequest(
+    agentId: string,
+    method: string,
+    params: Record<string, unknown>,
+    expected: {
+      generation: number;
+      connectionGeneration?: number;
+      assignmentGeneration?: number;
+      piSessionId?: string;
+      runId?: string;
+    },
+    timeoutMs = 10_000,
+  ): Promise<unknown> {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000)
+      throw new OrchestratorError("TIMEOUT", "Adapter deadline is invalid.");
+    const client = [...this.#clients].find(
+      (item) =>
+        item.principal?.kind === "pi_child" &&
+        item.principal.agentId === agentId,
+    );
+    const agent = this.store.state.agents[agentId];
+    if (
+      !client ||
+      !agent ||
+      client.principal?.generation !== expected.generation ||
+      (expected.connectionGeneration !== undefined &&
+        agent.connectionGeneration !== expected.connectionGeneration) ||
+      client.principal.piSessionId !==
+        (expected.piSessionId ?? agent.piSessionId) ||
+      agent.generation !== expected.generation
+    )
+      throw new OrchestratorError(
+        "AGENT_DISCONNECTED",
+        "The exact managed adapter is not connected.",
+        { retryable: true },
+      );
+    if (expected.runId && agent.currentRunId !== expected.runId)
+      throw new OrchestratorError(
+        "RUN_MISMATCH",
+        "The managed agent current run does not match.",
+      );
+    const id = createId("evt");
+    const frame = {
+      v: 1,
+      type: "server_request",
+      id,
+      method,
+      params: {
+        ...params,
+        expected: {
+          agentId,
+          generation: expected.generation,
+          ...(expected.connectionGeneration !== undefined
+            ? { connectionGeneration: expected.connectionGeneration }
+            : {}),
+          ...(expected.assignmentGeneration !== undefined
+            ? { assignmentGeneration: expected.assignmentGeneration }
+            : {}),
+          ...(expected.piSessionId
+            ? { piSessionId: expected.piSessionId }
+            : {}),
+          ...(expected.runId ? { runId: expected.runId } : {}),
+        },
+      },
+    };
+    const pending = new Promise<unknown>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        client.serverRequests.delete(id);
+        reject(
+          new OrchestratorError(
+            "TIMEOUT",
+            "Managed adapter request timed out.",
+            { retryable: true },
+          ),
+        );
+      }, timeoutMs);
+      timer.unref();
+      client.serverRequests.set(id, { resolve, reject, timer });
+    });
+    client.socket.write(encodeFrame(frame));
+    return await pending;
   }
   #matchesFilter(
     filter: SubscriptionFilter | undefined,

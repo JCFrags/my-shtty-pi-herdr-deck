@@ -498,7 +498,19 @@ export class EventStore {
         exactKeys(refs, ["taskId"]) &&
         isEntityId(refs.taskId, "tsk") &&
         exactKeys(p, ["to"]) &&
-        (p.to === "queued" || p.to === "cancelled");
+        [
+          "draft",
+          "queued",
+          "provisioning",
+          "assigned",
+          "running",
+          "blocked",
+          "collecting",
+          "succeeded",
+          "failed",
+          "cancelled",
+          "timed_out",
+        ].includes(String(p.to));
     } else if (event.type === "herdr.provision.intent") {
       valid =
         exactKeys(refs, ["agentId"]) &&
@@ -571,6 +583,7 @@ export class EventStore {
         "run.created",
         "assignment.delivered",
         "assignment.accepted",
+        "assignment.delivery_failed",
         "run.pi_started",
         "run.pi_settled",
         "run.state_changed",

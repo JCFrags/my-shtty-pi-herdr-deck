@@ -38,6 +38,7 @@ const known = new Set([
   "run.created",
   "assignment.delivered",
   "assignment.accepted",
+  "assignment.delivery_failed",
   "run.pi_started",
   "run.pi_settled",
   "run.state_changed",
@@ -275,11 +276,23 @@ export function reduce(
         ...(typeof p.timeoutAt === "string" ? { timeoutAt: p.timeoutAt } : {}),
       };
       next.runs = { ...next.runs, [id]: run };
+      if (run.agentId && next.agents[run.agentId])
+        next.agents = {
+          ...next.agents,
+          [run.agentId]: {
+            ...next.agents[run.agentId]!,
+            currentRunId: id,
+            currentAssignmentGeneration: run.assignmentGeneration,
+          },
+        };
       next.tasks = {
         ...next.tasks,
         [task.id]: {
           ...task,
           currentRunId: id,
+          ...(typeof p.agentId === "string"
+            ? { assignedAgentId: p.agentId }
+            : {}),
           runIds: [...(task.runIds ?? []), id],
           state: "assigned",
         },
@@ -288,6 +301,7 @@ export function reduce(
     }
     case "assignment.delivered":
     case "assignment.accepted":
+    case "assignment.delivery_failed":
     case "run.pi_started":
     case "run.pi_settled":
     case "run.state_changed": {

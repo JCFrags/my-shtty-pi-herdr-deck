@@ -47,6 +47,7 @@ export interface Task {
   constraints?: string[];
   dependencies?: string[];
   currentRunId?: string;
+  assignedAgentId?: string;
   runIds?: string[];
   resultId?: string;
   timeoutAt?: string;

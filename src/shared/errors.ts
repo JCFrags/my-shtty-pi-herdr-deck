@@ -25,7 +25,11 @@ export type ErrorCode =
   | "RUN_MISMATCH"
   | "TASK_NOT_FOUND"
   | "WORKFLOW_NOT_FOUND"
-  | "WORKFLOW_INVALID";
+  | "WORKFLOW_INVALID"
+  | "PI_COMMAND_REJECTED"
+  | "HERDR_UNAVAILABLE"
+  | "HERDR_IDENTITY_MISMATCH"
+  | "TASK_TERMINAL";
 export class OrchestratorError extends Error {
   readonly code: ErrorCode;
   readonly retryable: boolean;
