@@ -1,7 +1,8 @@
 import type { HerdrCli } from "./cli.js";
 import { branchSlug, herdrName, label } from "./names.js";
 import type { GitEvidence } from "../git/porcelain.js";
-import { readdir } from "node:fs/promises";
+import { open, readdir } from "node:fs/promises";
+import { constants } from "node:fs";
 import { join } from "node:path";
 import {
   createManagedToken,
@@ -39,6 +40,18 @@ export interface ProvisionResult {
   promptFileIdentity?: FileIdentity;
   tokenFileIdentity?: FileIdentity;
 }
+export interface RegistrationRetentionStatus {
+  files: number;
+  bytes: number;
+  unsafeFiles: number;
+  oldestMtimeMs?: number;
+  maxFiles: number;
+  maxBytes: number;
+  maxAgeMs: number;
+}
+const RETENTION_MAX_FILES = 128;
+const RETENTION_MAX_BYTES = 32 * 1024 * 1024;
+const RETENTION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 export class HerdrProvisioner {
   constructor(
     readonly cli: HerdrCli,
@@ -47,7 +60,72 @@ export class HerdrProvisioner {
     readonly retainRegistrationFiles = false,
     readonly gitEvidence?: (cwd: string, base?: string) => Promise<GitEvidence>,
   ) {}
+  async registrationRetentionStatus(): Promise<RegistrationRetentionStatus> {
+    let names: string[];
+    try {
+      names = (await readdir(this.promptRoot)).filter(
+        (name) => name.startsWith(".prompt-") || name.startsWith(".token-"),
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT")
+        return {
+          files: 0,
+          bytes: 0,
+          unsafeFiles: 0,
+          maxFiles: RETENTION_MAX_FILES,
+          maxBytes: RETENTION_MAX_BYTES,
+          maxAgeMs: RETENTION_MAX_AGE_MS,
+        };
+      throw error;
+    }
+    let bytes = 0;
+    let unsafeFiles = 0;
+    let oldestMtimeMs: number | undefined;
+    for (const name of names) {
+      let handle;
+      try {
+        handle = await open(
+          join(this.promptRoot, name),
+          constants.O_RDONLY | constants.O_NOFOLLOW,
+        );
+        const stat = await handle.stat();
+        bytes += stat.size;
+        oldestMtimeMs = Math.min(oldestMtimeMs ?? stat.mtimeMs, stat.mtimeMs);
+        if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0)
+          unsafeFiles += 1;
+      } catch {
+        unsafeFiles += 1;
+      } finally {
+        await handle?.close().catch(() => undefined);
+      }
+    }
+    return {
+      files: names.length,
+      bytes,
+      unsafeFiles,
+      ...(oldestMtimeMs === undefined ? {} : { oldestMtimeMs }),
+      maxFiles: RETENTION_MAX_FILES,
+      maxBytes: RETENTION_MAX_BYTES,
+      maxAgeMs: RETENTION_MAX_AGE_MS,
+    };
+  }
+  private async requireRegistrationRetentionBudget(
+    prompt: string,
+  ): Promise<void> {
+    const status = await this.registrationRetentionStatus();
+    if (status.unsafeFiles > 0)
+      throw new Error("HERDR_REGISTRATION_RETENTION_UNSAFE");
+    if (
+      status.oldestMtimeMs !== undefined &&
+      Date.now() - status.oldestMtimeMs > status.maxAgeMs
+    )
+      throw new Error("HERDR_REGISTRATION_RETENTION_EXPIRED");
+    const projectedBytes = status.bytes + Buffer.byteLength(prompt) + 1024;
+    if (status.files + 2 > status.maxFiles || projectedBytes > status.maxBytes)
+      throw new Error("HERDR_REGISTRATION_RETENTION_BUDGET_EXCEEDED");
+  }
   async provision(input: ProvisionInput): Promise<ProvisionResult> {
+    await this.requireRegistrationRetentionBudget(input.prompt);
     const token = createManagedToken();
     const name = herdrName(input.role, input.agentId, this.liveNames());
     let tokenFile: string | undefined;

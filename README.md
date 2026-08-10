@@ -213,6 +213,23 @@ Only one controlling deck may attach to a Pi pane. A second client is explicitly
 
 The M2 service uses canonical broker events for provisioning intent, external resource outcomes, and startup reconciliation. It requires the installed Herdr schema before mutation. Provisioning uses argv-only fake-compatible gateways, compensates created resources in reverse order on failure, and records failed or orphaned resources for later reconciliation. Managed environment keys cannot be overridden. The random registration token is not placed in command arguments or persisted state. Tests use only local fake Herdr and Git interfaces.
 
+### Retained registration files
+
+The orchestrator cannot atomically compare and remove a pathname through the current Node and Herdr interfaces. It therefore does not write, truncate, or unlink a prompt or token file after registration. It records `retained_registration_files` in durable state.
+
+The private prompt directory has a strict admission budget:
+
+- at most 128 retained prompt and token files;
+- at most 32 MiB total;
+- no file older than 30 days;
+- no unsafe type, mode, symlink, replacement, or hard-link alias.
+
+Provisioning fails closed before it creates a new file when a limit is reached. `doctor` reports only redacted counts and byte totals in the `registration-retention` check. It does not report file names or contents.
+
+There is no automatic cleanup command because pathname deletion can act on a replacement. For owner-controlled disposition, first stop the broker and confirm that no registration is pending. Inspect `${stateRoot}/prompts` as the owning user. Archive or remove the whole private state root only as an explicit data-deletion operation. Do not run a recursive cleanup while the broker or a managed agent is active. A normal uninstall preserves this directory.
+
+This fail-closed policy bounds storage but does not claim atomic deletion. A future implementation can remove retained files only after it adopts a reviewed atomic custody primitive.
+
 ## Herdr interaction boundary
 
 The deck reads `HERDR_BIN_PATH` and launches Herdr with argv arrays and `shell: false`. It reads the installed schema with:

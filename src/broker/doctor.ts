@@ -2,6 +2,8 @@ import { access, constants, lstat } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { resolvePaths } from "../shared/paths.js";
 import { HerdrApi } from "../herdr/api.js";
+import { HerdrProvisioner } from "../herdr/provisioner.js";
+import { join } from "node:path";
 export interface CapabilityReport {
   name: string;
   available: boolean;
@@ -107,6 +109,24 @@ export async function doctor(
   }
   checks.push(
     check("state-path", await safeDirectory(paths.root), true, paths.root),
+  );
+  const retention = await new HerdrProvisioner(
+    {} as never,
+    join(paths.root, "prompts"),
+  ).registrationRetentionStatus();
+  const retentionCurrent =
+    retention.unsafeFiles === 0 &&
+    retention.files <= retention.maxFiles &&
+    retention.bytes <= retention.maxBytes &&
+    (retention.oldestMtimeMs === undefined ||
+      Date.now() - retention.oldestMtimeMs <= retention.maxAgeMs);
+  checks.push(
+    check(
+      "registration-retention",
+      retentionCurrent,
+      false,
+      `${retention.files}/${retention.maxFiles} files; ${retention.bytes}/${retention.maxBytes} bytes; ${retention.unsafeFiles} unsafe`,
+    ),
   );
   checks.push(
     check(

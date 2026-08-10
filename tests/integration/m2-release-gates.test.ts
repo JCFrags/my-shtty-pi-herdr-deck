@@ -5,6 +5,7 @@ import {
   readdir,
   rename,
   symlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -33,6 +34,7 @@ import {
   HerdrProcessRunner,
   HerdrProcessError,
 } from "../../src/herdr/runner.js";
+import { HerdrProvisioner } from "../../src/herdr/provisioner.js";
 
 const agentId = () => createId("agt");
 
@@ -84,6 +86,60 @@ test("token cleanup is idempotent for a missing path", async () => {
   assert.equal(await retainManagedFileForCleanup(path), "missing");
   assert.deepEqual(await readdir(root), []);
 });
+test("registration retention inventory is redacted and bounded", async () => {
+  const root = await mkdtemp(join(tmpdir(), "m2-retention-budget-"));
+  for (let i = 0; i < 127; i += 1)
+    await writeFile(join(root, `.prompt-${i}`), "retained\n", { mode: 0o600 });
+  const provisioner = new HerdrProvisioner({} as never, root);
+  const status = await provisioner.registrationRetentionStatus();
+  assert.equal(status.files, 127);
+  assert.equal(status.unsafeFiles, 0);
+  assert.equal(status.maxFiles, 128);
+  assert.equal(JSON.stringify(status).includes(".prompt-"), false);
+  await assert.rejects(
+    () =>
+      provisioner.provision({
+        agentId: "agent",
+        parentAgentId: "parent",
+        role: "worker",
+        workspaceId: "workspace",
+        cwd: root,
+        profileId: "profile",
+        isolation: "shared-readonly",
+        prompt: "new prompt",
+      }),
+    /HERDR_REGISTRATION_RETENTION_BUDGET_EXCEEDED/,
+  );
+});
+
+test("registration retention age and unsafe files fail provisioning closed", async () => {
+  const root = await mkdtemp(join(tmpdir(), "m2-retention-age-"));
+  const old = join(root, ".prompt-old");
+  await writeFile(old, "retained\n", { mode: 0o600 });
+  const expired = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
+  await utimes(old, expired, expired);
+  const provisioner = new HerdrProvisioner({} as never, root);
+  await assert.rejects(
+    () =>
+      provisioner.provision({
+        agentId: "agent",
+        parentAgentId: "parent",
+        role: "worker",
+        workspaceId: "workspace",
+        cwd: root,
+        profileId: "profile",
+        isolation: "shared-readonly",
+        prompt: "new prompt",
+      }),
+    /HERDR_REGISTRATION_RETENTION_EXPIRED/,
+  );
+  await symlink(old, join(root, ".token-unsafe"));
+  assert.equal(
+    (await provisioner.registrationRetentionStatus()).unsafeFiles,
+    1,
+  );
+});
+
 test("capability projection fails closed for schema drift", () => {
   const caps = projectCapabilities({ methods: ["session.snapshot"] }, "fake-1");
   assert.equal(caps.supports("events.subscribe"), false);
