@@ -198,7 +198,11 @@ export function planRetention(
   for (const resource of eligible)
     if (!selected.has(resource.id)) retained.push(resource.path);
   candidates.sort((left, right) => left.path.localeCompare(right.path));
-  refusals.sort((left, right) => left.path.localeCompare(right.path));
+  refusals.sort(
+    (left, right) =>
+      left.reason.localeCompare(right.reason) ||
+      left.path.localeCompare(right.path),
+  );
   return { dryRun: true, candidates, retained, refusals };
 }
 
