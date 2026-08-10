@@ -15,7 +15,14 @@ export type ErrorCode =
   | "AGENT_DISCONNECTED"
   | "AGENT_NOT_IDLE"
   | "AGENT_NOT_WORKING"
-  | "PI_CAPABILITY_MISSING";
+  | "PI_CAPABILITY_MISSING"
+  | "RESULT_INVALID"
+  | "RESULT_ALREADY_PUBLISHED"
+  | "RESULT_MISSING"
+  | "QUESTION_NOT_FOUND"
+  | "QUESTION_ALREADY_ANSWERED"
+  | "QUESTION_TIMED_OUT"
+  | "RUN_MISMATCH";
 export class OrchestratorError extends Error {
   readonly code: ErrorCode;
   readonly retryable: boolean;
