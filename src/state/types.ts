@@ -98,6 +98,7 @@ export interface OrchestrationState {
       paneId?: string;
       tabId?: string;
       worktreeId?: string;
+      worktreePath?: string;
       reason?: string;
       parentAgentId?: string;
       ownerId?: string;

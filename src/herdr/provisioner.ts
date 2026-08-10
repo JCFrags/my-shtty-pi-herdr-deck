@@ -156,8 +156,12 @@ export class HerdrProvisioner {
         name,
         token,
         tabId,
-        promptPath: prompt,
-        tokenFilePath: tokenFile,
+        ...(this.retainRegistrationFiles && prompt
+          ? { promptPath: prompt }
+          : {}),
+        ...(this.retainRegistrationFiles && tokenFile
+          ? { tokenFilePath: tokenFile }
+          : {}),
         paneId: typeof sr.pane_id === "string" ? sr.pane_id : paneId,
         ...(worktreeId ? { worktreeId } : {}),
         ...(worktreePath ? { worktreePath } : {}),
@@ -165,16 +169,77 @@ export class HerdrProvisioner {
     } catch (error) {
       if (prompt) await deletePromptFile(prompt).catch(() => undefined);
       if (tokenFile) await deletePromptFile(tokenFile).catch(() => undefined);
-      // Compensate in reverse order. Each operation is best-effort and the
-      // resulting state remains observable to startup reconciliation.
-      if (paneId) await this.cli.closePane(paneId).catch(() => undefined);
-      if (tabId) await this.cli.closeTab(tabId).catch(() => undefined);
-      if (unusedTabId && unusedTabId !== tabId)
+      // Revalidate each resource immediately before destructive compensation.
+      // An empty fake snapshot is treated as legacy evidence; a reported
+      // occupant or worktree must match the resource we created.
+      if (paneId && (await this.ownsPane(paneId, input.agentId)).safe)
+        await this.cli.closePane(paneId).catch(() => undefined);
+      if (tabId && (await this.ownsTab(tabId, paneId)).safe)
+        await this.cli.closeTab(tabId).catch(() => undefined);
+      if (
+        unusedTabId &&
+        unusedTabId !== tabId &&
+        (await this.ownsTab(unusedTabId)).safe
+      )
         await this.cli.closeTab(unusedTabId).catch(() => undefined);
-      if (worktreeId)
+      if (
+        worktreeId &&
+        (await this.ownsWorktree(worktreeId, worktreePath)).safe
+      )
         await this.cli.removeWorktree(worktreeId).catch(() => undefined);
       throw error;
     }
+  }
+  private async ownsPane(
+    id: string,
+    expectedAgentId: string,
+  ): Promise<{ safe: boolean }> {
+    try {
+      const snapshot = await this.cli.snapshot();
+      const pane = snapshot.panes.find((item) => item.id === id);
+      if (!pane) return { safe: true };
+      const occupant = pane.occupant;
+      return {
+        safe: !!occupant && occupant.agentId === expectedAgentId,
+      };
+    } catch {
+      return { safe: false };
+    }
+  }
+  private async ownsTab(
+    id: string,
+    expectedPaneId?: string,
+  ): Promise<{ safe: boolean }> {
+    try {
+      const snapshot = await this.cli.snapshot();
+      const tab = snapshot.tabs.find((item) => item.id === id);
+      return {
+        safe:
+          !tab ||
+          tab.panes.length === 0 ||
+          (!!expectedPaneId && tab.panes.some((p) => p.id === expectedPaneId)),
+      };
+    } catch {
+      return { safe: false };
+    }
+  }
+  private async ownsWorktree(
+    id: string,
+    expectedPath?: string,
+  ): Promise<{ safe: boolean }> {
+    try {
+      const snapshot = await this.cli.snapshot();
+      const worktree = snapshot.worktrees.find((item) => item.id === id);
+      return {
+        safe: !worktree || (!!expectedPath && worktree.path === expectedPath),
+      };
+    } catch {
+      return { safe: false };
+    }
+  }
+  async cleanupRegistration(result: ProvisionResult): Promise<void> {
+    if (result.promptPath) await deletePromptFile(result.promptPath);
+    if (result.tokenFilePath) await deletePromptFile(result.tokenFilePath);
   }
   async verifyRegistration(
     result: ProvisionResult,

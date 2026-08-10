@@ -617,10 +617,52 @@ export class Broker {
             ? { worktreePath: provisioned.worktreePath }
             : {}),
         };
+      } else if (request.method === "herdr.register") {
+        requirePermission(principal, "delegate");
+        if (
+          !this.#herdr ||
+          !exactKeys(request.params, [
+            "agentId",
+            "paneId",
+            "terminalId",
+            "sessionId",
+            "generation",
+          ]) ||
+          !safeText(request.params.agentId) ||
+          !safeText(request.params.paneId)
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Registration parameters are invalid.",
+          );
+        const registrationIdentity = {
+          paneId: request.params.paneId,
+          ...(safeText(request.params.terminalId)
+            ? { terminalId: request.params.terminalId }
+            : {}),
+          ...(safeText(request.params.sessionId)
+            ? { sessionId: request.params.sessionId }
+            : {}),
+          ...(Number.isSafeInteger(request.params.generation)
+            ? { generation: request.params.generation as number }
+            : {}),
+        };
+        await this.#herdr.register(
+          request.params.agentId,
+          registrationIdentity,
+        );
+        result = { registered: true };
       } else if (request.method === "herdr.adopt") {
         requirePermission(principal, "delegate");
         if (
           !this.#herdr ||
+          !exactKeys(request.params, [
+            "agentId",
+            "paneId",
+            "terminalId",
+            "sessionId",
+            "generation",
+          ]) ||
           !safeText(request.params.agentId) ||
           !safeText(request.params.paneId)
         )

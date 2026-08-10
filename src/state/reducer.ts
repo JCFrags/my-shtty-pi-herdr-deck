@@ -131,6 +131,9 @@ export function reduce(
           ...(typeof p.worktreeId === "string"
             ? { worktreeId: p.worktreeId }
             : {}),
+          ...(typeof p.worktreePath === "string"
+            ? { worktreePath: p.worktreePath }
+            : {}),
           ...(typeof p.reason === "string" ? { reason: p.reason } : {}),
           ...(typeof p.parentAgentId === "string"
             ? { parentAgentId: p.parentAgentId }

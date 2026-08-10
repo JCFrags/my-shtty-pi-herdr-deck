@@ -520,6 +520,7 @@ export class EventStore {
             "paneId",
             "tabId",
             "worktreeId",
+            "worktreePath",
             "reason",
             "terminalId",
             "sessionId",

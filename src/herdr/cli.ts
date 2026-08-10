@@ -13,6 +13,9 @@ export class HerdrCli {
       await this.runner.json(["session", "snapshot", "--json"]),
     );
   }
+  requireMutationCapabilities(methods: readonly string[]): void {
+    this.capabilities.require(methods);
+  }
   async createTab(input: {
     workspaceId: string;
     cwd: string;

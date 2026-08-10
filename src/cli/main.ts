@@ -49,12 +49,13 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
         "herdr.interrupt",
         "herdr.stop",
         "herdr.adopt",
+        "herdr.register",
         "herdr.close",
         "herdr.provision",
       ].includes(method)
     ) {
       console.error(
-        "Usage: herdr status|reconcile|focus|interrupt|stop|adopt|close|provision",
+        "Usage: herdr status|reconcile|focus|interrupt|stop|adopt|register|close|provision",
       );
       process.exitCode = 2;
       return;
@@ -72,7 +73,11 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       if (argv[3]) params.terminalId = argv[3];
       if (argv[4]) params.sessionId = argv[4];
       if (argv[5]) params.generation = Number(argv[5]);
-    } else if (method === "herdr.provision") {
+    } else if (
+      method === "herdr.provision" ||
+      method === "herdr.adopt" ||
+      method === "herdr.register"
+    ) {
       const file = argv[2];
       if (!file) throw new Error("Provisioning requires --params-file PATH.");
       params = JSON.parse(await readPrivateRegular(file)) as Record<
