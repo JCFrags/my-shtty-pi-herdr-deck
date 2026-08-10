@@ -9,7 +9,13 @@ export type ErrorCode =
   | "IDEMPOTENCY_CONFLICT"
   | "EVENT_CURSOR_EXPIRED"
   | "CURSOR_INVALID"
-  | "TIMEOUT";
+  | "TIMEOUT"
+  | "AGENT_REPLACED"
+  | "AGENT_NOT_FOUND"
+  | "AGENT_DISCONNECTED"
+  | "AGENT_NOT_IDLE"
+  | "AGENT_NOT_WORKING"
+  | "PI_CAPABILITY_MISSING";
 export class OrchestratorError extends Error {
   readonly code: ErrorCode;
   readonly retryable: boolean;
