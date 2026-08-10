@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { PiBrokerClient } from "../../src/pi/broker-client.js";
 import { PiControlRouter } from "../../src/pi/controls.js";
 import type { PiAssignment } from "../../src/pi/types.js";
-import { FakePi, withTimeout } from "../helpers/m3-fake-pi.js";
+import { FakePi, FakePiBroker, withTimeout } from "../helpers/m3-fake-pi.js";
 
 const assignment: PiAssignment = {
   id: "asg_01J00000000000000000000000",
@@ -75,6 +76,7 @@ test("M3 fake Pi times out a blocked prompt without accepting a late lifecycle",
   assert.equal(fake.lifecycle(lifecycle("turn_start")), "manual");
 
   fake.adapter.correlator.cancel();
+  assert.equal(fake.lifecycle(lifecycle("agent_settled")), "manual");
   fake.releasePrompt();
   assert.equal(
     await fake.adapter.deliver({
@@ -83,6 +85,46 @@ test("M3 fake Pi times out a blocked prompt without accepting a late lifecycle",
     }),
     "accepted",
   );
+});
+
+test("M3 fake Pi registers, heartbeats, and does not duplicate a connection", async () => {
+  const fake = new FakePi(
+    assignment.agentId,
+    assignment.generation,
+    assignment.piSessionId,
+  );
+  const broker = await FakePiBroker.start();
+  const client = new PiBrokerClient({
+    socketPath: broker.path,
+    sessionKey: "fake-session-key",
+    agentId: assignment.agentId,
+    generation: assignment.generation,
+    piSessionId: assignment.piSessionId,
+    token: "fake-agent-token",
+  });
+
+  try {
+    await client.connect();
+    await client.connect();
+    await client.register(fake.adapter.safeState());
+    await client.heartbeat({
+      ...fake.adapter.safeState(),
+      turnIndex: 2,
+    });
+
+    assert.equal(broker.helloCount, 1);
+    assert.deepEqual(
+      broker.requests.map((request) => request.method),
+      ["agent.register_managed", "agent.heartbeat"],
+    );
+    assert.deepEqual(
+      (broker.requests[1]!.params as { state: { turnIndex: number } }).state,
+      { sessionId: assignment.piSessionId, activity: "idle", turnIndex: 2 },
+    );
+  } finally {
+    client.close();
+    await broker.stop();
+  }
 });
 
 test("M3 fake Pi control routing has no offline queue", async () => {
@@ -95,9 +137,19 @@ test("M3 fake Pi control routing has no offline queue", async () => {
   router.register(assignment.agentId, fake.adapter);
   router.unregister(assignment.agentId);
 
-  await assert.rejects(
-    router.prompt(assignment.agentId, "must not queue"),
-    /AGENT_DISCONNECTED/,
-  );
+  const disconnectedControls = [
+    () => router.prompt(assignment.agentId, "must not queue"),
+    () => router.steer(assignment.agentId, "must not queue"),
+    () => router.followUp(assignment.agentId, "must not queue"),
+    () => router.abort(assignment.agentId),
+    () => router.compact(assignment.agentId),
+    () => router.setModel(assignment.agentId, "fake", "fake-model"),
+    () => router.setThinking(assignment.agentId, "medium"),
+    () => router.setTools(assignment.agentId, []),
+  ];
+
+  for (const control of disconnectedControls) {
+    await assert.rejects(control, /AGENT_DISCONNECTED/);
+  }
   assert.deepEqual(fake.sentMessages, []);
 });

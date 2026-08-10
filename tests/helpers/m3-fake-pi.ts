@@ -1,3 +1,7 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { createServer, type Server, type Socket } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type {
   PiApiLike,
   PiContextLike,
@@ -5,6 +9,7 @@ import type {
   PiModelLike,
 } from "../../src/pi/types.js";
 import { PiAdapter } from "../../src/pi/adapter.js";
+import { encodeFrame } from "../../src/shared/protocol/codec.js";
 
 const model: PiModelLike = {
   provider: "fake",
@@ -93,4 +98,68 @@ export function withTimeout<T>(
       ).unref();
     }),
   ]);
+}
+
+export class FakePiBroker {
+  readonly requests: Record<string, unknown>[] = [];
+  readonly path: string;
+  #server: Server | undefined;
+  #root: string | undefined;
+  #helloCount = 0;
+
+  private constructor(path: string, root: string) {
+    this.path = path;
+    this.#root = root;
+  }
+
+  static async start(): Promise<FakePiBroker> {
+    const root = await mkdtemp(join(tmpdir(), "m3-fake-broker-"));
+    const broker = new FakePiBroker(join(root, "broker.sock"), root);
+    broker.#server = createServer((socket) => broker.handle(socket));
+    await new Promise<void>((resolve, reject) => {
+      broker.#server!.once("error", reject);
+      broker.#server!.listen(broker.path, resolve);
+    });
+    return broker;
+  }
+
+  get helloCount(): number {
+    return this.#helloCount;
+  }
+
+  async stop(): Promise<void> {
+    const server = this.#server;
+    if (server) {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+    await rm(this.#root!, { recursive: true, force: true });
+    this.#server = undefined;
+    this.#root = undefined;
+  }
+
+  private handle(socket: Socket): void {
+    let buffer = "";
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      let newline = buffer.indexOf("\n");
+      while (newline >= 0) {
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        newline = buffer.indexOf("\n");
+        if (!line) continue;
+        const frame = JSON.parse(line) as Record<string, unknown>;
+        if (frame.type === "hello") this.#helloCount += 1;
+        if (frame.type === "request") this.requests.push(frame);
+        socket.write(
+          encodeFrame({
+            v: 1,
+            type: "response",
+            id: frame.id,
+            ok: true,
+            result: { accepted: true },
+          }),
+        );
+      }
+    });
+  }
 }
