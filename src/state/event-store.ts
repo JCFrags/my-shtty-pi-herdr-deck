@@ -75,6 +75,7 @@ export class EventStore {
   readonly #actor: { principalId: string; kind: string };
   readonly #appendBoundary: (() => Promise<void>) | undefined;
   #replayReductionCount = 0;
+  readonly #appendListeners = new Set<(event: StoredEvent) => void>();
   readOnly = false;
   corruption: string | undefined;
   constructor(
@@ -207,6 +208,10 @@ export class EventStore {
   }
   get replayReductionCount(): number {
     return this.#replayReductionCount;
+  }
+  onAppend(listener: (event: StoredEvent) => void): () => void {
+    this.#appendListeners.add(listener);
+    return () => this.#appendListeners.delete(listener);
   }
   #identityFrom(stat: Stats): FileIdentity {
     if (
@@ -395,6 +400,13 @@ export class EventStore {
         this.#lastHash = event.hash;
         this.#state = candidateState;
         result = event;
+        for (const listener of this.#appendListeners) {
+          try {
+            listener(event);
+          } catch {
+            // Observers cannot change the committed event result.
+          }
+        }
       });
     this.#appendTail = operation;
     await operation;

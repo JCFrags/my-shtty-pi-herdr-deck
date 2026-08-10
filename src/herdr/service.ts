@@ -55,6 +55,48 @@ export class HerdrService {
   get resources() {
     return this.#store.state.herdrResources ?? {};
   }
+  async verifyRoot(identity: { paneId: string; terminalId: string }): Promise<{
+    paneId: string;
+    terminalId: string;
+    workspaceId?: string;
+    tabId?: string;
+    cwd?: string;
+    worktreeId?: string;
+  }> {
+    await this.#preflight?.();
+    this.#cli.requireMutationCapabilities(["session.snapshot"]);
+    const snapshot = await this.#cli.snapshot();
+    const pane = snapshot.panes.find((item) => item.id === identity.paneId);
+    const occupant = pane?.occupant;
+    if (
+      !pane ||
+      !occupant ||
+      (occupant.terminalId ?? pane.terminalId) !== identity.terminalId
+    )
+      throw new Error("HERDR_IDENTITY_MISMATCH");
+    const workspace = snapshot.workspaces.find(
+      (item) => item.id === pane.workspaceId,
+    );
+    const tab = snapshot.tabs.find((item) => item.id === pane.tabId);
+    const worktree = snapshot.worktrees.find(
+      (item) =>
+        item.workspaceId === pane.workspaceId && item.rootPaneId === pane.id,
+    );
+    const context: {
+      paneId: string;
+      terminalId: string;
+      workspaceId?: string;
+      tabId?: string;
+      cwd?: string;
+      worktreeId?: string;
+    } = { paneId: pane.id, terminalId: identity.terminalId };
+    if (pane.workspaceId) context.workspaceId = pane.workspaceId;
+    if (pane.tabId) context.tabId = pane.tabId;
+    const cwd = pane.cwd ?? tab?.cwd ?? workspace?.cwd;
+    if (cwd) context.cwd = cwd;
+    if (worktree?.id) context.worktreeId = worktree.id;
+    return context;
+  }
   async adoptRoot(
     agent: Agent,
     identity: {
@@ -64,8 +106,10 @@ export class HerdrService {
       generation?: number;
     },
   ): Promise<void> {
-    await this.#preflight?.();
-    this.#cli.requireMutationCapabilities(["session.snapshot"]);
+    await this.verifyRoot({
+      paneId: identity.paneId,
+      terminalId: identity.terminalId ?? "",
+    });
     const snapshot = await this.#cli.snapshot();
     const pane = snapshot.panes.find((item) => item.id === identity.paneId);
     const occupant = pane?.occupant;

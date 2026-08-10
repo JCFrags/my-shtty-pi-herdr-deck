@@ -51,6 +51,7 @@ export interface Task {
   runIds?: string[];
   resultId?: string;
   timeoutAt?: string;
+  project?: Record<string, unknown>;
 }
 export interface Run {
   id: string;
@@ -59,7 +60,11 @@ export interface Run {
   agentId?: string;
   agentGeneration?: number;
   assignmentId?: string;
+  assignmentDeliveryState?: "pending" | "accepted" | "failed";
+  assignmentConnectionGeneration?: number;
   assignmentGeneration: number;
+  agentCycleId?: string;
+  firstTurnIndex?: number;
   piSessionId?: string;
   terminalId?: string;
   settled: boolean;
@@ -81,12 +86,15 @@ export interface Agent {
   paneId?: string;
   workspaceId?: string;
   tabId?: string;
+  cwd?: string;
+  worktreeId?: string;
   piSessionId?: string;
   connectionGeneration?: number;
   detectedKind?: string;
   coarseStatus?: "idle" | "working" | "blocked" | "done" | "unknown";
   currentRunId?: string;
   currentAssignmentGeneration?: number;
+  lastAdapterSeq?: number;
   tokenDigest?: string;
 }
 export interface ResultRecord {

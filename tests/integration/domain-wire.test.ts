@@ -123,7 +123,19 @@ test("broker domain wire persists correlated result, question, workflow, and rep
     socket: join(runtime, "broker.sock"),
     secret: join(runtime, "secret"),
   };
-  const broker = new Broker(paths);
+  const broker = new Broker(paths, {
+    herdrFactory: async (store) =>
+      ({
+        store,
+        startupReconcile: async () => [],
+        verifyRoot: async (identity: any) => ({
+          paneId: identity.paneId,
+          terminalId: identity.terminalId,
+          workspaceId: "w",
+          cwd: "/fake",
+        }),
+      }) as any,
+  });
   await broker.start();
   try {
     const secret = await readFile(paths.secret, "utf8").then((value) =>
@@ -133,8 +145,18 @@ test("broker domain wire persists correlated result, question, workflow, and rep
     const registered = resultOf(
       await request(socket, "agent.register_adopted", {
         adapterVersion: "0.1.0",
-        herdr: { paneId: "pane", terminalId: "terminal" },
-        pi: { sessionId: "session", capabilities: {}, state: {} },
+        herdr: {
+          paneId: "pane",
+          terminalId: "terminal",
+          detectedKind: "pi",
+          name: "primary",
+        },
+        pi: {
+          sessionId: "session",
+          sessionName: "primary",
+          capabilities: {},
+          state: {},
+        },
       }),
     );
     const workflow = resultOf(
@@ -209,7 +231,7 @@ test("broker domain wire persists correlated result, question, workflow, and rep
     await broker.stop();
     const restarted = new Broker(paths);
     await restarted.start();
-    socket = await connect(paths, secret);
+    socket = await connect(paths, secret, "human");
     const replay = resultOf(
       await request(socket, "events.subscribe", {
         fromSeq: 0,

@@ -12,7 +12,7 @@ import {
   readPrivateRegular,
 } from "../shared/private-fs.js";
 import { EventStore } from "../state/event-store.js";
-import { createId } from "../shared/ids.js";
+import { createId, isEntityId } from "../shared/ids.js";
 import { canonicalJson, sha256 } from "../shared/canonical-json.js";
 import { NdjsonDecoder, encodeFrame } from "../shared/protocol/codec.js";
 import {
@@ -42,6 +42,13 @@ import {
   payloadHash,
 } from "../results/validation.js";
 import type { ResultBody, QuestionBody } from "../results/types.js";
+import { DeterministicScheduler } from "../scheduler/scheduler.js";
+import { planAdmission } from "../scheduler/admission.js";
+import {
+  workflowReadiness,
+  fanInWorkflow,
+} from "../scheduler/workflow-engine.js";
+import type { SchedulerTask } from "../scheduler/types.js";
 import {
   planWorkflow,
   validateWorkflow,
@@ -60,7 +67,40 @@ interface ServerResponse {
   result?: unknown;
   error?: { code: string; message: string };
 }
+function validateServerResponse(value: unknown): ServerResponse {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("Invalid server response.");
+  const frame = value as Record<string, unknown>;
+  if (
+    frame.v !== 1 ||
+    frame.type !== "server_response" ||
+    !isEntityId(frame.id, "evt") ||
+    typeof frame.ok !== "boolean"
+  )
+    throw new Error("Invalid server response.");
+  if (frame.ok) {
+    if (!exactKeys(frame, ["v", "type", "id", "ok", "result"]))
+      throw new Error("Invalid server response.");
+  } else {
+    if (
+      !exactKeys(frame, ["v", "type", "id", "ok", "error"]) ||
+      !frame.error ||
+      typeof frame.error !== "object" ||
+      Array.isArray(frame.error)
+    )
+      throw new Error("Invalid server response.");
+    const error = frame.error as Record<string, unknown>;
+    if (
+      !exactKeys(error, ["code", "message"]) ||
+      !safeText(error.code, 64) ||
+      !safeText(error.message, 256)
+    )
+      throw new Error("Invalid server response.");
+  }
+  return frame as unknown as ServerResponse;
+}
 interface PendingServerRequest {
+  method: string;
   resolve(value: unknown): void;
   reject(error: Error): void;
   timer: NodeJS.Timeout;
@@ -69,6 +109,9 @@ interface Client {
   socket: Socket;
   principal?: Principal;
   subscribed: boolean;
+  initializing?: boolean;
+  subscriptionCutoff?: number;
+  subscriptionBuffer?: Map<number, import("../state/types.js").StoredEvent>;
   subscriptionId?: string;
   eventFilter?: SubscriptionFilter;
   slowClosed?: boolean;
@@ -90,6 +133,22 @@ function safeText(value: unknown, max = 4096): value is string {
     value.length > 0 &&
     value.length <= max &&
     !/[\u0000-\u001f\u007f]/u.test(value)
+  );
+}
+function safeBoundedRecord(value: unknown): value is Record<string, unknown> {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.keys(value as object).length <= 64 &&
+    Object.entries(value as Record<string, unknown>).every(
+      ([key, item]) =>
+        safeText(key, 128) &&
+        (item === null ||
+          typeof item === "boolean" ||
+          (typeof item === "number" && Number.isFinite(item)) ||
+          (typeof item === "string" && safeText(item, 1024))),
+    )
   );
 }
 function isTerminal(value: unknown): boolean {
@@ -249,6 +308,7 @@ export class Broker {
   #server: Server | undefined;
   #socketIdentity: SocketIdentity | undefined;
   #mutationTail: Promise<void> = Promise.resolve();
+  #advanceTail: Promise<void> = Promise.resolve();
   #lock: BrokerLock;
   #secret: string;
   #clients = new Set<Client>();
@@ -261,6 +321,35 @@ export class Broker {
     this.#lock = new BrokerLock(paths.lock, paths.socket);
     this.#secret = "";
     this.store = new EventStore(paths.events);
+    this.store.onAppend((event) => {
+      for (const subscriber of this.#clients) {
+        if (
+          (subscriber.subscribed || subscriber.initializing) &&
+          this.#eventVisible(subscriber.principal!, event) &&
+          this.#matchesFilter(subscriber.eventFilter, event)
+        ) {
+          if (
+            subscriber.initializing &&
+            event.seq > (subscriber.subscriptionCutoff ?? 0)
+          ) {
+            const buffer = subscriber.subscriptionBuffer ?? new Map();
+            buffer.set(event.seq, event);
+            subscriber.subscriptionBuffer = buffer;
+            if (
+              buffer.size > 256 ||
+              [...buffer.values()].reduce(
+                (total, item) =>
+                  total + Buffer.byteLength(JSON.stringify(item)),
+                0,
+              ) > 1_048_576
+            ) {
+              subscriber.slowClosed = true;
+              subscriber.socket.destroy();
+            }
+          } else if (subscriber.subscribed) this.#sendEvent(subscriber, event);
+        }
+      }
+    });
     this.snapshotStore = new SnapshotStore(paths.snapshot);
     if (options.herdr) {
       if (options.herdr.store !== this.store)
@@ -296,6 +385,16 @@ export class Broker {
       if (this.#herdrFactory)
         this.#herdr = await this.#herdrFactory(this.store, this.paths);
       if (this.#herdr) await this.#herdr.startupReconcile();
+      for (const workflow of Object.values(this.store.state.workflows))
+        if (
+          !["succeeded", "failed", "blocked", "cancelled"].includes(
+            workflow.state,
+          )
+        )
+          await this.#advanceWorkflow(workflow.id, {
+            principalId: "prn_00000000000000000000000000",
+            kind: "system",
+          });
       this.#server = createServer((socket) => this.#connect(socket));
       await new Promise<void>((resolve, reject) =>
         this.#server
@@ -409,16 +508,7 @@ export class Broker {
           ? (value as Record<string, unknown>).type
           : undefined;
       if (type === "hello") return validateHello(value);
-      if (type === "server_response") {
-        const frame = value as Record<string, unknown>;
-        if (
-          frame.v !== 1 ||
-          typeof frame.id !== "string" ||
-          typeof frame.ok !== "boolean"
-        )
-          throw new Error("Invalid server response.");
-        return frame as unknown as ServerResponse;
-      }
+      if (type === "server_response") return validateServerResponse(value);
       return validateRequest(value);
     });
     socket.on("data", (data) => {
@@ -431,18 +521,37 @@ export class Broker {
           item.value.type === "server_response"
         ) {
           const pending = client.serverRequests.get(item.value.id);
-          if (pending) {
-            client.serverRequests.delete(item.value.id);
-            clearTimeout(pending.timer);
-            if (item.value.ok) pending.resolve(item.value.result);
-            else
+          if (!pending) {
+            this.#queueAudit("unknown_or_late_server_response");
+            continue;
+          }
+          client.serverRequests.delete(item.value.id);
+          clearTimeout(pending.timer);
+          if (item.value.ok) {
+            if (
+              pending.method === "assignment.deliver" &&
+              (!item.value.result ||
+                typeof item.value.result !== "object" ||
+                Array.isArray(item.value.result) ||
+                Object.keys(item.value.result as object).length !== 1 ||
+                !["accepted", "rejected", "already_accepted"].includes(
+                  String((item.value.result as Record<string, unknown>).status),
+                ))
+            ) {
               pending.reject(
                 new OrchestratorError(
                   "PI_COMMAND_REJECTED",
-                  item.value.error?.message ?? "Child rejected the request.",
+                  "Adapter response shape was invalid.",
                 ),
               );
-          }
+            } else pending.resolve(item.value.result);
+          } else
+            pending.reject(
+              new OrchestratorError(
+                "PI_COMMAND_REJECTED",
+                "The managed adapter rejected the request.",
+              ),
+            );
         } else queued.push(item);
       }
       client.processing = client.processing
@@ -904,10 +1013,15 @@ export class Broker {
         };
         const currentSeq = this.store.state.lastEventSeq;
         const replayStart = includeSnapshot ? currentSeq : Number(from);
+        client.initializing = true;
+        client.subscriptionCutoff = currentSeq;
+        client.subscriptionBuffer = new Map();
         replayEvents = (await this.store.readEventsFrom(replayStart)).filter(
-          (event) => this.#matchesFilter(filter, event),
+          (event) =>
+            this.#eventVisible(principal, event) &&
+            this.#matchesFilter(filter, event),
         );
-        client.subscribed = true;
+        client.subscribed = false;
         client.subscriptionId = subscriptionId();
         client.eventFilter = filter;
         result = {
@@ -916,11 +1030,26 @@ export class Broker {
             ? {
                 snapshot: {
                   seq: currentSeq,
-                  agents: Object.values(this.store.state.agents),
-                  tasks: Object.values(this.store.state.tasks),
-                  workflows: Object.values(this.store.state.workflows),
-                  questions: Object.values(this.store.state.questions ?? {}),
-                  results: Object.values(this.store.state.results ?? {}),
+                  agents: Object.values(this.store.state.agents).filter(
+                    (item) => this.#canAccessAgentSync(principal, item.id),
+                  ),
+                  tasks: Object.values(this.store.state.tasks).filter((item) =>
+                    this.#canAccessTaskSync(principal, item.id),
+                  ),
+                  workflows: Object.values(this.store.state.workflows).filter(
+                    (item) =>
+                      item.taskIds.some((taskId) =>
+                        this.#canAccessTaskSync(principal, taskId),
+                      ),
+                  ),
+                  questions: Object.values(
+                    this.store.state.questions ?? {},
+                  ).filter((item) =>
+                    this.#canAccessAgentSync(principal, item.agentId),
+                  ),
+                  results: Object.values(this.store.state.results ?? {}).filter(
+                    (item) => this.#canAccessTaskSync(principal, item.taskId),
+                  ),
                 },
               }
             : {}),
@@ -963,7 +1092,12 @@ export class Broker {
             "PERMISSION_DENIED",
             "This parent connection cannot register another adopted agent.",
           );
+        const registrationKeys =
+          request.method === "agent.register_adopted"
+            ? ["adapterVersion", "herdr", "pi"]
+            : ["agentId", "generation", "adapterVersion", "herdr", "pi"];
         if (
+          !exactKeys(p, registrationKeys) ||
           !safeText(p.adapterVersion, 64) ||
           !p.herdr ||
           typeof p.herdr !== "object" ||
@@ -976,7 +1110,35 @@ export class Broker {
           );
         const herdr = p.herdr as Record<string, unknown>,
           pi = p.pi as Record<string, unknown>;
-        const agentId: string = (
+        if (
+          !Object.keys(herdr).every((key) =>
+            ["paneId", "terminalId", "detectedKind", "name"].includes(key),
+          ) ||
+          !Object.keys(pi).every((key) =>
+            ["sessionId", "sessionName", "capabilities", "state"].includes(key),
+          ) ||
+          !safeText(herdr.detectedKind, 32) ||
+          herdr.detectedKind !== "pi" ||
+          (herdr.name !== undefined && !safeText(herdr.name, 256)) ||
+          !safeBoundedRecord(pi.capabilities) ||
+          !safeBoundedRecord(pi.state) ||
+          (pi.sessionName !== undefined && !safeText(pi.sessionName, 256))
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Pi registration fields are invalid.",
+          );
+        if (
+          request.method === "agent.register_managed" &&
+          (!isEntityId(p.agentId, "agt") ||
+            !Number.isSafeInteger(p.generation) ||
+            Number(p.generation) < 1)
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Managed registration identity is invalid.",
+          );
+        let agentId: string = (
           request.method === "agent.register_managed"
             ? (principal.agentId ?? p.agentId)
             : createId("agt")
@@ -984,13 +1146,47 @@ export class Broker {
         if (
           !safeText(agentId) ||
           !safeText(herdr.paneId) ||
+          !safeText(herdr.terminalId) ||
           !safeText(pi.sessionId)
         )
           throw new OrchestratorError(
             "INVALID_REQUEST",
             "Pi identity is invalid.",
           );
-        const existing = this.store.state.agents[agentId];
+        let existing = this.store.state.agents[agentId];
+        if (request.method === "agent.register_adopted") {
+          const roots = Object.values(this.store.state.agents).filter(
+            (candidate) =>
+              !candidate.managed &&
+              candidate.paneId === herdr.paneId &&
+              candidate.terminalId === herdr.terminalId,
+          );
+          if (roots.length > 1)
+            throw new OrchestratorError(
+              "AGENT_REPLACED",
+              "Adopted root claim is ambiguous.",
+            );
+          existing = roots[0];
+          if (existing && existing.piSessionId !== pi.sessionId)
+            throw new OrchestratorError(
+              "AGENT_REPLACED",
+              "Pi session does not match the adopted root.",
+            );
+          if (
+            existing &&
+            [...this.#clients].some(
+              (item) =>
+                item !== client &&
+                item.adoptedRegistration &&
+                item.principal?.agentId === existing!.id,
+            )
+          )
+            throw new OrchestratorError(
+              "AGENT_REPLACED",
+              "The adopted root is already active.",
+            );
+          if (existing) agentId = existing.id;
+        }
         if (
           existing &&
           existing.piSessionId !== undefined &&
@@ -1000,6 +1196,36 @@ export class Broker {
             "AGENT_REPLACED",
             "Pi session does not match the current agent generation.",
           );
+        const adoptedReconnect =
+          request.method === "agent.register_adopted" && Boolean(existing);
+        let adoptedContext:
+          | {
+              paneId: string;
+              terminalId: string;
+              workspaceId?: string;
+              tabId?: string;
+              cwd?: string;
+              worktreeId?: string;
+            }
+          | undefined;
+        if (request.method === "agent.register_adopted") {
+          if (!this.#herdr || typeof this.#herdr.verifyRoot !== "function")
+            throw new OrchestratorError(
+              "HERDR_UNAVAILABLE",
+              "Adopted registration requires Herdr verification.",
+            );
+          try {
+            adoptedContext = await this.#herdr.verifyRoot({
+              paneId: herdr.paneId as string,
+              terminalId: herdr.terminalId as string,
+            });
+          } catch {
+            throw new OrchestratorError(
+              "AGENT_REPLACED",
+              "Herdr occupant verification failed.",
+            );
+          }
+        }
         if (!existing) {
           const event = await this.store.append({
             type: "agent.registered",
@@ -1014,6 +1240,14 @@ export class Broker {
                 ? { terminalId: herdr.terminalId }
                 : {}),
               piSessionId: pi.sessionId,
+              ...(adoptedContext?.workspaceId
+                ? { workspaceId: adoptedContext.workspaceId }
+                : {}),
+              ...(adoptedContext?.tabId ? { tabId: adoptedContext.tabId } : {}),
+              ...(adoptedContext?.cwd ? { cwd: adoptedContext.cwd } : {}),
+              ...(adoptedContext?.worktreeId
+                ? { worktreeId: adoptedContext.worktreeId }
+                : {}),
               ...(safeText(p.profileId) ? { profileId: p.profileId } : {}),
               ...(safeText(p.parentAgentId)
                 ? { parentAgentId: p.parentAgentId }
@@ -1023,6 +1257,56 @@ export class Broker {
           committedEvent = event;
         }
         if (request.method === "agent.register_adopted") {
+          try {
+            adoptedContext = await this.#herdr!.verifyRoot({
+              paneId: herdr.paneId as string,
+              terminalId: herdr.terminalId as string,
+            });
+          } catch {
+            await this.store
+              .append({
+                type: "agent.state_changed",
+                actor: { principalId: principal.id, kind: principal.kind },
+                entityRefs: { agentId },
+                payload: {
+                  agentId,
+                  state: "replaced",
+                  reason: "HERDR_IDENTITY_MISMATCH",
+                },
+              })
+              .catch(() => undefined);
+            throw new OrchestratorError(
+              "AGENT_REPLACED",
+              "Herdr occupant changed during adoption.",
+            );
+          }
+          if (adoptedReconnect) {
+            const current = this.store.state.agents[agentId]!;
+            await this.store.append({
+              type: "agent.state_changed",
+              actor: { principalId: principal.id, kind: principal.kind },
+              entityRefs: { agentId },
+              payload: {
+                agentId,
+                state: "idle",
+                paneId: herdr.paneId,
+                terminalId: herdr.terminalId,
+                piSessionId: pi.sessionId,
+                ...(adoptedContext?.workspaceId
+                  ? { workspaceId: adoptedContext.workspaceId }
+                  : {}),
+                ...(adoptedContext?.tabId
+                  ? { tabId: adoptedContext.tabId }
+                  : {}),
+                ...(adoptedContext?.cwd ? { cwd: adoptedContext.cwd } : {}),
+                ...(adoptedContext?.worktreeId
+                  ? { worktreeId: adoptedContext.worktreeId }
+                  : {}),
+                connectionGeneration: (current.connectionGeneration ?? 0) + 1,
+                lastAdapterSeq: 0,
+              },
+            });
+          }
           principal.agentId = agentId;
           principal.generation =
             this.store.state.agents[agentId]?.generation ?? 1;
@@ -1085,7 +1369,37 @@ export class Broker {
               },
             });
             deferred.push(async () => {
+              const canFinalize = () => {
+                const currentAgent = this.store.state.agents[agentId];
+                const currentRun = this.store.state.runs[run.id];
+                return (
+                  !!currentAgent &&
+                  !!currentRun &&
+                  currentAgent.generation === agentGeneration &&
+                  currentAgent.connectionGeneration === connectionGeneration &&
+                  currentAgent.piSessionId === pi.sessionId &&
+                  currentAgent.currentRunId === run.id &&
+                  currentRun.agentId === agentId &&
+                  currentRun.assignmentId === assignmentId &&
+                  currentRun.assignmentConnectionGeneration ===
+                    connectionGeneration &&
+                  currentRun.assignmentDeliveryState === "pending" &&
+                  ![
+                    "succeeded",
+                    "failed",
+                    "cancelled",
+                    "timed_out",
+                    "lost",
+                    "settled",
+                  ].includes(currentRun.state)
+                );
+              };
               try {
+                if (!canFinalize())
+                  throw new OrchestratorError(
+                    "AGENT_REPLACED",
+                    "Assignment delivery is stale.",
+                  );
                 const accepted = await this.#sendAdapterRequest(
                   agentId,
                   "assignment.deliver",
@@ -1096,7 +1410,6 @@ export class Broker {
                       runId: run.id,
                       agentId,
                       generation: agentGeneration,
-                      assignmentGeneration: run.assignmentGeneration,
                       objective:
                         this.store.state.tasks[run.taskId]?.objective ?? "",
                       constraints:
@@ -1120,7 +1433,8 @@ export class Broker {
                   typeof accepted === "object" &&
                   ["accepted", "already_accepted"].includes(
                     String((accepted as Record<string, unknown>).status),
-                  )
+                  ) &&
+                  canFinalize()
                 )
                   await this.store.append({
                     type: "assignment.accepted",
@@ -1138,7 +1452,8 @@ export class Broker {
                       deliveryState: "accepted",
                     },
                   });
-              } catch (error) {
+              } catch {
+                if (!canFinalize()) return;
                 await this.store
                   .append({
                     type: "assignment.delivery_failed",
@@ -1151,10 +1466,7 @@ export class Broker {
                       agentId,
                       generation: agentGeneration,
                       assignmentGeneration: run.assignmentGeneration,
-                      reason:
-                        error instanceof Error
-                          ? error.message
-                          : "delivery_failed",
+                      reason: "DELIVERY_RETRYABLE",
                       retryable: true,
                     },
                   })
@@ -1179,11 +1491,28 @@ export class Broker {
             "AGENT_NOT_FOUND",
             "Agent was not found.",
           );
-        const p = request.params,
-          state =
-            p.state && typeof p.state === "object"
-              ? (p.state as Record<string, unknown>)
-              : {};
+        const p = request.params;
+        if (
+          principal.kind !== "pi_child" ||
+          !exactKeys(p, ["agentId", "adapterSeq", "state"]) ||
+          p.agentId !== agentId ||
+          !Number.isSafeInteger(p.adapterSeq) ||
+          Number(p.adapterSeq) <= 0 ||
+          !safeBoundedRecord(p.state)
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Heartbeat sequence or state is invalid.",
+          );
+        if (
+          (this.store.state.agents[agentId]!.lastAdapterSeq ?? 0) >=
+          Number(p.adapterSeq)
+        )
+          throw new OrchestratorError(
+            "RUN_MISMATCH",
+            "Heartbeat sequence is stale.",
+          );
+        const state = p.state as Record<string, unknown>;
         committedEvent = await this.store.append({
           type: "agent.heartbeat",
           actor: { principalId: principal.id, kind: principal.kind },
@@ -1196,6 +1525,7 @@ export class Broker {
             ...(safeText(state.activity) ? { state: state.activity } : {}),
             connectionGeneration:
               this.store.state.agents[agentId]!.connectionGeneration ?? 1,
+            adapterSeq: p.adapterSeq,
           },
         });
         result = { accepted: true };
@@ -1218,6 +1548,30 @@ export class Broker {
           principal.agentId !== p.agentId ||
           !Number.isSafeInteger(p.connectionGeneration) ||
           !Number.isSafeInteger(p.adapterSeq) ||
+          Number(p.adapterSeq) <= 0 ||
+          !p.safeData ||
+          typeof p.safeData !== "object" ||
+          Array.isArray(p.safeData) ||
+          !exactKeys(p.safeData as Record<string, unknown>, [
+            "toolName",
+            "contextPercent",
+          ]) ||
+          !(
+            (p.safeData as Record<string, unknown>).toolName === null ||
+            safeText((p.safeData as Record<string, unknown>).toolName, 128)
+          ) ||
+          !(
+            (p.safeData as Record<string, unknown>).contextPercent === null ||
+            (typeof (p.safeData as Record<string, unknown>).contextPercent ===
+              "number" &&
+              Number.isFinite(
+                (p.safeData as Record<string, unknown>).contextPercent,
+              ) &&
+              Number((p.safeData as Record<string, unknown>).contextPercent) >=
+                0 &&
+              Number((p.safeData as Record<string, unknown>).contextPercent) <=
+                100)
+          ) ||
           !safeText(p.event, 64) ||
           !safeText(p.piSessionId, 256)
         )
@@ -1237,18 +1591,20 @@ export class Broker {
             "AGENT_REPLACED",
             "Lifecycle identity is stale.",
           );
+        if ((agent.lastAdapterSeq ?? 0) >= Number(p.adapterSeq))
+          throw new OrchestratorError(
+            "RUN_MISMATCH",
+            "Lifecycle sequence is stale.",
+          );
         const assignment =
           p.assignment &&
           typeof p.assignment === "object" &&
           !Array.isArray(p.assignment)
             ? (p.assignment as Record<string, unknown>)
             : undefined;
-        const progressEvent = [
-          "before_agent_start",
-          "agent_start",
-          "turn_start",
-          "agent_settled",
-        ].includes(p.event as string);
+        const progressEvent = ["turn_start", "agent_settled"].includes(
+          p.event as string,
+        );
         if (
           !assignment ||
           Object.keys(assignment).some(
@@ -1273,27 +1629,23 @@ export class Broker {
           });
           result = { accepted: false, manual: true, state: "idle" };
         } else {
-          const assignmentId = assignment.assignmentId;
-          const runId = assignment.runId;
           if (
-            !safeText(assignmentId) ||
-            !safeText(assignment.taskId) ||
-            !safeText(runId) ||
-            !Number.isSafeInteger(assignment.generation) ||
-            !Number.isSafeInteger(assignment.assignmentGeneration)
+            !exactKeys(assignment, ["assignmentId", "generation"]) ||
+            !safeText(assignment.assignmentId) ||
+            !Number.isSafeInteger(assignment.generation)
           )
             throw new OrchestratorError(
               "RUN_MISMATCH",
               "Lifecycle assignment correlation is invalid.",
             );
-          const run = this.store.state.runs[runId];
+          const assignmentId = assignment.assignmentId as string;
+          const runId = agent.currentRunId;
+          const run = runId ? this.store.state.runs[runId] : undefined;
           if (
             !run ||
             run.agentId !== agent.id ||
-            run.taskId !== assignment.taskId ||
             run.assignmentId !== assignmentId ||
-            assignment.generation !== agent.generation ||
-            assignment.assignmentGeneration !== run.assignmentGeneration
+            assignment.generation !== run.assignmentGeneration
           )
             throw new OrchestratorError(
               "RUN_MISMATCH",
@@ -1303,6 +1655,27 @@ export class Broker {
             Number.isSafeInteger(p.turnIndex) &&
             Number(p.turnIndex) >= 0 &&
             safeText(p.agentCycleId, 256);
+          if (progressEvent && run.assignmentDeliveryState !== "accepted")
+            throw new OrchestratorError(
+              "RUN_MISMATCH",
+              "Assignment was not accepted.",
+            );
+          if (
+            p.event === "agent_settled" &&
+            (run.state !== "working" ||
+              run.agentCycleId !== p.agentCycleId ||
+              run.firstTurnIndex === undefined ||
+              Number(p.turnIndex) < run.firstTurnIndex)
+          )
+            throw new OrchestratorError(
+              "RUN_MISMATCH",
+              "Settlement lifecycle is stale.",
+            );
+          if (p.event === "turn_start" && run.state === "working")
+            throw new OrchestratorError(
+              "RUN_MISMATCH",
+              "Run start lifecycle is duplicated.",
+            );
           if (progressEvent && !exactTurn) {
             committedEvent = await this.store.append({
               type: "agent.state_changed",
@@ -1333,6 +1706,8 @@ export class Broker {
                 turnIndex: p.turnIndex,
                 agentCycleId: p.agentCycleId,
                 terminalError: false,
+                adapterSeq: p.adapterSeq,
+                connectionGeneration: p.connectionGeneration,
               },
             });
             result = {
@@ -1340,11 +1715,13 @@ export class Broker {
               runId: run.id,
               state: this.store.state.runs[run.id]?.state,
             };
-          } else if (
-            ["before_agent_start", "agent_start", "turn_start"].includes(
-              p.event as string,
-            )
-          ) {
+            deferred.push(async () =>
+              this.#advanceWorkflow(
+                this.store.state.tasks[run.taskId]?.workflowId ?? "",
+                { principalId: principal.id, kind: principal.kind },
+              ),
+            );
+          } else if (p.event === "turn_start") {
             committedEvent = await this.store.append({
               type: "run.pi_started",
               actor: { principalId: principal.id, kind: principal.kind },
@@ -1360,6 +1737,8 @@ export class Broker {
                 state: "working",
                 turnIndex: p.turnIndex,
                 agentCycleId: p.agentCycleId,
+                adapterSeq: p.adapterSeq,
+                connectionGeneration: p.connectionGeneration,
               },
             });
             result = {
@@ -1663,6 +2042,13 @@ export class Broker {
             resultId: id,
             state: run.settled ? body.status : "result_pending",
           };
+          if (run.settled)
+            deferred.push(async () =>
+              this.#advanceWorkflow(
+                this.store.state.tasks[run.taskId]?.workflowId ?? "",
+                { principalId: principal.id, kind: principal.kind },
+              ),
+            );
         }
       } else if (request.method === "result.get") {
         requirePermission(principal, "read:results");
@@ -1947,6 +2333,13 @@ export class Broker {
           },
         });
         result = { taskId: task.id, state: "cancelled" };
+        if (task.workflowId)
+          deferred.push(async () =>
+            this.#advanceWorkflow(task.workflowId!, {
+              principalId: principal.id,
+              kind: principal.kind,
+            }),
+          );
       } else if (request.method === "task.collect") {
         requirePermission(principal, "read:results");
         if (
@@ -2066,8 +2459,8 @@ export class Broker {
                 "isolation",
                 "budget",
                 "parentAgentId",
+                "wait",
                 "dryRun",
-                "objective",
               ]
             : [
                 "mode",
@@ -2109,6 +2502,38 @@ export class Broker {
           throw new OrchestratorError(
             "PERMISSION_DENIED",
             "Parent is outside the authenticated scope.",
+          );
+        const parentAgent = this.store.state.agents[parentAgentId];
+        if (
+          !parentAgent ||
+          !safeText(parentAgent.cwd) ||
+          !safeText(parentAgent.workspaceId)
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Authenticated parent project context is unavailable.",
+          );
+        const inheritedProject: Record<string, unknown> = {
+          cwd: parentAgent.cwd,
+          workspaceId: parentAgent.workspaceId,
+          ...(parentAgent.worktreeId
+            ? { worktreeId: parentAgent.worktreeId }
+            : {}),
+          isolation: "shared-readonly",
+        };
+        if (
+          request.method === "agent.spawn" &&
+          p.project !== undefined &&
+          (!p.project ||
+            typeof p.project !== "object" ||
+            (p.project as Record<string, unknown>).cwd !==
+              inheritedProject.cwd ||
+            (p.project as Record<string, unknown>).workspaceId !==
+              inheritedProject.workspaceId)
+        )
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "Spawn project is outside the authenticated parent context.",
           );
         const dryRun = p.dryRun === true;
         const steps =
@@ -2181,6 +2606,90 @@ export class Broker {
             ? ((raw as Record<string, unknown>).dependsOn as unknown[])
             : [],
         }));
+        const taskIds = planned.map(() => createId("tsk"));
+        const plannedTaskIds = new Map(
+          planned.map((step, index) => [step.key, taskIds[index]!]),
+        );
+        try {
+          validateWorkflow({
+            version: 1,
+            id: workflowId,
+            name: safeText(p.title, 256) ? p.title : "Delegation",
+            description: "",
+            mode: (request.method === "delegate.execute" &&
+            [
+              "parallel",
+              "chain",
+              "dag",
+              "single",
+              "implement_review_fix",
+            ].includes(String(p.mode))
+              ? p.mode
+              : "parallel") as WorkflowDefinition["mode"],
+            failureMode:
+              p.failureMode === "fail_fast" ? "fail_fast" : "collect_all",
+            maxCorrectionLoops: 0,
+            steps: planned.map((step) => ({
+              key: step.key,
+              profileId: step.profileId,
+              title: step.title,
+              objectiveTemplate: step.objective,
+              constraints: step.constraints.filter(
+                (item): item is string => typeof item === "string",
+              ),
+              dependsOn: step.dependsOn.filter(
+                (item): item is string => typeof item === "string",
+              ),
+              resultProjection: [],
+              isolationMode: "shared-readonly",
+            })),
+          });
+        } catch (error) {
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            error instanceof Error && error.message === "WORKFLOW_CYCLE"
+              ? "Delegation dependencies contain a cycle."
+              : "Delegation workflow is invalid.",
+          );
+        }
+        const scheduler = new DeterministicScheduler();
+        const schedulerTasks = new Map<string, SchedulerTask>(
+          planned.map((step, index) => {
+            const id = plannedTaskIds.get(step.key)!;
+            return [
+              id,
+              {
+                id,
+                parentAgentId,
+                profileId: step.profileId,
+                priority: "normal",
+                queuedAt: index,
+                depth: 1,
+                dependencies: step.dependsOn
+                  .filter((item): item is string => typeof item === "string")
+                  .map((key) => ({
+                    taskId: plannedTaskIds.get(key)!,
+                    requirement: "succeeded" as const,
+                  })),
+                state: "queued" as const,
+              },
+            ];
+          }),
+        );
+        if (
+          Object.values(this.store.state.tasks).filter(
+            (task) => task.state === "queued",
+          ).length +
+            planned.length >
+          scheduler.limits.maxQueuedTasks
+        )
+          throw new OrchestratorError(
+            "LIMIT_EXCEEDED",
+            "The global task queue is full.",
+          );
+        const admitted = new Set(
+          planAdmission(scheduler, schedulerTasks).admittedTaskIds,
+        );
         if (dryRun) {
           result = {
             workflowId,
@@ -2194,7 +2703,6 @@ export class Broker {
             })),
           };
         } else {
-          const taskIds = planned.map(() => createId("tsk"));
           committedEvent = await this.store.append({
             type: "workflow.created",
             actor: { principalId: principal.id, kind: principal.kind },
@@ -2228,6 +2736,7 @@ export class Broker {
                 objective: step.objective,
                 createdAt: new Date().toISOString(),
                 parentAgentId,
+                workflowId,
                 profileId: step.profileId,
                 dependencies: step.dependsOn
                   .map((key) =>
@@ -2235,8 +2744,13 @@ export class Broker {
                   )
                   .filter(Boolean)
                   .map((candidate) => taskIds[planned.indexOf(candidate!)]),
+                project: inheritedProject,
               },
             });
+            if (!admitted.has(taskId)) {
+              spawned.push({ key: step.key, taskId, state: "queued" });
+              continue;
+            }
             await this.store.append({
               type: "agent.registered",
               actor: { principalId: principal.id, kind: principal.kind },
@@ -2274,18 +2788,21 @@ export class Broker {
                 "HERDR_UNAVAILABLE",
                 "Injected Herdr service is unavailable.",
               );
-            const provisionParams =
-              p.project && typeof p.project === "object"
-                ? (p.project as Record<string, unknown>)
-                : {};
+            const provisionParams = inheritedProject;
+            if (
+              !safeText(provisionParams.workspaceId) ||
+              !safeText(provisionParams.cwd)
+            )
+              throw new OrchestratorError(
+                "INVALID_REQUEST",
+                "A trusted project context is required.",
+              );
             const provisioned = await this.#herdr.provision({
               agentId,
               parentAgentId,
               role: step.profileId,
-              workspaceId: safeText(provisionParams.workspaceId)
-                ? provisionParams.workspaceId
-                : "",
-              cwd: safeText(provisionParams.cwd) ? provisionParams.cwd : ".",
+              workspaceId: provisionParams.workspaceId,
+              cwd: provisionParams.cwd,
               profileId: step.profileId,
               isolation:
                 provisionParams.isolation === "worktree"
@@ -2795,13 +3312,15 @@ export class Broker {
       this.#writeFrame(client, response);
       for (const action of deferred) void action().catch(() => undefined);
       for (const event of replayEvents) this.#sendEvent(client, event);
-      if (committedEvent)
-        for (const subscriber of this.#clients)
-          if (
-            subscriber.subscribed &&
-            this.#matchesFilter(subscriber.eventFilter, committedEvent)
-          )
-            this.#sendEvent(subscriber, committedEvent);
+      if (client.initializing) {
+        for (const event of [
+          ...(client.subscriptionBuffer?.values() ?? []),
+        ].sort((a, b) => a.seq - b.seq))
+          this.#sendEvent(client, event);
+        client.subscriptionBuffer?.clear();
+        client.initializing = false;
+        client.subscribed = true;
+      }
     } catch (error) {
       const typed =
         error instanceof OrchestratorError
@@ -2823,12 +3342,6 @@ export class Broker {
           await this.snapshotStore
             .write(this.store.state, this.#secret)
             .catch(() => undefined);
-          for (const subscriber of this.#clients)
-            if (
-              subscriber.subscribed &&
-              this.#matchesFilter(subscriber.eventFilter, denied)
-            )
-              this.#sendEvent(subscriber, denied);
         }
       }
       this.#writeFrame(client, {
@@ -2845,42 +3358,95 @@ export class Broker {
       });
     }
   }
-  async #isDescendant(
+  #isDescendantSync(
     parentAgentId: string | undefined,
     targetAgentId: string,
-  ): Promise<boolean> {
+  ): boolean {
     if (!parentAgentId) return false;
     let current: string | undefined = targetAgentId;
+    const seen = new Set<string>();
     for (let depth = 0; depth <= 4 && current; depth++) {
       if (current === parentAgentId) return true;
+      if (seen.has(current)) return false;
+      seen.add(current);
       current = this.store.state.agents[current]?.parentAgentId;
     }
     return false;
   }
+  async #isDescendant(
+    parentAgentId: string | undefined,
+    targetAgentId: string,
+  ): Promise<boolean> {
+    return this.#isDescendantSync(parentAgentId, targetAgentId);
+  }
   #operator(principal: Principal): boolean {
     return principal.kind !== "pi_parent" && principal.kind !== "pi_child";
+  }
+  #canAccessAgentSync(principal: Principal, agentId: string): boolean {
+    return (
+      this.#operator(principal) ||
+      principal.agentId === agentId ||
+      this.#isDescendantSync(principal.agentId, agentId)
+    );
+  }
+  #canAccessTaskSync(principal: Principal, taskId: string): boolean {
+    if (this.#operator(principal)) return true;
+    const task = this.store.state.tasks[taskId];
+    if (!task) return false;
+    return (
+      principal.agentId === task.parentAgentId ||
+      (!!task.assignedAgentId &&
+        this.#isDescendantSync(principal.agentId, task.assignedAgentId))
+    );
+  }
+  #eventVisible(
+    principal: Principal,
+    event: import("../state/types.js").StoredEvent,
+  ): boolean {
+    if (this.#operator(principal)) return true;
+    if (event.type.startsWith("audit.")) return false;
+    const refs = event.entityRefs ?? {};
+    if (refs.agentId) return this.#canAccessAgentSync(principal, refs.agentId);
+    if (refs.taskId) return this.#canAccessTaskSync(principal, refs.taskId);
+    if (refs.runId) {
+      const run = this.store.state.runs[refs.runId];
+      return !!run?.agentId && this.#canAccessAgentSync(principal, run.agentId);
+    }
+    if (refs.resultId) {
+      const item = this.store.state.results?.[refs.resultId];
+      return !!item && this.#canAccessTaskSync(principal, item.taskId);
+    }
+    if (refs.questionId) {
+      const item = this.store.state.questions?.[refs.questionId];
+      return !!item && this.#canAccessAgentSync(principal, item.agentId);
+    }
+    if (refs.workflowId) {
+      const item = this.store.state.workflows[refs.workflowId];
+      if (
+        item &&
+        item.taskIds.some((taskId) =>
+          this.#canAccessTaskSync(principal, taskId),
+        )
+      )
+        return true;
+      const parentAgentId = (
+        event.payload as Record<string, unknown> | undefined
+      )?.parentAgentId;
+      return (
+        safeText(parentAgentId) &&
+        this.#canAccessAgentSync(principal, parentAgentId)
+      );
+    }
+    return false;
   }
   async #canAccessAgent(
     principal: Principal,
     agentId: string,
   ): Promise<boolean> {
-    return (
-      this.#operator(principal) ||
-      principal.agentId === agentId ||
-      (await this.#isDescendant(principal.agentId, agentId))
-    );
+    return this.#canAccessAgentSync(principal, agentId);
   }
   async #canAccessTask(principal: Principal, taskId: string): Promise<boolean> {
-    if (this.#operator(principal)) return true;
-    const task = this.store.state.tasks[taskId];
-    if (!task) return false;
-    if (principal.agentId === task.parentAgentId) return true;
-    if (
-      task.assignedAgentId &&
-      (await this.#isDescendant(principal.agentId, task.assignedAgentId))
-    )
-      return true;
-    return false;
+    return this.#canAccessTaskSync(principal, taskId);
   }
   async #sendAdapterRequest(
     agentId: string,
@@ -2931,20 +3497,27 @@ export class Broker {
       method,
       params: {
         ...params,
-        expected: {
-          agentId,
-          generation: expected.generation,
-          ...(expected.connectionGeneration !== undefined
-            ? { connectionGeneration: expected.connectionGeneration }
-            : {}),
-          ...(expected.assignmentGeneration !== undefined
-            ? { assignmentGeneration: expected.assignmentGeneration }
-            : {}),
-          ...(expected.piSessionId
-            ? { piSessionId: expected.piSessionId }
-            : {}),
-          ...(expected.runId ? { runId: expected.runId } : {}),
-        },
+        expected:
+          method === "assignment.deliver"
+            ? {
+                piSessionId: expected.piSessionId,
+                activity: "idle",
+                connectionGeneration: expected.connectionGeneration,
+              }
+            : {
+                agentId,
+                generation: expected.generation,
+                ...(expected.connectionGeneration !== undefined
+                  ? { connectionGeneration: expected.connectionGeneration }
+                  : {}),
+                ...(expected.assignmentGeneration !== undefined
+                  ? { assignmentGeneration: expected.assignmentGeneration }
+                  : {}),
+                ...(expected.piSessionId
+                  ? { piSessionId: expected.piSessionId }
+                  : {}),
+                ...(expected.runId ? { runId: expected.runId } : {}),
+              },
       },
     };
     const pending = new Promise<unknown>((resolve, reject) => {
@@ -2959,7 +3532,7 @@ export class Broker {
         );
       }, timeoutMs);
       timer.unref();
-      client.serverRequests.set(id, { resolve, reject, timer });
+      client.serverRequests.set(id, { method, resolve, reject, timer });
     });
     client.socket.write(encodeFrame(frame));
     return await pending;
@@ -2999,7 +3572,7 @@ export class Broker {
     await previous;
     try {
       if (this.store.readOnly) return;
-      const event = await this.store.append({
+      await this.store.append({
         type: "audit.action",
         actor: {
           principalId: "prn_00000000000000000000000000",
@@ -3011,15 +3584,311 @@ export class Broker {
       await this.snapshotStore
         .write(this.store.state, this.#secret)
         .catch(() => undefined);
-      for (const subscriber of this.#clients)
-        if (
-          subscriber.subscribed &&
-          this.#matchesFilter(subscriber.eventFilter, event)
-        )
-          this.#sendEvent(subscriber, event);
     } finally {
       release();
     }
+  }
+  async #advanceWorkflow(
+    workflowId: string,
+    actor: { principalId: string; kind: string },
+  ): Promise<void> {
+    const previous = this.#advanceTail;
+    let release!: () => void;
+    this.#advanceTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      await this.#advanceWorkflowUnlocked(workflowId, actor);
+    } finally {
+      release();
+    }
+  }
+  async #advanceWorkflowUnlocked(
+    workflowId: string,
+    actor: { principalId: string; kind: string },
+  ): Promise<void> {
+    const workflow = this.store.state.workflows[workflowId];
+    if (!workflow) return;
+    const tasks = workflow.taskIds
+      .map((id) => this.store.state.tasks[id])
+      .filter((task): task is NonNullable<typeof task> => Boolean(task));
+    const scheduler = new DeterministicScheduler();
+    const plan = {
+      workflowId,
+      mode: "dag" as const,
+      dryRun: false,
+      steps: tasks.map((task) => ({
+        key: task.id,
+        taskId: task.id,
+        profileId: task.profileId ?? "scout",
+        objective: task.objective,
+        constraints: task.constraints ?? [],
+        dependsOn: task.dependencies ?? [],
+        isolationMode: "shared-readonly" as const,
+      })),
+      estimatedAgentCount: tasks.length,
+      limits: {
+        maxActiveAgents: scheduler.limits.maxActiveAgents,
+        maxTasks: scheduler.limits.maxQueuedTasks,
+      },
+    };
+    const states = new Map<
+      string,
+      {
+        state:
+          | "queued"
+          | "running"
+          | "succeeded"
+          | "failed"
+          | "blocked"
+          | "cancelled"
+          | "timed_out";
+      }
+    >(
+      tasks.map((task) => [
+        task.id,
+        {
+          state: (task.state === "assigned" || task.state === "provisioning"
+            ? "running"
+            : [
+                  "queued",
+                  "running",
+                  "succeeded",
+                  "failed",
+                  "blocked",
+                  "cancelled",
+                  "timed_out",
+                ].includes(task.state)
+              ? task.state
+              : "queued") as
+            | "queued"
+            | "running"
+            | "succeeded"
+            | "failed"
+            | "blocked"
+            | "cancelled"
+            | "timed_out",
+        },
+      ]),
+    );
+    const readiness = workflowReadiness(plan, states);
+    for (const task of readiness.blocked)
+      if (this.store.state.tasks[task.taskId]?.state === "queued")
+        await this.store.append({
+          type: "task.state_changed",
+          actor,
+          entityRefs: { taskId: task.taskId },
+          payload: { to: "blocked" },
+        });
+    const allTasks = Object.values(this.store.state.tasks);
+    const depthOf = (parentAgentId: string | undefined): number => {
+      let depth = 0;
+      const seen = new Set<string>();
+      let current = parentAgentId;
+      while (current) {
+        if (seen.has(current))
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Delegation ancestry contains a cycle.",
+          );
+        seen.add(current);
+        const parent = this.store.state.agents[current];
+        if (!parent)
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Delegation ancestry is missing.",
+          );
+        depth++;
+        current = parent.parentAgentId;
+      }
+      return depth;
+    };
+    const queued = allTasks
+      .filter((task) => task.state === "queued")
+      .sort(
+        (a, b) =>
+          a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id),
+      );
+    const allowedQueued = new Set(
+      queued.slice(0, scheduler.limits.maxQueuedTasks).map((task) => task.id),
+    );
+    const schedulable = allTasks.filter(
+      (task) => task.state !== "queued" || allowedQueued.has(task.id),
+    );
+    const schedulerTasks = new Map<string, SchedulerTask>(
+      schedulable.map((task, index) => [
+        task.id,
+        {
+          id: task.id,
+          parentAgentId: task.parentAgentId ?? "",
+          profileId: task.profileId ?? "scout",
+          priority: "normal",
+          queuedAt: index,
+          depth: depthOf(task.parentAgentId),
+          dependencies: (task.dependencies ?? []).map((dependency) => ({
+            taskId: dependency,
+            requirement: "succeeded" as const,
+          })),
+          state: (task.state === "assigned"
+            ? "running"
+            : task.state) as SchedulerTask["state"],
+        },
+      ]),
+    );
+    const admitted = new Set(
+      planAdmission(scheduler, schedulerTasks).admittedTaskIds,
+    );
+    for (const taskId of admitted) {
+      const task = this.store.state.tasks[taskId];
+      if (
+        !task ||
+        task.assignedAgentId ||
+        !this.#herdr ||
+        !scheduler.canProvision()
+      )
+        continue;
+      scheduler.setProvisioning(1);
+      const agentId = createId("agt"),
+        runId = createId("run"),
+        assignmentId = createId("asg");
+      await this.store.append({
+        type: "agent.registered",
+        actor,
+        entityRefs: { agentId },
+        payload: {
+          agentId,
+          managed: true,
+          generation: 1,
+          parentAgentId: task.parentAgentId,
+          profileId: task.profileId,
+          displayName: task.title,
+        },
+      });
+      await this.store.append({
+        type: "run.created",
+        actor,
+        entityRefs: { runId, taskId, agentId },
+        payload: {
+          runId,
+          taskId,
+          agentId,
+          assignmentId,
+          assignmentGeneration: 1,
+          agentGeneration: 1,
+        },
+      });
+      await this.store.append({
+        type: "task.state_changed",
+        actor,
+        entityRefs: { taskId },
+        payload: { to: "provisioning" },
+      });
+      try {
+        const project = task.project ?? {};
+        if (!safeText(project.cwd) || !safeText(project.workspaceId))
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "A trusted project context is required.",
+          );
+        const provisioned = await this.#herdr.provision({
+          agentId,
+          parentAgentId: task.parentAgentId ?? "",
+          role: task.profileId ?? "scout",
+          workspaceId: project.workspaceId,
+          cwd: project.cwd,
+          profileId: task.profileId ?? "scout",
+          isolation:
+            project.isolation === "worktree" ? "worktree" : "shared-readonly",
+          prompt: task.objective,
+        });
+        await this.store.append({
+          type: "agent.state_changed",
+          actor,
+          entityRefs: { agentId },
+          payload: {
+            agentId,
+            state: "starting",
+            ...(provisioned.paneId ? { paneId: provisioned.paneId } : {}),
+          },
+        });
+      } catch {
+        await this.store
+          .append({
+            type: "run.state_changed",
+            actor,
+            entityRefs: { runId },
+            payload: { runId, state: "failed" },
+          })
+          .catch(() => undefined);
+        await this.store
+          .append({
+            type: "task.state_changed",
+            actor,
+            entityRefs: { taskId },
+            payload: { to: "failed" },
+          })
+          .catch(() => undefined);
+        await this.store
+          .append({
+            type: "agent.state_changed",
+            actor,
+            entityRefs: { agentId },
+            payload: { agentId, state: "replaced", reason: "PROVISION_FAILED" },
+          })
+          .catch(() => undefined);
+      } finally {
+        scheduler.setProvisioning(-1);
+      }
+    }
+    const fanStates = new Map<
+      string,
+      {
+        state:
+          | "queued"
+          | "running"
+          | "succeeded"
+          | "failed"
+          | "blocked"
+          | "cancelled"
+          | "timed_out";
+      }
+    >(
+      tasks.map((task) => [
+        task.id,
+        {
+          state: (task.state === "assigned" || task.state === "provisioning"
+            ? "running"
+            : [
+                  "queued",
+                  "running",
+                  "succeeded",
+                  "failed",
+                  "blocked",
+                  "cancelled",
+                  "timed_out",
+                ].includes(task.state)
+              ? task.state
+              : "queued") as
+            | "queued"
+            | "running"
+            | "succeeded"
+            | "failed"
+            | "blocked"
+            | "cancelled"
+            | "timed_out",
+        },
+      ]),
+    );
+    const fan = fanInWorkflow(plan, fanStates);
+    const workflowState = fan.state === "queued" ? "running" : fan.state;
+    if (workflow.state !== workflowState)
+      await this.store.append({
+        type: "workflow.state_changed",
+        actor,
+        entityRefs: { workflowId },
+        payload: { workflowId, state: workflowState },
+      });
   }
   #queueAudit(action: string): void {
     void this.#recordAudit(action).catch(() => undefined);

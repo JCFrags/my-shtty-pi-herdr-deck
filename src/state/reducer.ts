@@ -169,6 +169,14 @@ export function reduce(
           ...(typeof p.terminalId === "string"
             ? { terminalId: p.terminalId }
             : {}),
+          ...(typeof p.workspaceId === "string"
+            ? { workspaceId: p.workspaceId }
+            : {}),
+          ...(typeof p.tabId === "string" ? { tabId: p.tabId } : {}),
+          ...(typeof p.cwd === "string" ? { cwd: p.cwd } : {}),
+          ...(typeof p.worktreeId === "string"
+            ? { worktreeId: p.worktreeId }
+            : {}),
           ...(typeof p.piSessionId === "string"
             ? { piSessionId: p.piSessionId }
             : {}),
@@ -197,6 +205,14 @@ export function reduce(
           ...(typeof p.terminalId === "string"
             ? { terminalId: p.terminalId }
             : {}),
+          ...(typeof p.workspaceId === "string"
+            ? { workspaceId: p.workspaceId }
+            : {}),
+          ...(typeof p.tabId === "string" ? { tabId: p.tabId } : {}),
+          ...(typeof p.cwd === "string" ? { cwd: p.cwd } : {}),
+          ...(typeof p.worktreeId === "string"
+            ? { worktreeId: p.worktreeId }
+            : {}),
           ...(typeof p.piSessionId === "string"
             ? { piSessionId: p.piSessionId }
             : {}),
@@ -211,6 +227,9 @@ export function reduce(
                 currentAssignmentGeneration:
                   p.currentAssignmentGeneration as number,
               }
+            : {}),
+          ...(Number.isSafeInteger(p.adapterSeq)
+            ? { lastAdapterSeq: p.adapterSeq as number }
             : {}),
         },
       };
@@ -231,6 +250,9 @@ export function reduce(
           ...(typeof p.parentAgentId === "string"
             ? { parentAgentId: p.parentAgentId }
             : {}),
+          ...(typeof p.workflowId === "string"
+            ? { workflowId: p.workflowId }
+            : {}),
           ...(typeof p.profileId === "string"
             ? { profileId: p.profileId }
             : {}),
@@ -243,6 +265,11 @@ export function reduce(
             : {}),
           ...(typeof p.timeoutAt === "string"
             ? { timeoutAt: p.timeoutAt }
+            : {}),
+          ...(p.project &&
+          typeof p.project === "object" &&
+          !Array.isArray(p.project)
+            ? { project: p.project as Record<string, unknown> }
             : {}),
           runIds: [],
         },
@@ -320,8 +347,60 @@ export function reduce(
             ? { piSessionId: p.piSessionId }
             : {}),
           ...(typeof p.agentId === "string" ? { agentId: p.agentId } : {}),
+          ...(event.type === "run.pi_started" &&
+          typeof p.agentCycleId === "string"
+            ? { agentCycleId: p.agentCycleId }
+            : {}),
+          ...(event.type === "run.pi_started" &&
+          Number.isSafeInteger(p.turnIndex)
+            ? { firstTurnIndex: p.turnIndex as number }
+            : {}),
+          ...(event.type.startsWith("assignment.") &&
+          typeof p.assignmentId === "string"
+            ? { assignmentId: p.assignmentId }
+            : {}),
+          ...(event.type.startsWith("assignment.") &&
+          Number.isSafeInteger(p.connectionGeneration)
+            ? {
+                assignmentConnectionGeneration:
+                  p.connectionGeneration as number,
+              }
+            : {}),
+          ...(event.type === "assignment.delivered"
+            ? { assignmentDeliveryState: "pending" as const }
+            : event.type === "assignment.accepted"
+              ? { assignmentDeliveryState: "accepted" as const }
+              : event.type === "assignment.delivery_failed"
+                ? { assignmentDeliveryState: "failed" as const }
+                : {}),
         },
       };
+      if (
+        run.agentId &&
+        Number.isSafeInteger(p.adapterSeq) &&
+        next.agents[run.agentId]
+      )
+        next.agents = {
+          ...next.agents,
+          [run.agentId]: {
+            ...next.agents[run.agentId]!,
+            lastAdapterSeq: p.adapterSeq as number,
+          },
+        };
+      if (
+        event.type === "run.state_changed" &&
+        ["succeeded", "failed", "cancelled", "timed_out", "lost"].includes(
+          String(state),
+        ) &&
+        next.tasks[run.taskId]
+      )
+        next.tasks = {
+          ...next.tasks,
+          [run.taskId]: {
+            ...next.tasks[run.taskId]!,
+            state: state as TaskState,
+          },
+        };
       if (event.type === "run.pi_settled") {
         const result = Object.values(next.results!).find(
           (item) => item.runId === id,
