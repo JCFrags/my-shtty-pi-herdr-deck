@@ -12,3 +12,10 @@
 - Snapshot/replay: verified checksum/cursor, atomic temp publication with file and directory fsync, private no-follow reads, replay cursor retention floor, and 100,000-event replay evidence.
 - Subscription/load: bounded client count, cursor expiry at the replay floor, unsubscribe, and bounded outbound socket buffering are implemented in `src/broker/broker.ts`.
 - Exact correction gate: `/home/mainpc/.agents/projects/pi-herdr-agent-orchestration/evidence/reviews/M0_M1_CORRECTION_CHECKLIST.md` was re-read. Independent fresh review remains the integration prerequisite.
+
+## Streaming and lock correction evidence (`e82a752`)
+
+- Event logs now use owner-checked numeric no-follow handles and bounded streaming line reads. Oversized, CRLF, empty interior, malformed, and incomplete records enter read-only recovery.
+- Lock records now include nonce, expected socket, PID, and Linux `/proc/<pid>/stat` start identity. Lock and recovery guard identities are revalidated before stale unlink and release.
+- Focused tests cover regular-path refusal, lock metadata, real socket session-key rejection, concurrent append, incomplete/oversized recovery, verified snapshots, and 100,000-event replay with 1,000 task records plus audit events.
+- Complete validation at `e82a752`: 56 unit tests, 1 integration test, lint, typecheck, schema check, package smoke, and diff check passed.
