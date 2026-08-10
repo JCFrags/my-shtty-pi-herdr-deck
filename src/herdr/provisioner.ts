@@ -2,8 +2,10 @@ import type { HerdrCli } from "./cli.js";
 import { branchSlug, herdrName, label } from "./names.js";
 import {
   createManagedToken,
+  createManagedTokenFile,
   createPromptFile,
   deletePromptFile,
+  verifyManagedTokenFile,
   type ManagedToken,
 } from "./token-files.js";
 export interface ProvisionInput {
@@ -27,21 +29,26 @@ export interface ProvisionResult {
   worktreeId?: string;
   worktreePath?: string;
   unusedTabId?: string;
+  promptPath?: string;
+  tokenFilePath?: string;
 }
 export class HerdrProvisioner {
   constructor(
     readonly cli: HerdrCli,
     readonly promptRoot: string,
     readonly liveNames: () => Iterable<string> = () => [],
+    readonly retainRegistrationFiles = false,
   ) {}
   async provision(input: ProvisionInput): Promise<ProvisionResult> {
     const token = createManagedToken();
     const name = herdrName(input.role, input.agentId, this.liveNames());
+    let tokenFile: string | undefined;
     const managed = {
       PI_HERDR_ORCH_MANAGED: "1",
       PI_HERDR_ORCH_AGENT_ID: input.agentId,
       PI_HERDR_ORCH_PARENT_AGENT_ID: input.parentAgentId,
       PI_HERDR_ORCH_PROFILE_ID: input.profileId,
+      PI_HERDR_ORCH_TOKEN_FILE: "",
     };
     const forbidden = Object.keys(input.env ?? {}).filter(
       (key) =>
@@ -64,6 +71,12 @@ export class HerdrProvisioner {
         input.agentId,
         input.prompt,
       );
+      tokenFile = await createManagedTokenFile(
+        this.promptRoot,
+        input.agentId,
+        token,
+      );
+      managed.PI_HERDR_ORCH_TOKEN_FILE = tokenFile;
       if (input.isolation === "worktree") {
         const wt = await this.cli.createWorktree({
           workspaceId: input.workspaceId,
@@ -132,21 +145,26 @@ export class HerdrProvisioner {
         timeoutMs: 30_000,
       });
       const sr = started as Record<string, unknown>;
-      await deletePromptFile(prompt);
-      prompt = undefined;
       if (unusedTabId && unusedTabId !== tabId) {
         await this.cli.closeTab(unusedTabId);
+      }
+      if (!this.retainRegistrationFiles) {
+        if (prompt) await deletePromptFile(prompt);
+        if (tokenFile) await deletePromptFile(tokenFile);
       }
       return {
         name,
         token,
         tabId,
+        promptPath: prompt,
+        tokenFilePath: tokenFile,
         paneId: typeof sr.pane_id === "string" ? sr.pane_id : paneId,
         ...(worktreeId ? { worktreeId } : {}),
         ...(worktreePath ? { worktreePath } : {}),
       };
     } catch (error) {
       if (prompt) await deletePromptFile(prompt).catch(() => undefined);
+      if (tokenFile) await deletePromptFile(tokenFile).catch(() => undefined);
       // Compensate in reverse order. Each operation is best-effort and the
       // resulting state remains observable to startup reconciliation.
       if (paneId) await this.cli.closePane(paneId).catch(() => undefined);
@@ -157,5 +175,23 @@ export class HerdrProvisioner {
         await this.cli.removeWorktree(worktreeId).catch(() => undefined);
       throw error;
     }
+  }
+  async verifyRegistration(
+    result: ProvisionResult,
+    identity: { paneId: string; generation?: number },
+  ): Promise<void> {
+    if (
+      !result.tokenFilePath ||
+      !(await verifyManagedTokenFile(result.tokenFilePath, result.token.digest))
+    )
+      throw new Error("HERDR_REGISTRATION_TOKEN_INVALID");
+    if (
+      identity.paneId !== result.paneId ||
+      (identity.generation !== undefined &&
+        identity.generation !== result.token.generation)
+    )
+      throw new Error("HERDR_REGISTRATION_IDENTITY_MISMATCH");
+    if (result.promptPath) await deletePromptFile(result.promptPath);
+    await deletePromptFile(result.tokenFilePath);
   }
 }

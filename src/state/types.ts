@@ -99,6 +99,18 @@ export interface OrchestrationState {
       tabId?: string;
       worktreeId?: string;
       reason?: string;
+      parentAgentId?: string;
+      ownerId?: string;
+      terminalId?: string;
+      sessionId?: string;
+      generation?: number;
+      tokenDigest?: string;
+      registrationDeadline?: string;
+      cleanupOutcome?: string;
+      dirty?: boolean;
+      replaced?: boolean;
+      orphaned?: boolean;
+      unknown?: boolean;
     }
   >;
   idempotency: Record<

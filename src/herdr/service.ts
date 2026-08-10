@@ -7,8 +7,9 @@ import {
   type ProvisionResult,
 } from "./provisioner.js";
 import type { HerdrSnapshot } from "./types.js";
+import { HerdrSocketClient } from "./socket-client.js";
 import { HerdrCli } from "./cli.js";
-import { focus, interrupt, close, type OccupantGuard } from "./controls.js";
+import { focus, interrupt, type OccupantGuard } from "./controls.js";
 import { HerdrProcessRunner } from "./runner.js";
 import { projectCapabilities } from "./capabilities.js";
 import { join } from "node:path";
@@ -18,6 +19,7 @@ export interface HerdrServiceOptions {
   cli: HerdrCli;
   provisioner: HerdrProvisioner;
   actor?: { principalId: string; kind: string };
+  watcher?: HerdrSocketClient;
 }
 const actor = { principalId: "prn_00000000000000000000000000", kind: "system" };
 export class HerdrService {
@@ -25,11 +27,14 @@ export class HerdrService {
   readonly #cli: HerdrCli;
   readonly #provisioner: HerdrProvisioner;
   readonly #actor: { principalId: string; kind: string };
+  readonly #watcher: HerdrSocketClient | undefined;
+  readonly #watchAbort = new AbortController();
   constructor(options: HerdrServiceOptions) {
     this.#store = options.store;
     this.#cli = options.cli;
     this.#provisioner = options.provisioner;
     this.#actor = options.actor ?? actor;
+    this.#watcher = options.watcher;
   }
   get store(): EventStore {
     return this.#store;
@@ -46,6 +51,19 @@ export class HerdrService {
       generation?: number;
     },
   ): Promise<void> {
+    const snapshot = await this.#cli.snapshot();
+    const pane = snapshot.panes.find((item) => item.id === identity.paneId);
+    const occupant = pane?.occupant;
+    if (
+      !pane ||
+      !occupant ||
+      (identity.terminalId &&
+        (occupant.terminalId ?? pane.terminalId) !== identity.terminalId) ||
+      (identity.sessionId && occupant.sessionId !== identity.sessionId) ||
+      (identity.generation !== undefined &&
+        occupant.generation !== identity.generation)
+    )
+      throw new Error("HERDR_IDENTITY_MISMATCH");
     await this.#store.append({
       type: "herdr.provision.intent",
       actor: this.#actor,
@@ -87,6 +105,11 @@ export class HerdrService {
           ...(result.paneId ? { paneId: result.paneId } : {}),
           ...(result.tabId ? { tabId: result.tabId } : {}),
           ...(result.worktreeId ? { worktreeId: result.worktreeId } : {}),
+          ...(result.token.digest ? { tokenDigest: result.token.digest } : {}),
+          generation: result.token.generation,
+          registrationDeadline: new Date(Date.now() + 30_000).toISOString(),
+          parentAgentId: input.parentAgentId,
+          ownerId: input.agentId,
         },
       });
       return result;
@@ -105,6 +128,35 @@ export class HerdrService {
         .catch(() => undefined);
       throw error;
     }
+  }
+  async register(
+    agentId: string,
+    result: ProvisionResult,
+    identity: { paneId: string; generation?: number },
+  ): Promise<void> {
+    await this.#provisioner.verifyRegistration(result, identity);
+    await this.#store.append({
+      type: "herdr.provision.outcome",
+      actor: this.#actor,
+      entityRefs: { agentId },
+      payload: {
+        agentId,
+        state: "registered",
+        paneId: identity.paneId,
+        generation: result.token.generation,
+        tokenDigest: result.token.digest,
+      },
+    });
+  }
+  async stop(guard: OccupantGuard): Promise<void> {
+    await revalidateAndRun(this.#cli, guard, () =>
+      this.#cli.stopAgent(guard.paneId),
+    );
+  }
+  async close(guard: OccupantGuard): Promise<void> {
+    await revalidateAndRun(this.#cli, guard, () =>
+      this.#cli.closePane(guard.paneId),
+    );
   }
   async reconcile(snapshot?: HerdrSnapshot): Promise<Reconciliation[]> {
     const current = snapshot ?? (await this.#cli.snapshot());
@@ -128,7 +180,12 @@ export class HerdrService {
     return results;
   }
   async startupReconcile(): Promise<Reconciliation[]> {
-    return this.reconcile();
+    const result = await this.reconcile();
+    if (this.#watcher)
+      void this.#watcher
+        .subscribe(() => undefined, this.#watchAbort.signal)
+        .catch(() => undefined);
+    return result;
   }
   async focus(guard: OccupantGuard): Promise<void> {
     await focus(this.#cli, () => this.#cli.snapshot(), guard);
@@ -136,9 +193,26 @@ export class HerdrService {
   async interrupt(guard: OccupantGuard): Promise<void> {
     await interrupt(this.#cli, () => this.#cli.snapshot(), guard);
   }
-  async close(guard: OccupantGuard): Promise<void> {
-    await close(this.#cli, () => this.#cli.snapshot(), guard);
-  }
+}
+async function revalidateAndRun(
+  cli: HerdrCli,
+  guard: OccupantGuard,
+  action: () => Promise<void>,
+): Promise<void> {
+  const before = await cli.snapshot();
+  const pane = before.panes.find((p) => p.id === guard.paneId);
+  const occ = pane?.occupant;
+  const terminal = occ?.terminalId ?? pane?.terminalId;
+  if (
+    !pane ||
+    !occ ||
+    (guard.terminalId !== undefined && terminal !== guard.terminalId) ||
+    (guard.sessionId !== undefined && occ.sessionId !== guard.sessionId) ||
+    (guard.generation !== undefined && occ.generation !== guard.generation)
+  )
+    throw new Error("HERDR_IDENTITY_MISMATCH");
+  await action();
+  await cli.snapshot();
 }
 
 export async function createProductionHerdrService(
@@ -152,9 +226,24 @@ export async function createProductionHerdrService(
   const schema = await runner.json(["api", "schema", "--json"]);
   const capabilities = projectCapabilities(schema, binary);
   const cli = new HerdrCli(runner, capabilities);
+  const socketPath = process.env.HERDR_SOCKET_PATH;
   return new HerdrService({
     store,
     cli,
-    provisioner: new HerdrProvisioner(cli, join(paths.root, "prompts")),
+    provisioner: new HerdrProvisioner(
+      cli,
+      join(paths.root, "prompts"),
+      () => [],
+      true,
+    ),
+    ...(socketPath
+      ? {
+          watcher: new HerdrSocketClient({
+            socketPath,
+            protocol: 17,
+            reconnectDelaysMs: [50, 100, 250],
+          }),
+        }
+      : {}),
   });
 }

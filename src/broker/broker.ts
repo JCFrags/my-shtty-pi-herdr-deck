@@ -617,9 +617,26 @@ export class Broker {
             ? { worktreePath: provisioned.worktreePath }
             : {}),
         };
+      } else if (request.method === "herdr.adopt") {
+        requirePermission(principal, "delegate");
+        if (
+          !this.#herdr ||
+          !safeText(request.params.agentId) ||
+          !safeText(request.params.paneId)
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Adoption parameters are invalid.",
+          );
+        const agent = this.store.state.agents[request.params.agentId];
+        if (!agent)
+          throw new OrchestratorError("NOT_FOUND", "Agent was not found.");
+        await this.#herdr.adoptRoot(agent, request.params as never);
+        result = { adopted: true };
       } else if (
         request.method === "herdr.focus" ||
         request.method === "herdr.interrupt" ||
+        request.method === "herdr.stop" ||
         request.method === "herdr.close"
       ) {
         requirePermission(principal, "manage:all");
@@ -647,6 +664,7 @@ export class Broker {
         if (request.method === "herdr.focus") await this.#herdr.focus(guard);
         else if (request.method === "herdr.interrupt")
           await this.#herdr.interrupt(guard);
+        else if (request.method === "herdr.stop") await this.#herdr.stop(guard);
         else await this.#herdr.close(guard);
         result = { ok: true };
       } else if (request.method === "events.verify") {

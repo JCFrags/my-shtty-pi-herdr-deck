@@ -132,6 +132,32 @@ export function reduce(
             ? { worktreeId: p.worktreeId }
             : {}),
           ...(typeof p.reason === "string" ? { reason: p.reason } : {}),
+          ...(typeof p.parentAgentId === "string"
+            ? { parentAgentId: p.parentAgentId }
+            : {}),
+          ...(typeof p.ownerId === "string" ? { ownerId: p.ownerId } : {}),
+          ...(typeof p.terminalId === "string"
+            ? { terminalId: p.terminalId }
+            : {}),
+          ...(typeof p.sessionId === "string"
+            ? { sessionId: p.sessionId }
+            : {}),
+          ...(Number.isSafeInteger(p.generation)
+            ? { generation: p.generation as number }
+            : {}),
+          ...(typeof p.tokenDigest === "string"
+            ? { tokenDigest: p.tokenDigest }
+            : {}),
+          ...(typeof p.registrationDeadline === "string"
+            ? { registrationDeadline: p.registrationDeadline }
+            : {}),
+          ...(typeof p.cleanupOutcome === "string"
+            ? { cleanupOutcome: p.cleanupOutcome }
+            : {}),
+          ...(typeof p.dirty === "boolean" ? { dirty: p.dirty } : {}),
+          ...(typeof p.replaced === "boolean" ? { replaced: p.replaced } : {}),
+          ...(typeof p.orphaned === "boolean" ? { orphaned: p.orphaned } : {}),
+          ...(typeof p.unknown === "boolean" ? { unknown: p.unknown } : {}),
         },
       };
       break;

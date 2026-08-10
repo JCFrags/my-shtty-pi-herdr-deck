@@ -524,6 +524,15 @@ export class EventStore {
             "terminalId",
             "sessionId",
             "generation",
+            "parentAgentId",
+            "ownerId",
+            "tokenDigest",
+            "registrationDeadline",
+            "cleanupOutcome",
+            "dirty",
+            "replaced",
+            "orphaned",
+            "unknown",
           ].filter((key) => Object.hasOwn(p, key)),
         ) &&
         p.agentId === refs.agentId &&

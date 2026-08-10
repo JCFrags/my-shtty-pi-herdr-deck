@@ -47,18 +47,24 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
         "herdr.reconcile",
         "herdr.focus",
         "herdr.interrupt",
+        "herdr.stop",
+        "herdr.adopt",
         "herdr.close",
         "herdr.provision",
       ].includes(method)
     ) {
       console.error(
-        "Usage: herdr status|reconcile|focus|interrupt|close|provision",
+        "Usage: herdr status|reconcile|focus|interrupt|stop|adopt|close|provision",
       );
       process.exitCode = 2;
       return;
     }
     let params: Record<string, unknown> = {};
-    if (["herdr.focus", "herdr.interrupt", "herdr.close"].includes(method)) {
+    if (
+      ["herdr.focus", "herdr.interrupt", "herdr.stop", "herdr.close"].includes(
+        method,
+      )
+    ) {
       const paneId = argv[2];
       if (!paneId || /[\u0000-\u001f\u007f]/u.test(paneId))
         throw new Error("Pane ID is invalid.");
