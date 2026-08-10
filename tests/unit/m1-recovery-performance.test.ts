@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, unlink, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -39,7 +39,10 @@ test("event-specific task transitions fail closed", async () => {
     id: "evt_00000000000000000000000000",
     timestamp: "2026-01-01T00:00:00.000Z",
     type: "task.state_changed",
-    actor: { principalId: "prn_test", kind: "human" },
+    actor: {
+      principalId: "prn_00000000000000000000000001",
+      kind: "human",
+    },
     entityRefs: { taskId: "tsk_missing" },
     payload: { to: "not-a-task-state" },
     prevHash: "0".repeat(64),
@@ -63,7 +66,10 @@ test("valid snapshot selects state and replays its disk suffix", async () => {
   const id = "tsk_00000000000000000000000000";
   await first.append({
     type: "task.created",
-    actor: { principalId: "prn_test", kind: "human" },
+    actor: {
+      principalId: "prn_00000000000000000000000001",
+      kind: "human",
+    },
     entityRefs: { taskId: id },
     payload: {
       id,
@@ -76,7 +82,10 @@ test("valid snapshot selects state and replays its disk suffix", async () => {
   await snapshot.write(first.state);
   await first.append({
     type: "audit.action",
-    actor: { principalId: "prn_test", kind: "human" },
+    actor: {
+      principalId: "prn_00000000000000000000000001",
+      kind: "human",
+    },
     payload: { action: "suffix" },
   });
   const recovered = new EventStore(path);
@@ -92,7 +101,10 @@ test("disk history remains available below the replay ring floor", async () => {
   for (let index = 0; index < 1_001; index++)
     await store.append({
       type: "audit.action",
-      actor: { principalId: "prn_test", kind: "human" },
+      actor: {
+        principalId: "prn_00000000000000000000000001",
+        kind: "human",
+      },
       payload: { action: "fixture" },
     });
   assert.equal(store.events.length, 1_000);
@@ -108,11 +120,54 @@ test("snapshots verify their checksum and state cursor", async () => {
   assert.equal((await snapshot.read())?.lastEventSeq, 0);
 });
 
-test("replays a 100000-event fixture under 5 seconds and 256 MiB RSS", async () => {
+test("snapshot state must match its event-chain cursor", async () => {
+  const root = await mkdtemp(join(tmpdir(), "orch-snapshot-chain-"));
+  const path = join(root, "events.jsonl");
+  const store = new EventStore(path);
+  await store.open();
+  const id = "tsk_00000000000000000000000000";
+  await store.append({
+    type: "task.created",
+    actor: {
+      principalId: "prn_00000000000000000000000001",
+      kind: "human",
+    },
+    entityRefs: { taskId: id },
+    payload: {
+      id,
+      title: "canonical",
+      objective: "snapshot",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    },
+  });
+  const snapshots = new SnapshotStore(join(root, "snapshot.json"));
+  const forged = {
+    ...store.state,
+    tasks: {
+      ...store.state.tasks,
+      [id]: { ...store.state.tasks[id]!, title: "forged" },
+    },
+  };
+  await snapshots.write(forged);
+  const recovered = new EventStore(path);
+  await recovered.open(await snapshots.read());
+  assert.equal(recovered.readOnly, true);
+  assert.match(recovered.corruption ?? "", /Snapshot state/);
+
+  await unlink(path);
+  const missing = new EventStore(path);
+  await missing.open(await snapshots.read());
+  assert.equal(missing.readOnly, true);
+  assert.match(missing.corruption ?? "", /event log is missing/);
+});
+
+test("replays a 100000-event snapshot plus suffix under 5 seconds and 256 MiB RSS", async () => {
   const root = await mkdtemp(join(tmpdir(), "orch-perf-"));
   const path = join(root, "events.jsonl");
+  const snapshotPath = join(root, "snapshot.json");
   const lines: string[] = [];
   let previous = "0".repeat(64);
+  let snapshotHash = "";
   for (let index = 0; index < 100_000; index++) {
     const task = index < 1_000;
     const id = task ? `tsk_${String(index).padStart(26, "0")}` : undefined;
@@ -122,7 +177,10 @@ test("replays a 100000-event fixture under 5 seconds and 256 MiB RSS", async () 
       id: `evt_${String(index).padStart(26, "0")}`,
       timestamp: "2026-01-01T00:00:00.000Z",
       type: task ? "task.created" : "audit.action",
-      actor: { principalId: "prn_test", kind: "human" },
+      actor: {
+        principalId: "prn_00000000000000000000000001",
+        kind: "human",
+      },
       entityRefs: task ? { taskId: id } : {},
       payload: task
         ? {
@@ -136,11 +194,36 @@ test("replays a 100000-event fixture under 5 seconds and 256 MiB RSS", async () 
     };
     const event = { ...base, hash: sha256(canonicalJson(base)) };
     previous = event.hash;
+    if (index === 98_999) snapshotHash = event.hash;
     lines.push(canonicalJson(event));
   }
   await writeFile(path, `${lines.join("\n")}\n`);
   await chmod(path, 0o600);
-  lines.length = 0;
+  const tasks = Object.fromEntries(
+    Array.from({ length: 1_000 }, (_, index) => {
+      const id = `tsk_${String(index).padStart(26, "0")}`;
+      return [
+        id,
+        {
+          id,
+          title: "fixture",
+          objective: "bounded",
+          state: "queued" as const,
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+      ];
+    }),
+  );
+  await new SnapshotStore(snapshotPath).write({
+    schemaVersion: 1,
+    lastEventSeq: 99_000,
+    lastEventHash: snapshotHash,
+    tasks,
+    runs: {},
+    agents: {},
+    workflows: {},
+    idempotency: {},
+  });
   lines.length = 0;
   const child = spawnSync(
     process.execPath,
@@ -148,8 +231,9 @@ test("replays a 100000-event fixture under 5 seconds and 256 MiB RSS", async () 
       "--expose-gc",
       "--input-type=module",
       "-e",
-      `import { EventStore } from './dist/src/state/event-store.js'; const start = performance.now(); const store = new EventStore(process.argv[1]); await store.open(); global.gc?.(); console.log(JSON.stringify({ elapsed: performance.now() - start, events: store.events.length, seq: store.state.lastEventSeq, tasks: Object.keys(store.state.tasks).length, rss: process.memoryUsage().rss }));`,
+      `import { EventStore } from './dist/src/state/event-store.js'; import { SnapshotStore } from './dist/src/state/snapshot-store.js'; const start = performance.now(); const store = new EventStore(process.argv[1]); await store.open(await new SnapshotStore(process.argv[2]).read()); global.gc?.(); console.log(JSON.stringify({ elapsed: performance.now() - start, events: store.events.length, seq: store.state.lastEventSeq, tasks: Object.keys(store.state.tasks).length, rss: process.memoryUsage().rss }));`,
       path,
+      snapshotPath,
     ],
     { encoding: "utf8", cwd: process.cwd() },
   );

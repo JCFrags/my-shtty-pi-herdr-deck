@@ -12,20 +12,11 @@ export const emptyState = (): OrchestrationState => ({
   idempotency: {},
 });
 const taskTerminal = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
-const runTerminal = new Set([
-  "succeeded",
-  "failed",
-  "cancelled",
-  "timed_out",
-  "lost",
-]);
 const known = new Set([
   "task.created",
   "task.state_changed",
   "audit.action",
   "audit.authorization_denied",
-  "system.status_changed",
-  "recovery.reconciled",
 ]);
 export function reduce(
   state: OrchestrationState,
@@ -43,7 +34,6 @@ export function reduce(
   };
   const p = event.payload as Record<string, unknown>;
   const taskId = event.entityRefs?.taskId;
-  const runId = event.entityRefs?.runId;
   switch (event.type) {
     case "task.created": {
       const id = taskId ?? String(p.id);
@@ -102,107 +92,8 @@ export function reduce(
       next.tasks[taskId] = { ...task, state: to };
       break;
     }
-    case "run.created": {
-      const id = runId ?? String(p.id);
-      if (
-        !id ||
-        next.runs[id] ||
-        typeof p.taskId !== "string" ||
-        !next.tasks[p.taskId]
-      )
-        throw new OrchestratorError("STATE_CORRUPT", "Invalid run creation.");
-      next.runs = { ...next.runs };
-      next.tasks = { ...next.tasks };
-      next.runs[id] = {
-        id,
-        taskId: p.taskId,
-        state: "created",
-        assignmentGeneration: Number(p.assignmentGeneration ?? 1),
-        settled: false,
-        ...(typeof p.agentId === "string" ? { agentId: p.agentId } : {}),
-      };
-      const task = next.tasks[p.taskId];
-      if (!task)
-        throw new OrchestratorError("STATE_CORRUPT", "Run task is missing.");
-      next.tasks[p.taskId] = { ...task, currentRunId: id };
-      break;
-    }
-    case "run.pi_settled": {
-      if (!runId)
-        throw new OrchestratorError(
-          "STATE_CORRUPT",
-          "Run reference is missing.",
-        );
-      const run = next.runs[runId];
-      if (!run || runTerminal.has(run.state) || run.state === "cancelled")
-        throw new OrchestratorError("STATE_CORRUPT", "Invalid run settlement.");
-      next.runs = { ...next.runs };
-      next.runs[runId] = {
-        ...run,
-        settled: true,
-        state: run.resultId ? "succeeded" : "result_pending_missing",
-      };
-      break;
-    }
-    case "result.published": {
-      if (
-        !runId ||
-        typeof p.resultId !== "string" ||
-        typeof p.taskId !== "string"
-      )
-        throw new OrchestratorError(
-          "STATE_CORRUPT",
-          "Invalid result correlation.",
-        );
-      const run = next.runs[runId];
-      if (
-        !run ||
-        run.taskId !== p.taskId ||
-        runTerminal.has(run.state) ||
-        (run.resultId && run.resultId !== p.resultId)
-      )
-        throw new OrchestratorError(
-          "STATE_CORRUPT",
-          "Result correlation or lifecycle is invalid.",
-        );
-      next.runs = { ...next.runs };
-      next.tasks = { ...next.tasks };
-      next.runs[runId] = {
-        ...run,
-        resultId: p.resultId,
-        state: run.settled ? "succeeded" : "result_pending",
-      };
-      const task = next.tasks[run.taskId];
-      if (!task)
-        throw new OrchestratorError("STATE_CORRUPT", "Result task is missing.");
-      next.tasks[run.taskId] = {
-        ...task,
-        resultId: p.resultId,
-        state: run.settled ? "succeeded" : "collecting",
-      };
-      break;
-    }
-    case "idempotency.record": {
-      if (typeof p.key !== "string" || typeof p.principalId !== "string")
-        throw new OrchestratorError(
-          "STATE_CORRUPT",
-          "Invalid idempotency record.",
-        );
-      next.idempotency = { ...next.idempotency };
-      next.idempotency[p.key] = {
-        principalId: p.principalId,
-        method: String(p.method),
-        ...(typeof p.paramsHash === "string"
-          ? { paramsHash: p.paramsHash }
-          : {}),
-        response: p.response,
-      };
-      break;
-    }
     case "audit.action":
     case "audit.authorization_denied":
-    case "system.status_changed":
-    case "recovery.reconciled":
       break;
     default:
       throw new OrchestratorError(

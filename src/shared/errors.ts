@@ -8,6 +8,7 @@ export type ErrorCode =
   | "BROKER_READ_ONLY"
   | "IDEMPOTENCY_CONFLICT"
   | "EVENT_CURSOR_EXPIRED"
+  | "CURSOR_INVALID"
   | "TIMEOUT";
 export class OrchestratorError extends Error {
   readonly code: ErrorCode;

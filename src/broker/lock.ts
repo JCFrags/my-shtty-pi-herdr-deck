@@ -1,5 +1,5 @@
 import { constants, readFileSync } from "node:fs";
-import { open, unlink } from "node:fs/promises";
+import { lstat, open, rename, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 
@@ -59,6 +59,37 @@ function sameRecord(a: LockRecord, b: LockRecord): boolean {
     a.startIdentity === b.startIdentity &&
     a.expectedSocket === b.expectedSocket
   );
+}
+async function restoreQuarantine(
+  original: string,
+  quarantine: string,
+): Promise<void> {
+  try {
+    await lstat(original);
+    throw new Error(`Preserved replaced lock path at ${quarantine}.`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  await rename(quarantine, original);
+}
+async function removeExactPath(
+  path: string,
+  expected: { dev: number; ino: number; uid: number },
+): Promise<void> {
+  const quarantine = `${path}.remove.${process.pid}.${randomBytes(8).toString("hex")}`;
+  await rename(path, quarantine);
+  const stat = await lstat(quarantine);
+  if (
+    !stat.isFile() ||
+    stat.nlink !== 1 ||
+    stat.dev !== expected.dev ||
+    stat.ino !== expected.ino ||
+    stat.uid !== expected.uid
+  ) {
+    await restoreQuarantine(path, quarantine);
+    throw new Error("Lock path identity changed before removal.");
+  }
+  await unlink(quarantine);
 }
 async function readRecord(path: string): Promise<{
   record: LockRecord;
@@ -158,20 +189,28 @@ export class BrokerLock {
           constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollow,
           0o600,
         );
+        const guardStat = await guard.stat();
         try {
           await guard.write(`${guardNonce}\n`);
           await guard.sync();
-          const current = await readRecord(this.path);
+          const quarantine = `${this.path}.stale.${process.pid}.${randomBytes(8).toString("hex")}`;
+          await rename(this.path, quarantine);
+          const current = await readRecord(quarantine);
           if (
             current.stat.dev !== old.stat.dev ||
             current.stat.ino !== old.stat.ino ||
+            current.stat.uid !== old.stat.uid ||
             !sameRecord(current.record, old.record)
-          )
+          ) {
+            await restoreQuarantine(this.path, quarantine);
             throw new Error("Broker lock changed during recovery.");
-          await unlink(this.path);
+          }
+          await unlink(quarantine);
         } finally {
           await guard.close();
-          await unlink(this.#recoveryPath).catch(() => undefined);
+          await removeExactPath(this.#recoveryPath, guardStat).catch(
+            () => undefined,
+          );
         }
       }
     }
@@ -179,21 +218,26 @@ export class BrokerLock {
   async release(): Promise<void> {
     const expected = this.#identity;
     if (!expected) return;
-    const current = await readRecord(this.path);
+    const quarantine = `${this.path}.release.${process.pid}.${randomBytes(8).toString("hex")}`;
+    await rename(this.path, quarantine);
+    const current = await readRecord(quarantine);
     if (
       current.stat.dev !== expected.dev ||
       current.stat.ino !== expected.ino ||
+      current.stat.uid !== expected.uid ||
       !sameRecord(current.record, {
         pid: expected.pid,
         nonce: expected.nonce,
         startIdentity: expected.startIdentity,
         expectedSocket: expected.expectedSocket,
       })
-    )
+    ) {
+      await restoreQuarantine(this.path, quarantine);
       throw new Error("Broker lock identity changed.");
+    }
     await this.#handle?.close();
     this.#handle = undefined;
     this.#identity = undefined;
-    await unlink(this.path);
+    await unlink(quarantine);
   }
 }

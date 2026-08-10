@@ -34,10 +34,30 @@ import {
 import { OrchestratorError } from "../shared/errors.js";
 import { assertInvariants } from "../state/invariants.js";
 import { SnapshotStore } from "../state/snapshot-store.js";
+interface SubscriptionFilter {
+  events?: string[];
+  agentIds?: string[];
+  taskIds?: string[];
+}
 interface Client {
   socket: Socket;
   principal?: Principal;
   subscribed: boolean;
+  subscriptionId?: string;
+  eventFilter?: SubscriptionFilter;
+  slowClosed?: boolean;
+  processing: Promise<void>;
+  requestWindowStarted: number;
+  requestCount: number;
+}
+function exactKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+): boolean {
+  return Object.keys(value).every((key) => allowed.includes(key));
+}
+function subscriptionId(): string {
+  return `sub_${createId("evt").slice(4)}`;
 }
 interface SocketIdentity {
   dev: number;
@@ -69,34 +89,98 @@ export async function safeStaleSocket(
   path: string,
   expected?: SocketIdentity,
 ): Promise<void> {
-  let stat;
+  let observed;
   try {
-    stat = await lstat(path);
+    observed = await lstat(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
     throw error;
   }
-  if (!stat.isSocket())
+  if (!observed.isSocket())
     throw new Error("Refusing to remove non-socket broker path.");
-  if (process.getuid?.() !== undefined && stat.uid !== process.getuid())
-    throw new Error("Broker socket has the wrong owner.");
+  if (
+    observed.nlink !== 1 ||
+    (process.getuid?.() !== undefined && observed.uid !== process.getuid()) ||
+    (observed.mode & 0o077) !== 0
+  )
+    throw new Error("Broker socket ownership or mode is unsafe.");
   if (await listening(path)) throw new Error("Broker socket is already live.");
+
   const quarantine = `${path}.quarantine.${process.pid}.${randomBytes(8).toString("hex")}`;
   await rename(path, quarantine);
+  const restore = async (): Promise<void> => {
+    try {
+      await lstat(path);
+      throw new Error(
+        `Broker socket was preserved at ${quarantine}; its path was replaced.`,
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    await rename(quarantine, path);
+  };
+
   const quarantined = await lstat(quarantine);
-  if (
-    quarantined.dev !== stat.dev ||
-    quarantined.ino !== stat.ino ||
-    quarantined.uid !== stat.uid ||
-    (expected &&
-      (expected.dev !== quarantined.dev ||
-        expected.ino !== quarantined.ino ||
-        expected.uid !== quarantined.uid))
-  )
+  const sameObserved =
+    quarantined.isSocket() &&
+    quarantined.nlink === 1 &&
+    (quarantined.mode & 0o077) === 0 &&
+    quarantined.dev === observed.dev &&
+    quarantined.ino === observed.ino &&
+    quarantined.uid === observed.uid;
+  const sameExpected =
+    !expected ||
+    (expected.dev === quarantined.dev &&
+      expected.ino === quarantined.ino &&
+      expected.uid === quarantined.uid);
+  if (!sameObserved || !sameExpected) {
+    await restore();
     throw new Error("Broker socket identity changed during quarantine.");
-  if (await listening(quarantine))
+  }
+  if (await listening(quarantine)) {
+    await restore();
     throw new Error("Broker socket became live during quarantine.");
+  }
   await unlink(quarantine);
+}
+interface CloseQuarantine {
+  path: string;
+  owned: boolean;
+}
+async function quarantineForClose(
+  path: string,
+  expected: SocketIdentity,
+): Promise<CloseQuarantine | undefined> {
+  const quarantine = `${path}.closing.${process.pid}.${randomBytes(8).toString("hex")}`;
+  try {
+    await rename(path, quarantine);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  const stat = await lstat(quarantine);
+  return {
+    path: quarantine,
+    owned:
+      stat.isSocket() &&
+      stat.dev === expected.dev &&
+      stat.ino === expected.ino &&
+      stat.uid === expected.uid,
+  };
+}
+async function restoreReplacement(
+  original: string,
+  quarantine: string,
+): Promise<void> {
+  try {
+    await lstat(original);
+    throw new Error(
+      `Replacement socket was preserved at ${quarantine}; the original path is occupied.`,
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  await rename(quarantine, original);
 }
 export function sessionKeyMatches(
   expectedSocket: string,
@@ -146,11 +230,25 @@ export class Broker {
           .once("error", reject)
           .listen(this.paths.socket),
       );
+      const created = await lstat(this.paths.socket);
+      this.#socketIdentity = {
+        dev: created.dev,
+        ino: created.ino,
+        uid: created.uid,
+      };
       await chmod(this.paths.socket, 0o600);
-      const stat = await lstat(this.paths.socket);
-      this.#socketIdentity = { dev: stat.dev, ino: stat.ino, uid: stat.uid };
+      const secured = await lstat(this.paths.socket);
+      if (
+        !secured.isSocket() ||
+        secured.dev !== created.dev ||
+        secured.ino !== created.ino ||
+        secured.uid !== created.uid ||
+        (secured.mode & 0o077) !== 0
+      )
+        throw new Error("Broker socket changed while securing its mode.");
     } catch (error) {
-      await this.#lock.release();
+      if (this.#server) await this.stop().catch(() => undefined);
+      else await this.#lock.release();
       throw error;
     }
   }
@@ -169,15 +267,36 @@ export class Broker {
   }
   async stop(): Promise<void> {
     let failure: unknown;
+    let quarantined: CloseQuarantine | undefined;
+    const identity = this.#socketIdentity;
     try {
       for (const client of this.#clients) client.socket.destroy();
+      while (true) {
+        const pending = this.#mutationTail;
+        await pending;
+        if (pending === this.#mutationTail) break;
+      }
+      if (this.#server && identity)
+        quarantined = await quarantineForClose(this.paths.socket, identity);
       await new Promise<void>(
         (resolve) => this.#server?.close(() => resolve()) ?? resolve(),
       );
       this.#server = undefined;
-      await safeStaleSocket(this.paths.socket, this.#socketIdentity);
+      if (quarantined?.owned) await safeStaleSocket(quarantined.path, identity);
+      else if (quarantined) {
+        const replacement = quarantined.path;
+        await restoreReplacement(this.paths.socket, replacement);
+        quarantined = undefined;
+        throw new Error("Broker socket identity changed before shutdown.");
+      }
     } catch (error) {
       failure = error;
+      if (quarantined && !quarantined.owned)
+        await restoreReplacement(this.paths.socket, quarantined.path).catch(
+          (restoreError) => {
+            failure = restoreError;
+          },
+        );
     } finally {
       try {
         await this.#lock.release();
@@ -193,12 +312,20 @@ export class Broker {
     return this.#secret;
   }
   #connect(socket: Socket): void {
-    if (this.#clients.size >= 64) {
+    if (this.#clients.size >= 16) {
       socket.destroy();
       return;
     }
-    const client: Client = { socket, subscribed: false };
+    const client: Client = {
+      socket,
+      subscribed: false,
+      processing: Promise.resolve(),
+      requestWindowStarted: Date.now(),
+      requestCount: 0,
+    };
     this.#clients.add(client);
+    const authenticationTimer = setTimeout(() => socket.destroy(), 2_000);
+    authenticationTimer.unref();
     const decoder = new NdjsonDecoder<HelloRequest | RequestFrame>((value) => {
       if (
         typeof value === "object" &&
@@ -208,97 +335,129 @@ export class Broker {
         return validateHello(value);
       return validateRequest(value);
     });
-    socket.on("data", async (data) => {
-      for (const item of decoder.push(data)) {
-        if (!item.ok) {
-          socket.write(
-            encodeFrame({
-              v: 1,
-              type: "response",
-              id: createId("evt"),
-              method: "unknown",
-              ok: false,
-              error: {
-                code: item.error.code,
-                message: item.error.message,
-                retryable: false,
-              },
-            }),
-          );
-          continue;
-        }
-        if (!client.principal) {
-          if (item.value.type !== "hello") {
-            socket.destroy();
-            return;
-          }
-          try {
-            if (!sessionKeyMatches(this.paths.socket, item.value.sessionKey))
-              throw new OrchestratorError(
-                "AUTH_FAILED",
-                "Session key does not match the broker socket.",
-              );
-            if (
-              (item.value.client.kind === "pi_child" &&
-                item.value.auth.kind !== "agent_token") ||
-              (item.value.client.kind !== "pi_child" &&
-                item.value.auth.kind !== "client_secret")
-            )
-              throw new OrchestratorError(
-                "AUTH_FAILED",
-                "Authentication kind does not match client kind.",
-              );
-            client.principal = authenticate(
-              this.#secret,
-              item.value.auth.secret ?? "",
-              item.value.client.kind,
-              undefined,
-              item.value.auth.token,
-              item.value.auth.generation,
-              item.value.auth.piSessionId,
-            );
-            socket.write(
-              encodeFrame({
+    socket.on("data", (data) => {
+      client.processing = client.processing
+        .then(async () => {
+          for (const item of decoder.push(data)) {
+            if (!item.ok) {
+              this.#writeFrame(client, {
                 v: 1,
-                type: "hello_result",
-                id: item.value.id,
-                ok: true,
-                broker: {
-                  version: "0.1.0",
-                  status: this.store.readOnly
-                    ? "read_only_recovery"
-                    : "healthy",
-                  lastEventSeq: this.store.state.lastEventSeq,
-                },
-                principal: client.principal,
-                limits: { maxLineBytes: 1_048_576 },
-              }),
-            );
-          } catch (error) {
-            socket.write(
-              encodeFrame({
-                v: 1,
-                type: "hello_result",
-                id: item.value.id,
+                type: "response",
+                id: createId("evt"),
+                method: "unknown",
                 ok: false,
                 error: {
-                  code: "AUTH_FAILED",
-                  message: "Authentication failed.",
+                  code: item.error.code,
+                  message: item.error.message,
                   retryable: false,
                 },
-              }),
-            );
-            socket.destroy();
+              });
+              continue;
+            }
+            if (!client.principal) {
+              if (item.value.type !== "hello") {
+                socket.destroy();
+                return;
+              }
+              try {
+                if (
+                  !sessionKeyMatches(this.paths.socket, item.value.sessionKey)
+                )
+                  throw new OrchestratorError(
+                    "AUTH_FAILED",
+                    "Session key does not match the broker socket.",
+                  );
+                if (
+                  (item.value.client.kind === "pi_child" &&
+                    item.value.auth.kind !== "agent_token") ||
+                  (item.value.client.kind !== "pi_child" &&
+                    item.value.auth.kind !== "client_secret")
+                )
+                  throw new OrchestratorError(
+                    "AUTH_FAILED",
+                    "Authentication kind does not match client kind.",
+                  );
+                client.principal = authenticate(
+                  this.#secret,
+                  item.value.auth.secret ?? "",
+                  item.value.client.kind,
+                  undefined,
+                  item.value.auth.token,
+                  item.value.auth.generation,
+                  item.value.auth.piSessionId,
+                );
+                clearTimeout(authenticationTimer);
+                this.#writeFrame(client, {
+                  v: 1,
+                  type: "hello_result",
+                  id: item.value.id,
+                  ok: true,
+                  broker: {
+                    version: "0.1.0",
+                    status: this.store.readOnly
+                      ? "read_only_recovery"
+                      : "healthy",
+                    lastEventSeq: this.store.state.lastEventSeq,
+                  },
+                  principal: client.principal,
+                  limits: { maxLineBytes: 1_048_576 },
+                });
+              } catch (error) {
+                this.#writeFrame(client, {
+                  v: 1,
+                  type: "hello_result",
+                  id: item.value.id,
+                  ok: false,
+                  error: {
+                    code: "AUTH_FAILED",
+                    message: "Authentication failed.",
+                    retryable: false,
+                  },
+                });
+                socket.destroy();
+              }
+              continue;
+            }
+            if (item.value.type !== "request") {
+              socket.destroy();
+              return;
+            }
+            await this.#request(client, item.value);
           }
-          continue;
-        }
-        if (item.value.type === "request")
-          await this.#request(client, item.value);
-      }
+        })
+        .catch(() => {
+          socket.destroy();
+        });
     });
-    socket.once("close", () => this.#clients.delete(client));
+    socket.once("close", () => {
+      clearTimeout(authenticationTimer);
+      this.#clients.delete(client);
+    });
   }
   async #request(client: Client, request: RequestFrame): Promise<void> {
+    const now = Date.now();
+    if (now - client.requestWindowStarted >= 1_000) {
+      client.requestWindowStarted = now;
+      client.requestCount = 0;
+    }
+    client.requestCount++;
+    if (client.requestCount > 200) {
+      this.#writeFrame(client, {
+        v: 1,
+        type: "response",
+        id: request.id,
+        method: request.method,
+        ok: false,
+        error: {
+          code: "LIMIT_EXCEEDED",
+          message: "Client request rate exceeded the local limit.",
+          retryable: true,
+        },
+      });
+      this.#queueAudit("client_rate_limited");
+      client.socket.destroy();
+      return;
+    }
     const previous = this.#mutationTail;
     let release!: () => void;
     this.#mutationTail = new Promise<void>((resolve) => {
@@ -320,108 +479,146 @@ export class Broker {
       if (
         request.method === "system.ping" ||
         request.method === "system.status"
-      )
+      ) {
+        if (
+          !exactKeys(request.params, []) ||
+          Object.keys(request.params).length
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "System method parameters must be empty.",
+          );
         result = {
           status: this.store.readOnly ? "read_only_recovery" : "healthy",
           lastEventSeq: this.store.state.lastEventSeq,
           corruption: this.store.corruption,
         };
-      else if (request.method === "events.verify") {
+      } else if (request.method === "events.verify") {
         requirePermission(principal, "read:audit");
-        result = this.store.verify();
+        if (Object.keys(request.params).length)
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Verification parameters must be empty.",
+          );
+        result = await this.store.verifyDisk();
       } else if (request.method === "events.subscribe") {
         requirePermission(principal, "read:state");
-        const from = Number(request.params.fromSeq ?? 0);
-        const includeSnapshot =
-          request.params.includeSnapshot === undefined
-            ? true
-            : request.params.includeSnapshot;
         if (
-          !Number.isSafeInteger(from) ||
-          from < 0 ||
-          from > this.store.state.lastEventSeq ||
-          typeof includeSnapshot !== "boolean"
+          !exactKeys(request.params, ["fromSeq", "filters", "includeSnapshot"])
         )
           throw new OrchestratorError(
-            "EVENT_CURSOR_EXPIRED",
-            "Event cursor is invalid or expired.",
+            "INVALID_REQUEST",
+            "Subscription parameters contain unknown fields.",
           );
-        const filters = request.params.filters;
+        const from = request.params.fromSeq ?? 0;
+        const includeSnapshot = request.params.includeSnapshot ?? true;
         if (
-          filters !== undefined &&
-          (!filters || typeof filters !== "object" || Array.isArray(filters))
+          !Number.isSafeInteger(from) ||
+          Number(from) < 0 ||
+          Number(from) > this.store.state.lastEventSeq
+        )
+          throw new OrchestratorError(
+            "CURSOR_INVALID",
+            "Event cursor is outside the active event generation.",
+          );
+        if (typeof includeSnapshot !== "boolean")
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "includeSnapshot must be a boolean.",
+          );
+        const rawFilters = request.params.filters;
+        if (
+          rawFilters !== undefined &&
+          (!rawFilters ||
+            typeof rawFilters !== "object" ||
+            Array.isArray(rawFilters))
         )
           throw new OrchestratorError(
             "INVALID_REQUEST",
             "Subscription filters are invalid.",
           );
-        const filterRecord = (filters ?? {}) as Record<string, unknown>;
+        const filterRecord = (rawFilters ?? {}) as Record<string, unknown>;
+        if (!exactKeys(filterRecord, ["events", "agentIds", "taskIds"]))
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Subscription filters contain unknown fields.",
+          );
+        const validStrings = (value: unknown): boolean =>
+          value === undefined ||
+          (Array.isArray(value) &&
+            value.length <= 1_000 &&
+            value.every(
+              (item) =>
+                typeof item === "string" &&
+                item.length > 0 &&
+                item.length <= 128,
+            ));
         if (
-          filterRecord.events !== undefined &&
-          (!Array.isArray(filterRecord.events) ||
-            filterRecord.events.some((item) => typeof item !== "string"))
+          !validStrings(filterRecord.events) ||
+          !validStrings(filterRecord.agentIds) ||
+          !validStrings(filterRecord.taskIds)
         )
           throw new OrchestratorError(
             "INVALID_REQUEST",
-            "Event filters are invalid.",
+            "Subscription filters are invalid.",
           );
-        if (
-          filterRecord.taskIds !== undefined &&
-          (!Array.isArray(filterRecord.taskIds) ||
-            filterRecord.taskIds.some((item) => typeof item !== "string"))
-        )
-          throw new OrchestratorError(
-            "INVALID_REQUEST",
-            "Task filters are invalid.",
-          );
-        const matches = (
-          event: import("../state/types.js").StoredEvent,
-        ): boolean => {
-          const names = filterRecord.events as string[] | undefined;
-          const tasks = filterRecord.taskIds as string[] | undefined;
-          return (
-            (!names ||
-              names.length === 0 ||
-              names.some((name) =>
-                name.endsWith(".*")
-                  ? event.type.startsWith(name.slice(0, -1))
-                  : event.type === name,
-              )) &&
-            (!tasks ||
-              tasks.length === 0 ||
-              (event.entityRefs.taskId !== undefined &&
-                tasks.includes(event.entityRefs.taskId)))
-          );
+        const filter: SubscriptionFilter = {
+          ...(filterRecord.events
+            ? { events: filterRecord.events as string[] }
+            : {}),
+          ...(filterRecord.agentIds
+            ? { agentIds: filterRecord.agentIds as string[] }
+            : {}),
+          ...(filterRecord.taskIds
+            ? { taskIds: filterRecord.taskIds as string[] }
+            : {}),
         };
         const currentSeq = this.store.state.lastEventSeq;
-        if (!includeSnapshot)
-          replayEvents = (await this.store.readEventsFrom(from)).filter(
-            matches,
-          );
+        const replayStart = includeSnapshot ? currentSeq : Number(from);
+        replayEvents = (await this.store.readEventsFrom(replayStart)).filter(
+          (event) => this.#matchesFilter(filter, event),
+        );
         client.subscribed = true;
+        client.subscriptionId = subscriptionId();
+        client.eventFilter = filter;
         result = {
-          subscriptionId: createId("evt"),
+          subscriptionId: client.subscriptionId,
           ...(includeSnapshot
             ? {
                 snapshot: {
                   seq: currentSeq,
+                  agents: Object.values(this.store.state.agents),
                   tasks: Object.values(this.store.state.tasks),
-                  runs: Object.values(this.store.state.runs),
+                  workflows: Object.values(this.store.state.workflows),
+                  questions: [],
+                  results: [],
                 },
               }
             : {}),
-          replayFromSeq: includeSnapshot ? currentSeq + 1 : from + 1,
+          replayFromSeq: replayStart + 1,
         };
-        if (includeSnapshot)
-          replayEvents = (await this.store.readEventsFrom(currentSeq)).filter(
-            matches,
-          );
       } else if (request.method === "events.unsubscribe") {
         requirePermission(principal, "read:state");
+        if (
+          !exactKeys(request.params, ["subscriptionId"]) ||
+          typeof request.params.subscriptionId !== "string" ||
+          request.params.subscriptionId !== client.subscriptionId
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Subscription ID is invalid.",
+          );
         client.subscribed = false;
+        delete client.subscriptionId;
+        delete client.eventFilter;
         result = { unsubscribed: true };
       } else if (request.method === "task.list") {
         requirePermission(principal, "read:state");
+        if (Object.keys(request.params).length)
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "M1 task list parameters must be empty.",
+          );
         result = {
           items: Object.values(this.store.state.tasks),
           nextCursor: null,
@@ -429,18 +626,28 @@ export class Broker {
         };
       } else if (request.method === "task.get") {
         requirePermission(principal, "read:state");
-        result = this.store.state.tasks[String(request.params.taskId)] ?? null;
+        if (
+          !exactKeys(request.params, ["taskId"]) ||
+          Object.keys(request.params).length !== 1 ||
+          typeof request.params.taskId !== "string" ||
+          !/^tsk_[0-9A-HJKMNP-TV-Z]{26}$/.test(request.params.taskId)
+        )
+          throw new OrchestratorError("INVALID_REQUEST", "Task ID is invalid.");
+        result = this.store.state.tasks[request.params.taskId] ?? null;
       } else if (request.method === "task.create") {
         requirePermission(principal, "delegate");
+        if (
+          !exactKeys(request.params, ["title", "objective"]) ||
+          Object.keys(request.params).length !== 2
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "M1 task parameters must contain only title and objective.",
+          );
         if (!["human", "cli", "deck"].includes(principal.kind))
           throw new OrchestratorError(
             "PERMISSION_DENIED",
             "Only an operator client may create M1 synthetic tasks.",
-          );
-        if (request.params.parentAgentId !== undefined)
-          throw new OrchestratorError(
-            "INVALID_REQUEST",
-            "Parent agent binding is deferred until M3.",
           );
         if (this.store.readOnly)
           throw new OrchestratorError(
@@ -453,9 +660,9 @@ export class Broker {
           typeof title !== "string" ||
           typeof objective !== "string" ||
           title.length === 0 ||
-          title.length > 1024 ||
+          title.length > 256 ||
           objective.length === 0 ||
-          objective.length > 262144
+          objective.length > 65_536
         )
           throw new OrchestratorError(
             "INVALID_REQUEST",
@@ -477,6 +684,11 @@ export class Broker {
             );
           result = prior.response;
         } else {
+          if (Object.keys(this.store.state.tasks).length >= 1_000)
+            throw new OrchestratorError(
+              "LIMIT_EXCEEDED",
+              "The M1 retained-task limit is 1,000.",
+            );
           const id = createId("tsk");
           result = { taskId: id, state: "queued" };
           committedEvent = await this.store.append({
@@ -488,9 +700,6 @@ export class Broker {
               title,
               objective,
               createdAt: new Date().toISOString(),
-              ...(typeof request.params.parentAgentId === "string"
-                ? { parentAgentId: request.params.parentAgentId }
-                : {}),
               ...(request.idempotencyKey
                 ? {
                     idempotencyKey: request.idempotencyKey,
@@ -513,35 +722,136 @@ export class Broker {
         ok: true,
         result,
       };
-      client.socket.write(encodeFrame(response));
+      this.#writeFrame(client, response);
       for (const event of replayEvents) this.#sendEvent(client, event);
       if (committedEvent)
         for (const subscriber of this.#clients)
-          if (subscriber.subscribed)
+          if (
+            subscriber.subscribed &&
+            this.#matchesFilter(subscriber.eventFilter, committedEvent)
+          )
             this.#sendEvent(subscriber, committedEvent);
     } catch (error) {
       const typed =
         error instanceof OrchestratorError
           ? error
-          : new OrchestratorError(
-              "INVALID_REQUEST",
-              error instanceof Error ? error.message : "Request failed.",
-            );
-      client.socket.write(
-        encodeFrame({
-          v: 1,
-          type: "response",
-          id: request.id,
-          method: request.method,
-          ok: false,
-          error: {
-            code: typed.code,
-            message: typed.message,
-            retryable: typed.retryable,
-          },
-        }),
-      );
+          : new OrchestratorError("INVALID_REQUEST", "Request failed.");
+      if (typed.code === "PERMISSION_DENIED" && !this.store.readOnly) {
+        const denied = await this.store
+          .append({
+            type: "audit.authorization_denied",
+            actor: {
+              principalId: principal.id,
+              kind: principal.kind,
+            },
+            entityRefs: {},
+            payload: { action: request.method },
+          })
+          .catch(() => undefined);
+        if (denied) {
+          await this.snapshotStore
+            .write(this.store.state)
+            .catch(() => undefined);
+          for (const subscriber of this.#clients)
+            if (
+              subscriber.subscribed &&
+              this.#matchesFilter(subscriber.eventFilter, denied)
+            )
+              this.#sendEvent(subscriber, denied);
+        }
+      }
+      this.#writeFrame(client, {
+        v: 1,
+        type: "response",
+        id: request.id,
+        method: request.method,
+        ok: false,
+        error: {
+          code: typed.code,
+          message: typed.message,
+          retryable: typed.retryable,
+        },
+      });
     }
+  }
+  #matchesFilter(
+    filter: SubscriptionFilter | undefined,
+    event: import("../state/types.js").StoredEvent,
+  ): boolean {
+    if (!filter) return true;
+    const names = filter.events;
+    const agents = filter.agentIds;
+    const tasks = filter.taskIds;
+    return (
+      (!names ||
+        names.length === 0 ||
+        names.some((name) =>
+          name.endsWith(".*")
+            ? event.type.startsWith(name.slice(0, -1))
+            : event.type === name,
+        )) &&
+      (!agents ||
+        agents.length === 0 ||
+        (event.entityRefs.agentId !== undefined &&
+          agents.includes(event.entityRefs.agentId))) &&
+      (!tasks ||
+        tasks.length === 0 ||
+        (event.entityRefs.taskId !== undefined &&
+          tasks.includes(event.entityRefs.taskId)))
+    );
+  }
+  #queueAudit(action: string): void {
+    const previous = this.#mutationTail;
+    let release!: () => void;
+    this.#mutationTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    void previous
+      .then(async () => {
+        try {
+          if (this.store.readOnly) return;
+          const event = await this.store.append({
+            type: "audit.action",
+            actor: {
+              principalId: "prn_00000000000000000000000000",
+              kind: "system",
+            },
+            entityRefs: {},
+            payload: { action },
+          });
+          await this.snapshotStore
+            .write(this.store.state)
+            .catch(() => undefined);
+          for (const subscriber of this.#clients)
+            if (
+              subscriber.subscribed &&
+              this.#matchesFilter(subscriber.eventFilter, event)
+            )
+              this.#sendEvent(subscriber, event);
+        } finally {
+          release();
+        }
+      })
+      .catch(() => undefined);
+  }
+  #writeFrame(client: Client, frame: unknown): void {
+    if (client.slowClosed || client.socket.destroyed) return;
+    let encoded: Buffer;
+    try {
+      encoded = encodeFrame(frame);
+    } catch {
+      client.slowClosed = true;
+      client.socket.destroy();
+      this.#queueAudit("oversized_outbound_frame_disconnected");
+      return;
+    }
+    if (client.socket.writableLength + encoded.byteLength > 4 * 1024 * 1024) {
+      client.slowClosed = true;
+      client.socket.destroy();
+      this.#queueAudit("slow_client_disconnected");
+      return;
+    }
+    client.socket.write(encoded);
   }
   #sendEvent(
     client: Client,
@@ -557,11 +867,6 @@ export class Broker {
       refs: stored.entityRefs,
       data: stored.payload,
     };
-    const encoded = encodeFrame(event);
-    if (client.socket.writableLength + encoded.byteLength > 4 * 1024 * 1024) {
-      client.socket.destroy();
-      return;
-    }
-    client.socket.write(encoded);
+    this.#writeFrame(client, event);
   }
 }

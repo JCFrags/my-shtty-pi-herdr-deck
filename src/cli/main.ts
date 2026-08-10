@@ -1,6 +1,15 @@
 import { doctor } from "../broker/doctor.js";
 import { Broker } from "../broker/broker.js";
 import { ensurePrivateDirectory, resolvePaths } from "../shared/paths.js";
+async function openStore(broker: Broker): Promise<void> {
+  const snapshot = await broker.snapshotStore.read().catch((error: unknown) => {
+    broker.store.readOnly = true;
+    broker.store.corruption =
+      error instanceof Error ? error.message : "Snapshot verification failed.";
+    return undefined;
+  });
+  await broker.store.open(snapshot);
+}
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   const [command, subcommand] = argv;
   if (command === "version") {
@@ -29,18 +38,21 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     return;
   }
   if (command === "broker" && subcommand === "status") {
-    await broker.store.open();
+    await openStore(broker);
     console.log(
       JSON.stringify({
-        status: "healthy",
+        status: broker.store.readOnly ? "read_only_recovery" : "healthy",
         eventSeq: broker.store.state.lastEventSeq,
+        ...(broker.store.corruption
+          ? { corruption: broker.store.corruption }
+          : {}),
       }),
     );
     return;
   }
   if (command === "events" && subcommand === "verify") {
-    await broker.store.open();
-    console.log(JSON.stringify(broker.store.verify()));
+    await openStore(broker);
+    console.log(JSON.stringify(await broker.store.verifyDisk()));
     return;
   }
   console.error(

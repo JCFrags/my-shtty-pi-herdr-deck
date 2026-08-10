@@ -29,9 +29,28 @@ export class SnapshotStore {
     try {
       const value = JSON.parse(await readPrivateRegular(this.path)) as Snapshot;
       const { checksum, ...base } = value;
+      const keys = Object.keys(value as unknown as Record<string, unknown>);
+      const expectedKeys = [
+        "schemaVersion",
+        "generatedAt",
+        "lastEventSeq",
+        "lastEventHash",
+        "state",
+        "checksum",
+      ];
+      const generated = Date.parse(value.generatedAt);
       if (
+        keys.length !== expectedKeys.length ||
+        keys.some((key) => !expectedKeys.includes(key)) ||
         value.schemaVersion !== 1 ||
+        !Number.isSafeInteger(value.lastEventSeq) ||
+        value.lastEventSeq < 0 ||
+        !/^[0-9a-f]{64}$/.test(value.lastEventHash) ||
+        !Number.isFinite(generated) ||
+        new Date(generated).toISOString() !== value.generatedAt ||
         !value.state ||
+        value.state.schemaVersion !== 1 ||
+        !/^[0-9a-f]{64}$/.test(checksum) ||
         checksum !== sha256(canonicalJson(base)) ||
         value.lastEventSeq !== value.state.lastEventSeq ||
         value.lastEventHash !== value.state.lastEventHash

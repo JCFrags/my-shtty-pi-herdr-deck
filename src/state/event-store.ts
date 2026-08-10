@@ -1,4 +1,4 @@
-import { chmod, mkdir, open, rename } from "node:fs/promises";
+import { mkdir, open, rename } from "node:fs/promises";
 import { dirname } from "node:path";
 import { constants } from "node:fs";
 import {
@@ -12,6 +12,46 @@ import { emptyState, reduce } from "./reducer.js";
 import type { EventInput, OrchestrationState, StoredEvent } from "./types.js";
 import type { Snapshot } from "./snapshot-store.js";
 const MAX_RETAINED_EVENTS = 1_000;
+const EVENT_KEYS = [
+  "schemaVersion",
+  "seq",
+  "id",
+  "timestamp",
+  "type",
+  "actor",
+  "entityRefs",
+  "payload",
+  "prevHash",
+  "hash",
+] as const;
+const ACTOR_KINDS = new Set([
+  "human",
+  "cli",
+  "deck",
+  "pi_parent",
+  "pi_child",
+  "observer",
+  "system",
+]);
+function exactKeys(
+  value: Record<string, unknown>,
+  keys: readonly string[],
+): boolean {
+  const actual = Object.keys(value);
+  return (
+    actual.length === keys.length && actual.every((key) => keys.includes(key))
+  );
+}
+function validTimestamp(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return false;
+  try {
+    return new Date(parsed).toISOString() === value;
+  } catch {
+    return false;
+  }
+}
 export class EventStore {
   readonly path: string;
   #state = emptyState();
@@ -24,7 +64,10 @@ export class EventStore {
   corruption: string | undefined;
   constructor(
     path: string,
-    actor = { principalId: "prn_system", kind: "system" },
+    actor = {
+      principalId: "prn_00000000000000000000000000",
+      kind: "system",
+    },
   ) {
     this.path = path;
     this.#actor = actor;
@@ -34,6 +77,7 @@ export class EventStore {
     try {
       let index = 0;
       let previous: StoredEvent | undefined;
+      let snapshotValidationState = emptyState();
       if (snapshot) {
         if (
           snapshot.schemaVersion !== 1 ||
@@ -44,7 +88,17 @@ export class EventStore {
             "STATE_CORRUPT",
             "Snapshot schema is invalid.",
           );
-        if (snapshot.lastEventSeq === 0) this.#state = snapshot.state;
+        if (snapshot.lastEventSeq === 0) {
+          if (
+            canonicalJson(snapshot.state) !==
+            canonicalJson(snapshotValidationState)
+          )
+            throw new OrchestratorError(
+              "STATE_CORRUPT",
+              "Genesis snapshot state does not match the event chain.",
+            );
+          this.#state = snapshot.state;
+        }
       }
       for await (const line of readPrivateLines(this.path)) {
         if (!line || line.endsWith("\r"))
@@ -70,13 +124,20 @@ export class EventStore {
         this.#lastHash = event.hash;
         if (!snapshot || event.seq > snapshot.lastEventSeq)
           this.#state = reduce(this.#state, event);
-        else if (event.seq === snapshot.lastEventSeq) {
-          if (event.hash !== snapshot.lastEventHash)
-            throw new OrchestratorError(
-              "STATE_CORRUPT",
-              "Snapshot cursor does not match the event chain.",
-            );
-          this.#state = snapshot.state;
+        else {
+          snapshotValidationState = reduce(snapshotValidationState, event);
+          if (event.seq === snapshot.lastEventSeq) {
+            if (
+              event.hash !== snapshot.lastEventHash ||
+              canonicalJson(snapshotValidationState) !==
+                canonicalJson(snapshot.state)
+            )
+              throw new OrchestratorError(
+                "STATE_CORRUPT",
+                "Snapshot state or cursor does not match the event chain.",
+              );
+            this.#state = snapshot.state;
+          }
         }
       }
       if (snapshot && this.#lastSeq < snapshot.lastEventSeq)
@@ -86,6 +147,11 @@ export class EventStore {
         );
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        if (snapshot && snapshot.lastEventSeq > 0) {
+          this.readOnly = true;
+          this.corruption = "Snapshot exists but its event log is missing.";
+          return;
+        }
         await createPrivateExclusive(this.path, "");
         return;
       }
@@ -119,16 +185,52 @@ export class EventStore {
   }
   async readEventsFrom(fromSeq: number): Promise<StoredEvent[]> {
     const result: StoredEvent[] = [];
-    for await (const line of readPrivateLines(this.path)) {
-      if (!line || line.endsWith("\r"))
+    let previous: StoredEvent | undefined;
+    try {
+      for await (const line of readPrivateLines(this.path)) {
+        if (!line || line.endsWith("\r"))
+          throw new OrchestratorError(
+            "STATE_CORRUPT",
+            "Noncanonical event line.",
+          );
+        let event: StoredEvent;
+        try {
+          event = JSON.parse(line) as StoredEvent;
+        } catch {
+          throw new OrchestratorError("STATE_CORRUPT", "Invalid event JSON.");
+        }
+        this.verifyEvent(event, previous);
+        previous = event;
+        if (event.seq > fromSeq) result.push(event);
+      }
+      if (
+        (previous?.seq ?? 0) !== this.#lastSeq ||
+        (previous?.hash ?? "0".repeat(64)) !== this.#lastHash
+      )
         throw new OrchestratorError(
           "STATE_CORRUPT",
-          "Noncanonical event line.",
+          "Event log changed after startup.",
         );
-      const event = JSON.parse(line) as StoredEvent;
-      if (event.seq > fromSeq) result.push(event);
+      return result;
+    } catch (error) {
+      this.readOnly = true;
+      this.corruption =
+        error instanceof Error
+          ? error.message
+          : "Event log verification failed.";
+      throw new OrchestratorError(
+        "STATE_CORRUPT",
+        "Event log verification failed.",
+      );
     }
-    return result;
+  }
+  async verifyDisk(): Promise<ReturnType<EventStore["verify"]>> {
+    try {
+      await this.readEventsFrom(Number.MAX_SAFE_INTEGER);
+    } catch {
+      // readEventsFrom records the safe recovery state.
+    }
+    return this.verify();
   }
   async append(input: EventInput): Promise<StoredEvent> {
     let result: StoredEvent | undefined;
@@ -158,25 +260,37 @@ export class EventStore {
           hash: this.#lastHash,
         } as StoredEvent);
         const candidateState = reduce(this.#state, event);
-        const handle = await open(
-          this.path,
-          constants.O_WRONLY | constants.O_APPEND | (constants.O_NOFOLLOW ?? 0),
-          0o600,
-        );
-        const stat = await handle.stat();
-        if (
-          !stat.isFile() ||
-          stat.nlink !== 1 ||
-          (process.getuid?.() !== undefined && stat.uid !== process.getuid())
-        ) {
-          await handle.close();
-          throw new Error("Unsafe event log.");
-        }
         try {
-          await handle.write(`${canonicalJson(event)}\n`, undefined, "utf8");
-          await handle.sync();
-        } finally {
-          await handle.close();
+          const handle = await open(
+            this.path,
+            constants.O_WRONLY |
+              constants.O_APPEND |
+              (constants.O_NOFOLLOW ?? 0),
+            0o600,
+          );
+          const stat = await handle.stat();
+          if (
+            !stat.isFile() ||
+            stat.nlink !== 1 ||
+            (process.getuid?.() !== undefined && stat.uid !== process.getuid())
+          ) {
+            await handle.close();
+            throw new Error("Unsafe event log.");
+          }
+          try {
+            await handle.write(`${canonicalJson(event)}\n`, undefined, "utf8");
+            await handle.sync();
+          } finally {
+            await handle.close();
+          }
+        } catch (error) {
+          this.readOnly = true;
+          this.corruption = "A canonical event append failed.";
+          throw new OrchestratorError(
+            "BROKER_READ_ONLY",
+            "Canonical event persistence failed; the store is read-only.",
+            { retryable: false },
+          );
         }
         this.#events.push(event);
         if (this.#events.length > MAX_RETAINED_EVENTS) this.#events.shift();
@@ -205,118 +319,104 @@ export class EventStore {
     };
   }
   private verifyEvent(event: StoredEvent, previous?: StoredEvent): void {
+    if (!event || typeof event !== "object" || Array.isArray(event))
+      throw new OrchestratorError("STATE_CORRUPT", "Event must be an object.");
+    const raw = event as unknown as Record<string, unknown>;
     const actor = event.actor;
-    const payload = event.payload as Record<string, unknown>;
-    const taskStates = new Set(["queued", "cancelled"]);
-    const known = new Set([
-      "task.created",
-      "task.state_changed",
-      "audit.action",
-      "audit.authorization_denied",
-      "system.status_changed",
-      "recovery.reconciled",
-    ]);
-    const refKeys = Object.keys(event.entityRefs);
-    const timestampValid =
-      typeof event.timestamp === "string" &&
-      new Date(event.timestamp).toISOString() === event.timestamp;
-    const actorValid =
-      actor &&
-      typeof actor.principalId === "string" &&
-      (actor.principalId === "prn_system" ||
-        actor.principalId === "prn_test" ||
-        isEntityId(actor.principalId, "prn")) &&
-      ["human", "cli", "deck", "observer", "system"].includes(actor.kind);
-    let eventPayloadValid =
-      known.has(event.type) &&
+    const refs = event.entityRefs;
+    const payload = event.payload;
+    const baseValid =
+      exactKeys(raw, EVENT_KEYS) &&
+      event.schemaVersion === 1 &&
+      Number.isSafeInteger(event.seq) &&
+      event.seq >= 1 &&
+      isEntityId(event.id, "evt") &&
+      validTimestamp(event.timestamp) &&
+      typeof event.type === "string" &&
+      !!actor &&
+      typeof actor === "object" &&
+      !Array.isArray(actor) &&
+      exactKeys(actor as unknown as Record<string, unknown>, [
+        "principalId",
+        "kind",
+      ]) &&
+      isEntityId(actor.principalId, "prn") &&
+      ACTOR_KINDS.has(actor.kind) &&
+      !!refs &&
+      typeof refs === "object" &&
+      !Array.isArray(refs) &&
       !!payload &&
       typeof payload === "object" &&
-      timestampValid &&
-      !!actorValid;
-    if (event.type === "task.created")
-      eventPayloadValid =
-        eventPayloadValid &&
-        refKeys.length === 1 &&
-        refKeys[0] === "taskId" &&
-        isEntityId(event.entityRefs.taskId, "tsk") &&
-        payload.id === event.entityRefs.taskId &&
-        typeof payload.title === "string" &&
-        payload.title.length <= 1024 &&
-        typeof payload.objective === "string" &&
-        payload.objective.length <= 262144 &&
-        typeof payload.createdAt === "string" &&
-        (!payload.idempotencyKey ||
-          (typeof payload.idempotencyKey === "string" &&
-            typeof payload.paramsHash === "string" &&
-            payload.response !== undefined));
-    if (event.type === "task.state_changed")
-      eventPayloadValid =
-        eventPayloadValid &&
-        refKeys.length === 1 &&
-        refKeys[0] === "taskId" &&
-        isEntityId(event.entityRefs.taskId, "tsk") &&
-        typeof payload.to === "string" &&
-        taskStates.has(payload.to);
-    if (
+      !Array.isArray(payload) &&
+      /^[0-9a-f]{64}$/.test(event.prevHash) &&
+      /^[0-9a-f]{64}$/.test(event.hash) &&
+      event.seq === (previous?.seq ?? 0) + 1 &&
+      event.prevHash === (previous?.hash ?? "0".repeat(64)) &&
+      event.hash === sha256(canonicalJson({ ...event, hash: undefined }));
+    if (!baseValid)
+      throw new OrchestratorError(
+        "STATE_CORRUPT",
+        `Event chain is invalid at sequence ${String(event.seq)}.`,
+      );
+
+    const p = payload as Record<string, unknown>;
+    let valid = false;
+    if (event.type === "task.created") {
+      const basicKeys = ["id", "title", "objective", "createdAt"];
+      const idempotentKeys = [
+        ...basicKeys,
+        "idempotencyKey",
+        "paramsHash",
+        "response",
+      ];
+      const response = p.response as Record<string, unknown> | undefined;
+      const hasIdempotency = Object.hasOwn(p, "idempotencyKey");
+      valid =
+        exactKeys(refs, ["taskId"]) &&
+        isEntityId(refs.taskId, "tsk") &&
+        p.id === refs.taskId &&
+        typeof p.title === "string" &&
+        p.title.length > 0 &&
+        p.title.length <= 256 &&
+        typeof p.objective === "string" &&
+        p.objective.length > 0 &&
+        p.objective.length <= 65_536 &&
+        validTimestamp(p.createdAt) &&
+        ((!hasIdempotency && exactKeys(p, basicKeys)) ||
+          (hasIdempotency &&
+            exactKeys(p, idempotentKeys) &&
+            typeof p.idempotencyKey === "string" &&
+            p.idempotencyKey.length > 0 &&
+            p.idempotencyKey.length <= 256 &&
+            typeof p.paramsHash === "string" &&
+            /^[0-9a-f]{64}$/.test(p.paramsHash) &&
+            !!response &&
+            typeof response === "object" &&
+            !Array.isArray(response) &&
+            exactKeys(response, ["taskId", "state"]) &&
+            response.taskId === p.id &&
+            response.state === "queued"));
+    } else if (event.type === "task.state_changed") {
+      valid =
+        exactKeys(refs, ["taskId"]) &&
+        isEntityId(refs.taskId, "tsk") &&
+        exactKeys(p, ["to"]) &&
+        (p.to === "queued" || p.to === "cancelled");
+    } else if (
       event.type === "audit.action" ||
       event.type === "audit.authorization_denied"
-    )
-      eventPayloadValid =
-        eventPayloadValid &&
-        refKeys.length === 0 &&
-        Object.keys(payload).length === 1 &&
-        typeof payload.action === "string" &&
-        payload.action.length <= 128;
-    if (event.type === "run.created")
-      eventPayloadValid =
-        eventPayloadValid &&
-        typeof payload.taskId === "string" &&
-        Number.isSafeInteger(payload.assignmentGeneration) &&
-        Number(payload.assignmentGeneration) >= 1;
-    if (event.type === "result.published") {
-      const result = payload.result as Record<string, unknown> | undefined;
-      eventPayloadValid =
-        eventPayloadValid &&
-        typeof payload.taskId === "string" &&
-        typeof payload.resultId === "string" &&
-        !!result &&
-        result.schemaVersion === 1 &&
-        ["succeeded", "failed", "cancelled"].includes(String(result.status)) &&
-        typeof result.summary === "string";
+    ) {
+      valid =
+        exactKeys(refs, []) &&
+        exactKeys(p, ["action"]) &&
+        typeof p.action === "string" &&
+        p.action.length > 0 &&
+        p.action.length <= 128;
     }
-    if (event.type === "idempotency.record")
-      eventPayloadValid =
-        eventPayloadValid &&
-        typeof payload.key === "string" &&
-        typeof payload.principalId === "string" &&
-        typeof payload.method === "string";
-    if (!eventPayloadValid)
+    if (!valid)
       throw new OrchestratorError(
         "STATE_CORRUPT",
         `Event payload is invalid for ${event.type}.`,
-      );
-    if (
-      !event ||
-      event.schemaVersion !== 1 ||
-      !Number.isSafeInteger(event.seq) ||
-      typeof event.id !== "string" ||
-      typeof event.timestamp !== "string" ||
-      typeof event.type !== "string" ||
-      !actor ||
-      typeof actor.principalId !== "string" ||
-      typeof actor.kind !== "string" ||
-      !event.entityRefs ||
-      typeof event.entityRefs !== "object" ||
-      event.payload === undefined ||
-      !/^[0-9a-f]{64}$/.test(event.prevHash) ||
-      !/^[0-9a-f]{64}$/.test(event.hash) ||
-      event.seq !== (previous?.seq ?? 0) + 1 ||
-      event.prevHash !== (previous?.hash ?? "0".repeat(64)) ||
-      event.hash !== sha256(canonicalJson({ ...event, hash: undefined }))
-    )
-      throw new OrchestratorError(
-        "STATE_CORRUPT",
-        `Event chain is invalid at sequence ${event.seq}.`,
       );
   }
 }
@@ -336,6 +436,14 @@ export async function writeSnapshot(
   try {
     await handle.writeFile(`${canonicalJson(snapshot)}\n`, "utf8");
     await handle.sync();
+    const stat = await handle.stat();
+    if (
+      !stat.isFile() ||
+      stat.nlink !== 1 ||
+      (process.getuid?.() !== undefined && stat.uid !== process.getuid()) ||
+      (stat.mode & 0o077) !== 0
+    )
+      throw new Error("Snapshot temporary file is unsafe.");
   } finally {
     await handle.close();
   }
@@ -343,5 +451,4 @@ export async function writeSnapshot(
   const directory = await open(dirname(path), "r");
   await directory.sync();
   await directory.close();
-  await chmod(path, 0o600);
 }
