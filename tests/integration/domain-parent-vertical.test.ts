@@ -720,6 +720,34 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
       true,
     );
     assert.equal(fake.provisions, 2);
+    const queueBefore = Object.keys(broker.store.state.tasks).length;
+    const queueSteps = Array.from({ length: 20 }, (_, index) => ({
+      key: `queue-${index}`,
+      profileId: "scout",
+      title: `Queue ${index}`,
+      objective: "queue",
+      dependsOn: [],
+    }));
+    const queueRequest = () =>
+      send(p1.socket, "delegate.execute", {
+        mode: "parallel",
+        title: "queue-crossing",
+        steps: queueSteps,
+        wait: false,
+        waitUntil: [],
+        timeoutMs: 10_000,
+        failureMode: "collect_all",
+        dryRun: false,
+      });
+    const [queueOne, queueTwo] = await Promise.all([
+      queueRequest(),
+      queueRequest(),
+    ]);
+    assert.equal([queueOne.ok, queueTwo.ok].filter(Boolean).length, 1);
+    assert.equal(
+      Object.keys(broker.store.state.tasks).length,
+      queueBefore + 20,
+    );
     const collected = ok(
       await send(p1.socket, "task.collect", {
         taskIds: [taskId],
