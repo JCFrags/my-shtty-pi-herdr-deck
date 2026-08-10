@@ -1,3 +1,11 @@
+## M2 implementation handoff
+
+- BL-030–BL-033: `src/herdr/runner.ts`, `capabilities.ts`, `socket-client.ts`, `types.ts`, `normalizers.ts` provide shell-free bounded process execution, schema projection, raw snapshot/event transport, and additive-field tolerant normalized types.
+- BL-034–BL-036: `src/state/agent-domain.ts` and `src/herdr/names.ts` provide agent lifecycle/graph guards and deterministic bounded names, labels, and branch slugs.
+- BL-037–BL-040: `src/herdr/token-files.ts` and `provisioner.ts` provide 256-bit token digests, private prompt files, read-only/worktree tab launch construction, and registration-start resource identities.
+- BL-041–BL-043: `src/herdr/controls.ts`, `reconciler.ts`, and `src/git/{runner,porcelain,evidence}.ts` provide identity revalidation, startup classifications, and NUL-safe Git evidence.
+- Evidence: `evidence/implementation/herdr-m2/`.
+
 ## M0/M1 implementation handoff
 
 - M0: package metadata, dual binaries, strict source layout, copied schemas/examples, shared clock/ID/path/subprocess/error primitives, doctor capability report, and artifacts ignore are implemented in commit `13455b7`.
