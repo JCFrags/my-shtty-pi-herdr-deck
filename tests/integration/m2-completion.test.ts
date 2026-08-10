@@ -161,6 +161,185 @@ test("M2 reducer retains explicit dirty and replacement classifications", () => 
   assert.equal(state.herdrResources?.[id]?.cleanupOutcome, "retained");
 });
 
+test("M2 registration reconstructs pending files after service restart", async () => {
+  const root = await mkdtemp(join(tmpdir(), "m2-restart-"));
+  const prompts = join(root, "prompts");
+  const events = join(root, "events.ndjson");
+  const cli = {
+    requireMutationCapabilities: () => undefined,
+    createTab: async () => ({ tab_id: "tab-r", root_pane_id: "pane-r" }),
+    startPi: async () => ({ pane_id: "pane-r" }),
+    snapshot: async () => ({
+      panes: [
+        {
+          id: "pane-r",
+          terminalId: "term-r",
+          occupant: {
+            agentId: "agent-r",
+            terminalId: "term-r",
+            sessionId: "sess-r",
+            generation: 1,
+          },
+        },
+      ],
+      tabs: [],
+      workspaces: [],
+      agents: [],
+      worktrees: [],
+    }),
+  } as never;
+  const firstStore = new EventStore(events);
+  await firstStore.open();
+  const first = new HerdrService({
+    store: firstStore,
+    cli,
+    provisioner: new HerdrProvisioner(cli, prompts, () => [], true),
+  });
+  const result = await first.provision({
+    agentId: "agent-r",
+    parentAgentId: "parent-r",
+    role: "worker",
+    workspaceId: "w",
+    cwd: root,
+    profileId: "p",
+    isolation: "shared-readonly",
+    prompt: "restart",
+  });
+  const secondStore = new EventStore(events);
+  await secondStore.open();
+  const second = new HerdrService({
+    store: secondStore,
+    cli,
+    provisioner: new HerdrProvisioner(cli, prompts, () => [], true),
+  });
+  await second.startupReconcile();
+  await second.register(
+    "agent-r",
+    {
+      paneId: "pane-r",
+      terminalId: "term-r",
+      sessionId: "sess-r",
+      generation: 1,
+    },
+    undefined,
+    result.token.digest,
+  );
+  assert.equal(
+    secondStore.state.herdrResources?.["agent-r"]?.state,
+    "registered",
+  );
+  assert.deepEqual(await readdir(prompts), []);
+});
+
+test("M2 restart expiry durably times out pending registration", async () => {
+  const root = await mkdtemp(join(tmpdir(), "m2-expiry-"));
+  const prompts = join(root, "prompts");
+  const events = join(root, "events.ndjson");
+  const cli = {
+    requireMutationCapabilities: () => undefined,
+    createTab: async () => ({ tab_id: "tab-e", root_pane_id: "pane-e" }),
+    startPi: async () => ({ pane_id: "pane-e" }),
+    snapshot: async () => ({
+      panes: [],
+      tabs: [],
+      workspaces: [],
+      agents: [],
+      worktrees: [],
+    }),
+  } as never;
+  const firstStore = new EventStore(events);
+  await firstStore.open();
+  const first = new HerdrService({
+    store: firstStore,
+    cli,
+    provisioner: new HerdrProvisioner(cli, prompts, () => [], true),
+  });
+  await first.provision({
+    agentId: "agent-e",
+    parentAgentId: "parent-e",
+    role: "worker",
+    workspaceId: "w",
+    cwd: root,
+    profileId: "p",
+    isolation: "shared-readonly",
+    prompt: "expiry",
+  });
+  await firstStore.append({
+    type: "herdr.provision.outcome",
+    actor: { principalId: "prn_00000000000000000000000000", kind: "system" },
+    entityRefs: { agentId: "agent-e" },
+    payload: {
+      agentId: "agent-e",
+      state: "pending",
+      paneId: "pane-e",
+      registrationDeadline: new Date(Date.now() - 1).toISOString(),
+    },
+  });
+  const secondStore = new EventStore(events);
+  await secondStore.open();
+  const second = new HerdrService({
+    store: secondStore,
+    cli,
+    provisioner: new HerdrProvisioner(cli, prompts, () => [], true),
+  });
+  await second.startupReconcile();
+  assert.equal(
+    secondStore.state.herdrResources?.["agent-e"]?.state,
+    "timed_out",
+  );
+  assert.deepEqual(await readdir(prompts), []);
+});
+
+test("M2 close is serialized and repeated close mutates once", async () => {
+  const root = await mkdtemp(join(tmpdir(), "m2-close-lock-"));
+  const store = new EventStore(join(root, "events.ndjson"));
+  await store.open();
+  let closeCount = 0;
+  const agentId = createId("agt");
+  const cli = {
+    requireMutationCapabilities: () => undefined,
+    snapshot: async () => ({
+      panes: [{ id: "pane-c", occupant: { agentId, generation: 1 } }],
+      tabs: [],
+      workspaces: [],
+      agents: [],
+      worktrees: [],
+    }),
+    closePane: async () => {
+      closeCount++;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    },
+  } as never;
+  const service = new HerdrService({
+    store,
+    cli,
+    provisioner: new HerdrProvisioner(
+      cli,
+      join(root, "prompts"),
+      () => [],
+      true,
+    ),
+  });
+  await store.append({
+    type: "herdr.provision.intent",
+    actor: { principalId: "prn_00000000000000000000000000", kind: "system" },
+    entityRefs: { agentId },
+    payload: { agentId },
+  });
+  await store.append({
+    type: "herdr.provision.outcome",
+    actor: { principalId: "prn_00000000000000000000000000", kind: "system" },
+    entityRefs: { agentId },
+    payload: { agentId, state: "registered", paneId: "pane-c", generation: 1 },
+  });
+  await Promise.all([
+    service.close({ paneId: "pane-c", generation: 1 }),
+    service.close({ paneId: "pane-c", generation: 1 }),
+  ]);
+  assert.equal(closeCount, 1);
+  assert.equal(store.state.herdrResources?.[agentId]?.state, "closed");
+});
+
 test("M2 token digest is the only durable token value", () => {
   const token = createManagedToken();
   assert.match(token.digest, /^[0-9a-f]{64}$/);

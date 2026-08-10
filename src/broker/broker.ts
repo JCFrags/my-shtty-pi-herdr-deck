@@ -627,9 +627,12 @@ export class Broker {
             "terminalId",
             "sessionId",
             "generation",
+            "tokenProof",
           ]) ||
           !safeText(request.params.agentId) ||
-          !safeText(request.params.paneId)
+          !safeText(request.params.paneId) ||
+          (request.params.tokenProof !== undefined &&
+            !safeText(request.params.tokenProof, 128))
         )
           throw new OrchestratorError(
             "INVALID_REQUEST",
@@ -650,6 +653,10 @@ export class Broker {
         await this.#herdr.register(
           request.params.agentId,
           registrationIdentity,
+          undefined,
+          safeText(request.params.tokenProof, 128)
+            ? request.params.tokenProof
+            : undefined,
         );
         result = { registered: true };
       } else if (request.method === "herdr.adopt") {

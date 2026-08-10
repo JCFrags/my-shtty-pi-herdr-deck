@@ -1,5 +1,8 @@
 import type { HerdrCli } from "./cli.js";
 import { branchSlug, herdrName, label } from "./names.js";
+import type { GitEvidence } from "../git/porcelain.js";
+import { readdir } from "node:fs/promises";
+import { join } from "node:path";
 import {
   createManagedToken,
   createManagedTokenFile,
@@ -38,6 +41,7 @@ export class HerdrProvisioner {
     readonly promptRoot: string,
     readonly liveNames: () => Iterable<string> = () => [],
     readonly retainRegistrationFiles = false,
+    readonly gitEvidence?: (cwd: string, base?: string) => Promise<GitEvidence>,
   ) {}
   async provision(input: ProvisionInput): Promise<ProvisionResult> {
     const token = createManagedToken();
@@ -165,30 +169,63 @@ export class HerdrProvisioner {
         paneId: typeof sr.pane_id === "string" ? sr.pane_id : paneId,
         ...(worktreeId ? { worktreeId } : {}),
         ...(worktreePath ? { worktreePath } : {}),
+        ...(unusedTabId ? { unusedTabId } : {}),
       };
     } catch (error) {
       if (prompt) await deletePromptFile(prompt).catch(() => undefined);
       if (tokenFile) await deletePromptFile(tokenFile).catch(() => undefined);
       // Revalidate each resource immediately before destructive compensation.
-      // An empty fake snapshot is treated as legacy evidence; a reported
-      // occupant or worktree must match the resource we created.
-      if (paneId && (await this.ownsPane(paneId, input.agentId)).safe)
-        await this.cli.closePane(paneId).catch(() => undefined);
-      if (tabId && (await this.ownsTab(tabId, paneId)).safe)
-        await this.cli.closeTab(tabId).catch(() => undefined);
+      // Missing or ambiguous snapshots are not proof of ownership.
+      if (
+        worktreeId &&
+        (await this.ownsWorktree(worktreeId, worktreePath)).safe &&
+        !!worktreePath &&
+        !!this.gitEvidence &&
+        !(await this.gitEvidence(worktreePath)).dirty
+      )
+        await this.cli.removeWorktree(worktreeId).catch(() => undefined);
       if (
         unusedTabId &&
         unusedTabId !== tabId &&
         (await this.ownsTab(unusedTabId)).safe
       )
         await this.cli.closeTab(unusedTabId).catch(() => undefined);
-      if (
-        worktreeId &&
-        (await this.ownsWorktree(worktreeId, worktreePath)).safe
-      )
-        await this.cli.removeWorktree(worktreeId).catch(() => undefined);
+      if (tabId && (await this.ownsTab(tabId, paneId)).safe)
+        await this.cli.closeTab(tabId).catch(() => undefined);
+      if (paneId && (await this.ownsPane(paneId, input.agentId)).safe)
+        await this.cli.closePane(paneId).catch(() => undefined);
       throw error;
     }
+  }
+  async compensate(
+    result: ProvisionResult,
+    expectedAgentId: string,
+  ): Promise<void> {
+    if (
+      result.worktreeId &&
+      (await this.ownsWorktree(result.worktreeId, result.worktreePath)).safe &&
+      result.worktreePath &&
+      this.gitEvidence
+    ) {
+      const evidence = await this.gitEvidence(result.worktreePath).catch(
+        () => undefined,
+      );
+      if (evidence && !evidence.dirty)
+        await this.cli.removeWorktree(result.worktreeId).catch(() => undefined);
+    }
+    if (
+      result.unusedTabId &&
+      result.unusedTabId !== result.tabId &&
+      (await this.ownsTab(result.unusedTabId)).safe
+    )
+      await this.cli.closeTab(result.unusedTabId).catch(() => undefined);
+    if (result.tabId && (await this.ownsTab(result.tabId, result.paneId)).safe)
+      await this.cli.closeTab(result.tabId).catch(() => undefined);
+    if (
+      result.paneId &&
+      (await this.ownsPane(result.paneId, expectedAgentId)).safe
+    )
+      await this.cli.closePane(result.paneId).catch(() => undefined);
   }
   private async ownsPane(
     id: string,
@@ -197,7 +234,7 @@ export class HerdrProvisioner {
     try {
       const snapshot = await this.cli.snapshot();
       const pane = snapshot.panes.find((item) => item.id === id);
-      if (!pane) return { safe: true };
+      if (!pane) return { safe: false };
       const occupant = pane.occupant;
       return {
         safe: !!occupant && occupant.agentId === expectedAgentId,
@@ -215,9 +252,9 @@ export class HerdrProvisioner {
       const tab = snapshot.tabs.find((item) => item.id === id);
       return {
         safe:
-          !tab ||
-          tab.panes.length === 0 ||
-          (!!expectedPaneId && tab.panes.some((p) => p.id === expectedPaneId)),
+          !!tab &&
+          !!expectedPaneId &&
+          tab.panes.some((p) => p.id === expectedPaneId),
       };
     } catch {
       return { safe: false };
@@ -231,11 +268,51 @@ export class HerdrProvisioner {
       const snapshot = await this.cli.snapshot();
       const worktree = snapshot.worktrees.find((item) => item.id === id);
       return {
-        safe: !worktree || (!!expectedPath && worktree.path === expectedPath),
+        safe: !!worktree && !!expectedPath && worktree.path === expectedPath,
       };
     } catch {
       return { safe: false };
     }
+  }
+  async recoverRegistration(
+    agentId: string,
+    resource: {
+      paneId?: string;
+      tabId?: string;
+      worktreeId?: string;
+      worktreePath?: string;
+      tokenDigest?: string;
+      generation?: number;
+    },
+  ): Promise<ProvisionResult | undefined> {
+    if (!resource.tokenDigest) return undefined;
+    let names: string[];
+    try {
+      names = await readdir(this.promptRoot);
+    } catch {
+      return undefined;
+    }
+    const tokenName = names.find((name) =>
+      name.startsWith(`.token-${agentId}-`),
+    );
+    const promptName = names.find((name) =>
+      name.startsWith(`.prompt-${agentId}-`),
+    );
+    if (!tokenName) return undefined;
+    return {
+      name: agentId,
+      token: {
+        token: "",
+        digest: resource.tokenDigest,
+        generation: resource.generation ?? 1,
+      },
+      ...(resource.paneId ? { paneId: resource.paneId } : {}),
+      ...(resource.tabId ? { tabId: resource.tabId } : {}),
+      ...(resource.worktreeId ? { worktreeId: resource.worktreeId } : {}),
+      ...(resource.worktreePath ? { worktreePath: resource.worktreePath } : {}),
+      tokenFilePath: join(this.promptRoot, tokenName),
+      ...(promptName ? { promptPath: join(this.promptRoot, promptName) } : {}),
+    };
   }
   async cleanupRegistration(result: ProvisionResult): Promise<void> {
     if (result.promptPath) await deletePromptFile(result.promptPath);
@@ -243,10 +320,18 @@ export class HerdrProvisioner {
   }
   async verifyRegistration(
     result: ProvisionResult,
-    identity: { paneId: string; generation?: number },
+    identity: {
+      paneId: string;
+      terminalId?: string;
+      sessionId?: string;
+      generation?: number;
+    },
+    suppliedDigest?: string,
   ): Promise<void> {
     if (
       !result.tokenFilePath ||
+      (suppliedDigest !== undefined &&
+        suppliedDigest !== result.token.digest) ||
       !(await verifyManagedTokenFile(result.tokenFilePath, result.token.digest))
     )
       throw new Error("HERDR_REGISTRATION_TOKEN_INVALID");

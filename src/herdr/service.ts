@@ -38,6 +38,8 @@ export class HerdrService {
   readonly #gitEvidence:
     ((cwd: string, base?: string) => Promise<GitEvidence>) | undefined;
   readonly #watchAbort = new AbortController();
+  readonly #agentLocks = new Map<string, Promise<void>>();
+  readonly #expiryTimers = new Map<string, NodeJS.Timeout>();
   constructor(options: HerdrServiceOptions) {
     this.#store = options.store;
     this.#cli = options.cli;
@@ -100,75 +102,93 @@ export class HerdrService {
     });
   }
   async provision(input: ProvisionInput): Promise<ProvisionResult> {
-    await this.#preflight?.();
-    this.#cli.requireMutationCapabilities(
-      input.isolation === "worktree"
-        ? [
-            "tab.create",
-            "agent.start",
-            "worktree.create",
-            "worktree.remove",
-            "tab.close",
-            "pane.close",
-          ]
-        : ["tab.create", "agent.start", "tab.close", "pane.close"],
-    );
-    const beforeGit =
-      input.isolation === "worktree" && this.#gitEvidence
-        ? await this.#gitEvidence(input.cwd, input.projectBase)
-        : undefined;
-    if (beforeGit?.dirty) throw new Error("HERDR_DIRTY_PARENT");
-    await this.#store.append({
-      type: "herdr.provision.intent",
-      actor: this.#actor,
-      entityRefs: { agentId: input.agentId },
-      payload: { agentId: input.agentId },
-    });
-    try {
-      const result = await this.#provisioner.provision(input);
-      if (this.#gitEvidence && result.worktreePath) {
-        const afterGit = await this.#gitEvidence(
-          result.worktreePath,
-          input.projectBase,
-        );
-        if (afterGit.dirty) throw new Error("HERDR_DIRTY_WORKTREE");
-      }
+    return await this.withAgentLock(input.agentId, async () => {
+      await this.#preflight?.();
+      this.#cli.requireMutationCapabilities(
+        input.isolation === "worktree"
+          ? [
+              "tab.create",
+              "agent.start",
+              "worktree.create",
+              "worktree.remove",
+              "tab.close",
+              "pane.close",
+            ]
+          : ["tab.create", "agent.start", "tab.close", "pane.close"],
+      );
+      const beforeGit =
+        input.isolation === "worktree" && this.#gitEvidence
+          ? await this.#gitEvidence(input.cwd, input.projectBase)
+          : undefined;
+      if (beforeGit?.dirty) throw new Error("HERDR_DIRTY_PARENT");
       await this.#store.append({
-        type: "herdr.provision.outcome",
+        type: "herdr.provision.intent",
         actor: this.#actor,
         entityRefs: { agentId: input.agentId },
-        payload: {
-          agentId: input.agentId,
-          state: result.tokenFilePath ? "pending" : "registered",
-          ...(result.paneId ? { paneId: result.paneId } : {}),
-          ...(result.tabId ? { tabId: result.tabId } : {}),
-          ...(result.worktreeId ? { worktreeId: result.worktreeId } : {}),
-          ...(result.worktreePath ? { worktreePath: result.worktreePath } : {}),
-          ...(result.token.digest ? { tokenDigest: result.token.digest } : {}),
-          generation: result.token.generation,
-          registrationDeadline: new Date(Date.now() + 30_000).toISOString(),
-          parentAgentId: input.parentAgentId,
-          ownerId: input.agentId,
-          ...(beforeGit ? { dirty: beforeGit.dirty } : {}),
-        },
+        payload: { agentId: input.agentId },
       });
-      if (result.tokenFilePath) this.#pending.set(input.agentId, result);
-      return result;
-    } catch (error) {
-      await this.#store
-        .append({
+      try {
+        const result = await this.#provisioner.provision(input);
+        if (this.#gitEvidence && result.worktreePath) {
+          const afterGit = await this.#gitEvidence(
+            result.worktreePath,
+            input.projectBase,
+          );
+          if (afterGit.dirty) {
+            await this.#provisioner.compensate(result, input.agentId);
+            throw new Error("HERDR_DIRTY_WORKTREE");
+          }
+        }
+        await this.#store.append({
           type: "herdr.provision.outcome",
           actor: this.#actor,
           entityRefs: { agentId: input.agentId },
           payload: {
             agentId: input.agentId,
-            state: "failed",
-            reason: error instanceof Error ? error.message : "provision failed",
+            state: result.tokenFilePath ? "pending" : "registered",
+            ...(result.paneId ? { paneId: result.paneId } : {}),
+            ...(result.tabId ? { tabId: result.tabId } : {}),
+            ...(result.worktreeId ? { worktreeId: result.worktreeId } : {}),
+            ...(result.worktreePath
+              ? { worktreePath: result.worktreePath }
+              : {}),
+            ...(result.token.digest
+              ? { tokenDigest: result.token.digest }
+              : {}),
+            generation: result.token.generation,
+            registrationDeadline: new Date(Date.now() + 30_000).toISOString(),
+            parentAgentId: input.parentAgentId,
+            ownerId: input.agentId,
+            ...(beforeGit ? { dirty: beforeGit.dirty } : {}),
           },
-        })
-        .catch(() => undefined);
-      throw error;
-    }
+        });
+        if (result.tokenFilePath) {
+          this.#pending.set(input.agentId, result);
+          this.scheduleExpiry(input.agentId, result);
+        }
+        return result;
+      } catch (error) {
+        const dirty =
+          error instanceof Error && error.message === "HERDR_DIRTY_WORKTREE";
+        await this.#store
+          .append({
+            type: "herdr.provision.outcome",
+            actor: this.#actor,
+            entityRefs: { agentId: input.agentId },
+            payload: {
+              agentId: input.agentId,
+              state: dirty ? "dirty" : "failed",
+              reason:
+                error instanceof Error ? error.message : "provision failed",
+              ...(dirty
+                ? { dirty: true, unknown: true, cleanupOutcome: "retained" }
+                : {}),
+            },
+          })
+          .catch(() => undefined);
+        throw error;
+      }
+    });
   }
   async register(
     agentId: string,
@@ -179,85 +199,163 @@ export class HerdrService {
       generation?: number;
     },
     supplied?: ProvisionResult,
+    tokenProof?: string,
   ): Promise<void> {
-    await this.#preflight?.();
-    const result = supplied ?? this.#pending.get(agentId);
-    if (!result) throw new Error("HERDR_REGISTRATION_PENDING_NOT_FOUND");
-    const resource = this.resources[agentId];
-    if (!resource || resource.state !== "pending")
-      throw new Error("HERDR_REGISTRATION_NOT_PENDING");
-    if (
-      resource.registrationDeadline &&
-      Date.parse(resource.registrationDeadline) <= Date.now()
-    )
-      throw new Error("HERDR_REGISTRATION_DEADLINE");
-    const snapshot = await this.#cli.snapshot();
-    const pane = snapshot.panes.find((item) => item.id === identity.paneId);
-    const occupant = pane?.occupant;
-    if (
-      !pane ||
-      !occupant ||
-      (occupant.agentId !== undefined &&
-        occupant.agentId !== resource.ownerId) ||
-      (identity.terminalId !== undefined &&
-        (occupant.terminalId ?? pane.terminalId) !== identity.terminalId) ||
-      (identity.sessionId !== undefined &&
-        occupant.sessionId !== identity.sessionId) ||
-      (identity.generation !== undefined &&
-        occupant.generation !== identity.generation)
-    )
-      throw new Error("HERDR_REGISTRATION_IDENTITY_MISMATCH");
-    await this.#provisioner.verifyRegistration(result, identity);
-    await this.#store.append({
-      type: "herdr.provision.outcome",
-      actor: this.#actor,
-      entityRefs: { agentId },
-      payload: {
-        agentId,
-        state: "registered",
-        paneId: identity.paneId,
-        ...(identity.terminalId ? { terminalId: identity.terminalId } : {}),
-        ...(identity.sessionId ? { sessionId: identity.sessionId } : {}),
-        generation: result.token.generation,
-        tokenDigest: result.token.digest,
-        registrationDeadline: undefined,
-      },
+    await this.withAgentLock(agentId, async () => {
+      await this.#preflight?.();
+      const result =
+        supplied ??
+        this.#pending.get(agentId) ??
+        (await this.restorePending(agentId));
+      if (!result) throw new Error("HERDR_REGISTRATION_PENDING_NOT_FOUND");
+      const resource = this.resources[agentId];
+      if (!resource || resource.state !== "pending")
+        throw new Error("HERDR_REGISTRATION_NOT_PENDING");
+      if (
+        resource.registrationDeadline &&
+        Date.parse(resource.registrationDeadline) <= Date.now()
+      )
+        throw new Error("HERDR_REGISTRATION_DEADLINE");
+      const snapshot = await this.#cli.snapshot();
+      const pane = snapshot.panes.find((item) => item.id === identity.paneId);
+      const occupant = pane?.occupant;
+      if (
+        !pane ||
+        !occupant ||
+        (occupant.agentId !== undefined &&
+          occupant.agentId !== resource.ownerId) ||
+        (identity.terminalId !== undefined &&
+          (occupant.terminalId ?? pane.terminalId) !== identity.terminalId) ||
+        (identity.sessionId !== undefined &&
+          occupant.sessionId !== identity.sessionId) ||
+        (identity.generation !== undefined &&
+          occupant.generation !== identity.generation)
+      )
+        throw new Error("HERDR_REGISTRATION_IDENTITY_MISMATCH");
+      await this.#provisioner.verifyRegistration(result, identity, tokenProof);
+      await this.#store.append({
+        type: "herdr.provision.outcome",
+        actor: this.#actor,
+        entityRefs: { agentId },
+        payload: {
+          agentId,
+          state: "registered",
+          paneId: identity.paneId,
+          ...(identity.terminalId ? { terminalId: identity.terminalId } : {}),
+          ...(identity.sessionId ? { sessionId: identity.sessionId } : {}),
+          generation: result.token.generation,
+          tokenDigest: result.token.digest,
+          registrationDeadline: undefined,
+        },
+      });
+      this.#pending.delete(agentId);
+      const timer = this.#expiryTimers.get(agentId);
+      if (timer) clearTimeout(timer);
+      this.#expiryTimers.delete(agentId);
     });
-    this.#pending.delete(agentId);
   }
   async stop(guard: OccupantGuard): Promise<void> {
-    await this.#preflight?.();
-    this.#cli.requireMutationCapabilities(["agent.stop", "session.snapshot"]);
-    const agentId = this.agentForPane(guard.paneId);
-    await revalidateAndRun(this.#cli, guard, () =>
-      this.#cli.stopAgent(guard.paneId),
-    );
-    if (agentId)
-      await this.recordLifecycle(agentId, "stopped", "stop_succeeded");
+    const agentId = this.agentForPane(guard.paneId) ?? `pane:${guard.paneId}`;
+    await this.withAgentLock(agentId, async () => {
+      await this.#preflight?.();
+      this.#cli.requireMutationCapabilities(["agent.stop", "session.snapshot"]);
+      const resource = agentId.startsWith("pane:")
+        ? undefined
+        : this.resources[agentId];
+      if (resource?.state === "stopped" || resource?.state === "closed") return;
+      await revalidateAndRun(this.#cli, guard, () =>
+        this.#cli.stopAgent(guard.paneId),
+      );
+      if (!agentId.startsWith("pane:"))
+        await this.recordLifecycle(agentId, "stopped", "stop_succeeded");
+    });
   }
   async close(guard: OccupantGuard): Promise<void> {
-    await this.#preflight?.();
-    this.#cli.requireMutationCapabilities(["pane.close", "session.snapshot"]);
-    const agentId = this.agentForPane(guard.paneId);
-    const resource = agentId ? this.resources[agentId] : undefined;
-    if (resource?.dirty) throw new Error("HERDR_DIRTY_WORKTREE");
-    if (resource?.worktreePath && this.#gitEvidence) {
-      const evidence = await this.#gitEvidence(resource.worktreePath);
-      if (evidence.dirty) {
-        await this.recordLifecycle(
-          agentId!,
-          "dirty",
-          "retained_dirty_worktree",
-        );
-        throw new Error("HERDR_DIRTY_WORKTREE");
+    const agentId = this.agentForPane(guard.paneId) ?? `pane:${guard.paneId}`;
+    await this.withAgentLock(agentId, async () => {
+      await this.#preflight?.();
+      this.#cli.requireMutationCapabilities(["pane.close", "session.snapshot"]);
+      const resource = agentId.startsWith("pane:")
+        ? undefined
+        : this.resources[agentId];
+      if (resource?.dirty) throw new Error("HERDR_DIRTY_WORKTREE");
+      if (resource?.worktreePath && this.#gitEvidence) {
+        const evidence = await this.#gitEvidence(resource.worktreePath);
+        if (evidence.dirty) {
+          await this.recordLifecycle(
+            agentId,
+            "dirty",
+            "retained_dirty_worktree",
+          );
+          throw new Error("HERDR_DIRTY_WORKTREE");
+        }
       }
+      if (resource?.state === "closed") return;
+      await revalidateAndRun(this.#cli, guard, () =>
+        this.#cli.closePane(guard.paneId),
+      );
+      if (!agentId.startsWith("pane:"))
+        await this.recordLifecycle(agentId, "closed", "close_succeeded");
+    });
+  }
+  private async withAgentLock<T>(
+    agentId: string,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.#agentLocks.get(agentId) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.#agentLocks.set(agentId, current);
+    await previous;
+    try {
+      return await action();
+    } finally {
+      release();
+      if (this.#agentLocks.get(agentId) === current)
+        this.#agentLocks.delete(agentId);
     }
-    if (resource?.state === "closed") return;
-    await revalidateAndRun(this.#cli, guard, () =>
-      this.#cli.closePane(guard.paneId),
+  }
+  private async restorePending(
+    agentId: string,
+  ): Promise<ProvisionResult | undefined> {
+    const resource = this.resources[agentId];
+    if (!resource || resource.state !== "pending") return undefined;
+    const result = await this.#provisioner.recoverRegistration(
+      agentId,
+      resource,
     );
-    if (agentId)
-      await this.recordLifecycle(agentId, "closed", "close_succeeded");
+    if (result) {
+      this.#pending.set(agentId, result);
+      this.scheduleExpiry(agentId, result);
+    }
+    return result;
+  }
+  private scheduleExpiry(agentId: string, result: ProvisionResult): void {
+    const resource = this.resources[agentId];
+    const deadline = resource?.registrationDeadline;
+    if (!deadline) return;
+    const delay = Math.max(0, Date.parse(deadline) - Date.now());
+    const prior = this.#expiryTimers.get(agentId);
+    if (prior) clearTimeout(prior);
+    const timer = setTimeout(() => {
+      void this.withAgentLock(agentId, async () => {
+        const current = this.resources[agentId];
+        if (current?.state !== "pending") return;
+        await this.#provisioner
+          .cleanupRegistration(result)
+          .catch(() => undefined);
+        this.#pending.delete(agentId);
+        await this.recordLifecycle(
+          agentId,
+          "timed_out",
+          "registration_deadline_cleanup",
+        );
+      }).catch(() => undefined);
+    }, delay);
+    timer.unref?.();
+    this.#expiryTimers.set(agentId, timer);
   }
   private agentForPane(paneId: string): string | undefined {
     return Object.values(this.resources).find(
@@ -277,6 +375,13 @@ export class HerdrService {
     });
   }
   async reconcile(snapshot?: HerdrSnapshot): Promise<Reconciliation[]> {
+    for (const agentId of Object.keys(this.resources)) {
+      if (
+        this.resources[agentId]?.state === "pending" &&
+        !this.#pending.has(agentId)
+      )
+        await this.restorePending(agentId);
+    }
     for (const [agentId, result] of this.#pending) {
       const resource = this.resources[agentId];
       if (
@@ -371,6 +476,7 @@ export async function createProductionHerdrService(
       join(paths.root, "prompts"),
       () => [],
       true,
+      collectGitEvidence,
     ),
     gitEvidence: collectGitEvidence,
     preflight: async () => {

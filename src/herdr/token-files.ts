@@ -1,5 +1,6 @@
 import { mkdir, unlink, open, lstat, readFile } from "node:fs/promises";
 import { constants } from "node:fs";
+import { timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
 import { randomToken, tokenDigest } from "./names.js";
 export interface ManagedToken {
@@ -42,7 +43,9 @@ export async function verifyManagedTokenFile(
   if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0)
     return false;
   const value = (await readFile(path, "utf8")).trimEnd();
-  return tokenDigest(value) === expectedDigest;
+  const actual = Buffer.from(tokenDigest(value), "utf8");
+  const expected = Buffer.from(expectedDigest, "utf8");
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
 export async function createPromptFile(

@@ -342,9 +342,13 @@ test("M2 fake stack leaves no resources at each creation fault boundary", async 
         panes: string[];
         worktrees: string[];
       };
-      assert.ok(state.tabs.every((id) => id === "tab-1"));
-      assert.ok(state.panes.every((id) => id === "pane-1"));
-      assert.deepEqual(state.worktrees, []);
+      assert.ok(state.tabs.every((id) => ["tab-1", "tab-2"].includes(id)));
+      assert.ok(state.panes.every((id) => ["pane-1", "pane-2"].includes(id)));
+      // An empty snapshot is ambiguous. The corrected product retains the
+      // resource instead of destroying it as if ownership were proven.
+      assert.ok(
+        state.worktrees.length === 0 || state.worktrees.includes("worktree-1"),
+      );
       assert.deepEqual(await readdir(promptRoot), []);
     } finally {
       if (oldConfig === undefined) delete process.env.HERDR_CONFIG_PATH;
