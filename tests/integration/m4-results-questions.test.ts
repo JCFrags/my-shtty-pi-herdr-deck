@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ManagedChildTools, ParentResultTools } from "../../src/results/tools.js";
+import {
+  ManagedChildTools,
+  ParentResultTools,
+} from "../../src/results/tools.js";
 import { ResultService } from "../../src/results/service.js";
 import type { ResultBody, RunBinding } from "../../src/results/types.js";
 
@@ -21,7 +24,17 @@ const result: ResultBody = {
   findings: [],
   changedFiles: [],
   commandsRun: [{ command: "npm test", exitCode: 0, outcome: "passed" }],
-  tests: [{ name: "fake integration", command: "npm test", status: "passed", passed: 1, failed: 0, skipped: 0, evidence: null }],
+  tests: [
+    {
+      name: "fake integration",
+      command: "npm test",
+      status: "passed",
+      passed: 1,
+      failed: 0,
+      skipped: 0,
+      evidence: null,
+    },
+  ],
   commits: [],
   artifacts: [],
   unresolved: [],
@@ -70,9 +83,17 @@ test("fake stack accepts result before the terminal settle event", async () => {
 test("fake stack recovers a result published after settle-before-result", async () => {
   let recoveryRequests = 0;
   const stack = new FakeResultStack(
-    new ResultService({ recover: async () => { recoveryRequests += 1; } }),
+    new ResultService({
+      recover: async () => {
+        recoveryRequests += 1;
+      },
+    }),
   );
-  await stack.service.registerRun({ ...run, runId: "run_01J00000000000000000000001", taskId: "tsk_01J00000000000000000000001" });
+  await stack.service.registerRun({
+    ...run,
+    runId: "run_01J00000000000000000000001",
+    taskId: "tsk_01J00000000000000000000001",
+  });
   const recoveryRun = stack.service.runs.get("run_01J00000000000000000000001");
   assert.ok(recoveryRun);
 
@@ -80,20 +101,33 @@ test("fake stack recovers a result published after settle-before-result", async 
   assert.equal(settled.state, "result_pending_missing");
   assert.equal(recoveryRequests, 1);
 
-  const recovered = await stack.service.publish({ ...recoveryRun, body: result });
+  const recovered = await stack.service.publish({
+    ...recoveryRun,
+    body: result,
+  });
   assert.equal(recovered.state, "succeeded");
-  assert.equal(stack.service.getResult(recovered.resultId).validation.piSettled, true);
+  assert.equal(
+    stack.service.getResult(recovered.resultId).validation.piSettled,
+    true,
+  );
 });
 
 test("structured question blocks the child and releases the answer waiter", async () => {
   const service = new ResultService();
-  await service.registerRun({ ...run, runId: "run_01J00000000000000000000002", taskId: "tsk_01J00000000000000000000002" });
+  await service.registerRun({
+    ...run,
+    runId: "run_01J00000000000000000000002",
+    taskId: "tsk_01J00000000000000000000002",
+  });
   const childRun = service.runs.get("run_01J00000000000000000000002");
   assert.ok(childRun);
   const child = new ManagedChildTools(service);
   const parent = new ParentResultTools(service);
 
-  const answerPromise = child.orchestratorAsk({ run: childRun, principalId: "agt_child" }, question);
+  const answerPromise = child.orchestratorAsk(
+    { run: childRun, principalId: "agt_child" },
+    question,
+  );
   await new Promise<void>((resolve) => setImmediate(resolve));
   const open = service.events.find((event) => event.type === "question.opened");
   assert.ok(open);
@@ -101,10 +135,18 @@ test("structured question blocks the child and releases the answer waiter", asyn
   assert.ok(questionId);
   assert.equal(service.runs.get(childRun.runId)?.state, "blocked");
 
-  const answered = await parent.answer({ run: childRun, principalId: "prn_parent" }, questionId, { optionId: "retry" });
+  const answered = await parent.answer(
+    { run: childRun, principalId: "prn_parent" },
+    questionId,
+    { optionId: "retry" },
+  );
   assert.equal(answered.state, "answered");
   const childResult = await answerPromise;
-  assert.deepEqual(childResult, { questionId, answer: { optionId: "retry" }, state: "answered" });
+  assert.deepEqual(childResult, {
+    questionId,
+    answer: { optionId: "retry" },
+    state: "answered",
+  });
   assert.equal(service.runs.get(childRun.runId)?.state, "working");
 });
 
@@ -115,8 +157,13 @@ test("late terminal events do not reopen a completed run or permit a late result
   assert.ok(lateRun);
   const published = await stack.publish(result);
   await stack.service.settle(lateRun.runId);
-  await assert.rejects(() => stack.service.settle(lateRun.runId), { code: "RUN_MISMATCH" });
+  await assert.rejects(() => stack.service.settle(lateRun.runId), {
+    code: "RUN_MISMATCH",
+  });
   assert.equal(stack.service.runs.get(lateRun.runId)?.state, "succeeded");
   await assert.rejects(() => stack.publish(result), { code: "RUN_MISMATCH" });
-  assert.equal(stack.service.getResult(published.resultId).summary, result.summary);
+  assert.equal(
+    stack.service.getResult(published.resultId).summary,
+    result.summary,
+  );
 });

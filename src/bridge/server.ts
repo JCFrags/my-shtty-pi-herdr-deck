@@ -1,7 +1,12 @@
 import { createHash } from "node:crypto";
 import { chmod, lstat, mkdir, unlink } from "node:fs/promises";
 import { chmodSync, lstatSync, unlinkSync } from "node:fs";
-import { createConnection, createServer, type Server, type Socket } from "node:net";
+import {
+  createConnection,
+  createServer,
+  type Server,
+  type Socket,
+} from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DeckController } from "./pi-controller.js";
@@ -53,25 +58,41 @@ function sanitizePaneId(paneId: string): string {
   return sanitized || "pane";
 }
 
-export function runtimeDirectoryFor(uid = process.getuid?.() ?? 0, environment: NodeJS.ProcessEnv = process.env): string {
-  const base = environment.XDG_RUNTIME_DIR && environment.XDG_RUNTIME_DIR.length > 0 ? environment.XDG_RUNTIME_DIR : tmpdir();
+export function runtimeDirectoryFor(
+  uid = process.getuid?.() ?? 0,
+  environment: NodeJS.ProcessEnv = process.env,
+): string {
+  const base =
+    environment.XDG_RUNTIME_DIR && environment.XDG_RUNTIME_DIR.length > 0
+      ? environment.XDG_RUNTIME_DIR
+      : tmpdir();
   return join(base, `pi-herdr-deck-${uid}`);
 }
 
 export function socketLocationForPane(
   paneId: string,
-  options: { uid?: number; environment?: NodeJS.ProcessEnv; runtimeDirectory?: string } = {},
+  options: {
+    uid?: number;
+    environment?: NodeJS.ProcessEnv;
+    runtimeDirectory?: string;
+  } = {},
 ): RuntimeSocketLocation {
   const uid = options.uid ?? process.getuid?.() ?? 0;
-  const runtimeDirectory = options.runtimeDirectory ?? runtimeDirectoryFor(uid, options.environment ?? process.env);
+  const runtimeDirectory =
+    options.runtimeDirectory ??
+    runtimeDirectoryFor(uid, options.environment ?? process.env);
   const sanitizedBase = sanitizePaneId(paneId);
   const hashSuffix = `-${createHash("sha256").update(paneId).digest("hex").slice(0, 12)}`;
   let sanitizedPaneId = `${sanitizedBase}${hashSuffix}`;
   let socketPath = join(runtimeDirectory, `${sanitizedPaneId}.sock`);
   if (Buffer.byteLength(socketPath, "utf8") > MAX_UNIX_SOCKET_PATH_BYTES) {
     const fixedPath = join(runtimeDirectory, `${hashSuffix}.sock`);
-    const budget = MAX_UNIX_SOCKET_PATH_BYTES - Buffer.byteLength(fixedPath, "utf8");
-    if (budget < 1) throw new Error(`Unix socket runtime directory is too long: ${runtimeDirectory}`);
+    const budget =
+      MAX_UNIX_SOCKET_PATH_BYTES - Buffer.byteLength(fixedPath, "utf8");
+    if (budget < 1)
+      throw new Error(
+        `Unix socket runtime directory is too long: ${runtimeDirectory}`,
+      );
     sanitizedPaneId = `${sanitizedBase.slice(0, budget)}${hashSuffix}`;
     socketPath = join(runtimeDirectory, `${sanitizedPaneId}.sock`);
   }
@@ -84,9 +105,11 @@ export function socketLocationForPane(
 async function ensureRuntimeDirectory(path: string): Promise<void> {
   await mkdir(path, { recursive: true, mode: RUNTIME_MODE });
   const stat = await lstat(path);
-  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`Unsafe runtime directory: ${path}`);
+  if (!stat.isDirectory() || stat.isSymbolicLink())
+    throw new Error(`Unsafe runtime directory: ${path}`);
   const uid = process.getuid?.();
-  if (uid !== undefined && stat.uid !== uid) throw new Error(`Runtime directory is not owned by uid ${uid}: ${path}`);
+  if (uid !== undefined && stat.uid !== uid)
+    throw new Error(`Runtime directory is not owned by uid ${uid}: ${path}`);
   await chmod(path, RUNTIME_MODE);
 }
 
@@ -111,16 +134,23 @@ async function closeServerQuietly(server: Server): Promise<void> {
   await new Promise<void>((resolve) => server.close(() => resolve()));
 }
 
-function unlinkSocketIfPresentSync(path: string, log: (message: string) => void): void {
+function unlinkSocketIfPresentSync(
+  path: string,
+  log: (message: string) => void,
+): void {
   try {
     const stat = lstatSync(path);
     if (stat.isSocket()) unlinkSync(path);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") log(`socket cleanup failed: ${(error as Error).message}`);
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+      log(`socket cleanup failed: ${(error as Error).message}`);
   }
 }
 
-export async function isSocketListening(path: string, timeoutMs = SOCKET_PROBE_TIMEOUT_MS): Promise<boolean> {
+export async function isSocketListening(
+  path: string,
+  timeoutMs = SOCKET_PROBE_TIMEOUT_MS,
+): Promise<boolean> {
   return await new Promise<boolean>((resolve, reject) => {
     const socket = createConnection(path);
     let settled = false;
@@ -132,17 +162,27 @@ export async function isSocketListening(path: string, timeoutMs = SOCKET_PROBE_T
       if (error) reject(error);
       else resolve(value);
     };
-    const timer = setTimeout(() => finish(false, new Error(`Timed out probing Unix socket ${path}.`)), timeoutMs);
+    const timer = setTimeout(
+      () => finish(false, new Error(`Timed out probing Unix socket ${path}.`)),
+      timeoutMs,
+    );
     timer.unref?.();
     socket.once("connect", () => finish(true));
     socket.once("error", (error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT" || error.code === "ECONNREFUSED" || error.code === "ECONNRESET") finish(false);
+      if (
+        error.code === "ENOENT" ||
+        error.code === "ECONNREFUSED" ||
+        error.code === "ECONNRESET"
+      )
+        finish(false);
       else finish(false, error);
     });
   });
 }
 
-export async function recoverStaleSocket(path: string): Promise<"absent" | "removed"> {
+export async function recoverStaleSocket(
+  path: string,
+): Promise<"absent" | "removed"> {
   let stat;
   try {
     stat = await lstat(path);
@@ -150,12 +190,13 @@ export async function recoverStaleSocket(path: string): Promise<"absent" | "remo
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return "absent";
     throw error;
   }
-  if (!stat.isSocket()) throw new Error(`Refusing to remove non-socket path: ${path}`);
-  if (await isSocketListening(path)) throw new Error(`A Pi Deck bridge is already listening at ${path}.`);
+  if (!stat.isSocket())
+    throw new Error(`Refusing to remove non-socket path: ${path}`);
+  if (await isSocketListening(path))
+    throw new Error(`A Pi Deck bridge is already listening at ${path}.`);
   await unlink(path);
   return "removed";
 }
-
 
 export class CompatibilityRejectionServer {
   readonly location: RuntimeSocketLocation;
@@ -165,10 +206,20 @@ export class CompatibilityRejectionServer {
   #server: Server | undefined;
   #started = false;
 
-  constructor(options: { paneId: string; reason: string; runtimeDirectory?: string; log?: (message: string) => void }) {
+  constructor(options: {
+    paneId: string;
+    reason: string;
+    runtimeDirectory?: string;
+    log?: (message: string) => void;
+  }) {
     this.paneId = options.paneId;
     this.reason = options.reason;
-    this.location = socketLocationForPane(options.paneId, options.runtimeDirectory === undefined ? {} : { runtimeDirectory: options.runtimeDirectory });
+    this.location = socketLocationForPane(
+      options.paneId,
+      options.runtimeDirectory === undefined
+        ? {}
+        : { runtimeDirectory: options.runtimeDirectory },
+    );
     this.#log = options.log ?? (() => undefined);
   }
 
@@ -195,13 +246,20 @@ export class CompatibilityRejectionServer {
           readOnly: true,
           paneId: this.paneId,
           reason: this.reason,
-          capabilities: { mouse: false, perToolExpansion: false, bulkToolExpansion: false, expansionSubscription: false },
+          capabilities: {
+            mouse: false,
+            perToolExpansion: false,
+            bulkToolExpansion: false,
+            expansionSubscription: false,
+          },
         },
       };
       socket.end(encodeFrame(hello));
     });
     this.#server = server;
-    server.on("error", (error) => this.#log(`compatibility endpoint error: ${error.message}`));
+    server.on("error", (error) =>
+      this.#log(`compatibility endpoint error: ${error.message}`),
+    );
     try {
       await new Promise<void>((resolve, reject) => {
         const onError = (error: Error): void => {
@@ -229,7 +287,8 @@ export class CompatibilityRejectionServer {
   async close(): Promise<void> {
     const server = this.#server;
     this.#server = undefined;
-    if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (server)
+      await new Promise<void>((resolve) => server.close(() => resolve()));
     this.#started = false;
     await unlinkSocketIfPresent(this.location.socketPath);
   }
@@ -238,7 +297,9 @@ export class CompatibilityRejectionServer {
     this.#server?.close();
     this.#server = undefined;
     this.#started = false;
-    unlinkSocketIfPresentSync(this.location.socketPath, (message) => this.#log(`compatibility endpoint ${message}`));
+    unlinkSocketIfPresentSync(this.location.socketPath, (message) =>
+      this.#log(`compatibility endpoint ${message}`),
+    );
   }
 }
 
@@ -256,8 +317,14 @@ export class BridgeServer {
 
   constructor(options: BridgeServerOptions) {
     this.controller = options.controller;
-    this.location = socketLocationForPane(options.controller.paneId, options.runtimeDirectory === undefined ? {} : { runtimeDirectory: options.runtimeDirectory });
-    this.#statePushIntervalMs = options.statePushIntervalMs ?? STATE_PUSH_INTERVAL_MS;
+    this.location = socketLocationForPane(
+      options.controller.paneId,
+      options.runtimeDirectory === undefined
+        ? {}
+        : { runtimeDirectory: options.runtimeDirectory },
+    );
+    this.#statePushIntervalMs =
+      options.statePushIntervalMs ?? STATE_PUSH_INTERVAL_MS;
     this.#log = options.log ?? (() => undefined);
   }
 
@@ -275,7 +342,9 @@ export class BridgeServer {
     await recoverStaleSocket(this.location.socketPath);
     const server = createServer((socket) => this.#handleConnection(socket));
     this.#server = server;
-    server.on("error", (error) => this.#log(`bridge server error: ${error.message}`));
+    server.on("error", (error) =>
+      this.#log(`bridge server error: ${error.message}`),
+    );
     try {
       await new Promise<void>((resolve, reject) => {
         const onError = (error: Error): void => {
@@ -292,7 +361,9 @@ export class BridgeServer {
       });
       await chmod(this.location.socketPath, SOCKET_MODE);
       this.#started = true;
-      this.#unsubscribeState = this.controller.subscribe(() => this.#scheduleStatePush());
+      this.#unsubscribeState = this.controller.subscribe(() =>
+        this.#scheduleStatePush(),
+      );
     } catch (error) {
       await closeServerQuietly(server);
       this.#server = undefined;
@@ -340,7 +411,12 @@ export class BridgeServer {
           readOnly: true,
           paneId: this.controller.paneId,
           reason: "A controller is already attached to this Pi pane.",
-          capabilities: { mouse: true, perToolExpansion: true, bulkToolExpansion: true, expansionSubscription: true },
+          capabilities: {
+            mouse: true,
+            perToolExpansion: true,
+            bulkToolExpansion: true,
+            expansionSubscription: true,
+          },
         },
       };
       socket.end(encodeFrame(rejected));
@@ -354,20 +430,31 @@ export class BridgeServer {
       commandTail: Promise.resolve(),
     };
     this.#controllerConnection = connection;
-    socket.on("data", (chunk) => this.#handleData(connection, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-    socket.on("error", (error) => this.#log(`bridge client error: ${error.message}`));
+    socket.on("data", (chunk) =>
+      this.#handleData(
+        connection,
+        Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk),
+      ),
+    );
+    socket.on("error", (error) =>
+      this.#log(`bridge client error: ${error.message}`),
+    );
     socket.on("close", () => {
       connection.closed = true;
-      if (this.#controllerConnection === connection) this.#controllerConnection = undefined;
+      if (this.#controllerConnection === connection)
+        this.#controllerConnection = undefined;
     });
     let snapshot;
     try {
       snapshot = this.controller.snapshot();
     } catch (error) {
-      this.#log(`initial Pi state snapshot failed: ${error instanceof Error ? error.message : String(error)}`);
+      this.#log(
+        `initial Pi state snapshot failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
       connection.closed = true;
       socket.destroy();
-      if (this.#controllerConnection === connection) this.#controllerConnection = undefined;
+      if (this.#controllerConnection === connection)
+        this.#controllerConnection = undefined;
       return;
     }
     const hello: HelloFrame = {
@@ -380,7 +467,12 @@ export class BridgeServer {
         readOnly: false,
         paneId: this.controller.paneId,
         ...(snapshot.sessionId ? { sessionId: snapshot.sessionId } : {}),
-        capabilities: { mouse: true, perToolExpansion: true, bulkToolExpansion: true, expansionSubscription: true },
+        capabilities: {
+          mouse: true,
+          perToolExpansion: true,
+          bulkToolExpansion: true,
+          expansionSubscription: true,
+        },
       },
     };
     this.#write(connection, hello);
@@ -391,33 +483,55 @@ export class BridgeServer {
     for (const decoded of connection.decoder.push(chunk)) {
       if (!decoded.ok) {
         const id = decoded.requestId ?? `malformed-${++this.#malformedCounter}`;
-        this.#write(connection, errorResult(id, decoded.error.code, decoded.error.message));
+        this.#write(
+          connection,
+          errorResult(id, decoded.error.code, decoded.error.message),
+        );
         continue;
       }
       connection.commandTail = connection.commandTail
         .then(async () => this.#handleCommand(connection, decoded.value))
         .catch((error) => {
-          this.#log(`bridge command dispatch failed: ${error instanceof Error ? error.message : String(error)}`);
+          this.#log(
+            `bridge command dispatch failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
           connection.socket.destroy();
         });
     }
   }
 
-  async #handleCommand(connection: ConnectionState, command: ReturnType<typeof validateCommandFrame>): Promise<void> {
+  async #handleCommand(
+    connection: ConnectionState,
+    command: ReturnType<typeof validateCommandFrame>,
+  ): Promise<void> {
     try {
       const value = await this.controller.execute(command);
-      const result: ResultFrame = { type: "result", id: command.id, ok: true, value: value ?? null };
+      const result: ResultFrame = {
+        type: "result",
+        id: command.id,
+        ok: true,
+        value: value ?? null,
+      };
       this.#write(connection, result);
       if (command.name === "refreshState") this.#pushState(connection);
     } catch (error) {
-      const code = error instanceof CommandExecutionError ? error.code : "operation_failed";
-      const message = error instanceof Error ? error.message : "Command failed.";
+      const code =
+        error instanceof CommandExecutionError
+          ? error.code
+          : "operation_failed";
+      const message =
+        error instanceof Error ? error.message : "Command failed.";
       this.#write(connection, errorResult(command.id, code, message));
     }
   }
 
   #scheduleStatePush(): void {
-    if (this.#stateTimer || !this.#controllerConnection || this.#controllerConnection.closed) return;
+    if (
+      this.#stateTimer ||
+      !this.#controllerConnection ||
+      this.#controllerConnection.closed
+    )
+      return;
     this.#stateTimer = setTimeout(() => {
       this.#stateTimer = undefined;
       const connection = this.#controllerConnection;
@@ -436,17 +550,24 @@ export class BridgeServer {
       };
       this.#write(connection, frame);
     } catch (error) {
-      this.#log(`Pi state snapshot failed: ${error instanceof Error ? error.message : String(error)}`);
+      this.#log(
+        `Pi state snapshot failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
       connection.socket.destroy();
     }
   }
 
-  #write(connection: ConnectionState, frame: HelloFrame | StateFrame | ResultFrame): void {
+  #write(
+    connection: ConnectionState,
+    frame: HelloFrame | StateFrame | ResultFrame,
+  ): void {
     if (connection.closed || connection.socket.destroyed) return;
     try {
       connection.socket.write(encodeFrame(frame));
     } catch (error) {
-      this.#log(`bridge frame write failed: ${error instanceof Error ? error.message : String(error)}`);
+      this.#log(
+        `bridge frame write failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
       connection.socket.destroy();
     }
   }

@@ -6,9 +6,7 @@
     "kind": "deck",
     "name": "pi-herdr-orchestrator-deck",
     "version": "0.1.0",
-    "capabilities": [
-      "events.replay"
-    ]
+    "capabilities": ["events.replay"]
   },
   "sessionKey": "0123456789abcdef01234567",
   "auth": {

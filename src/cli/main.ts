@@ -46,8 +46,18 @@ function operationEvidence(value: string): { name: string; digest: string } {
   if (!name || !digest) throw new Error("Evidence must be NAME:SHA256.");
   return { name, digest };
 }
+
+async function runDeck(): Promise<void> {
+  const { main: deckMain } = await import("../deck/main.js");
+  await deckMain();
+}
+
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   const [command, subcommand] = argv;
+  if (command === "deck") {
+    await runDeck();
+    return;
+  }
   if (command === "version") {
     console.log("0.1.0");
     return;
@@ -296,7 +306,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     return;
   }
   console.error(
-    "Usage: doctor [--json] | broker start|status | events verify | config validate PATH | recovery plan|export | retention plan|policy-plan | ops plan|verify|apply | export --output DIR | version",
+    "Usage: deck | doctor [--json] | broker start|status | events verify | config validate PATH | recovery plan|export | retention plan|policy-plan | ops plan|verify|apply | export --output DIR | version",
   );
   process.exitCode = 2;
 }

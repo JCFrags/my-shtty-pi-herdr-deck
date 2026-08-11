@@ -43,7 +43,8 @@ export class PiStateReporter {
     this.#now = options.now ?? Date.now;
     this.#setTimer =
       options.setTimer ?? ((callback, delay) => setTimeout(callback, delay));
-    this.#clearTimer = options.clearTimer ?? ((timer) => clearTimeout(timer)); this.#onError = options.onError ?? (() => undefined);
+    this.#clearTimer = options.clearTimer ?? ((timer) => clearTimeout(timer));
+    this.#onError = options.onError ?? (() => undefined);
   }
   get pending(): boolean {
     return this.#pending !== undefined || this.#inFlight;
@@ -82,7 +83,9 @@ export class PiStateReporter {
     try {
       await this.#transport.heartbeat(state);
       this.#lastSentAt = this.#now();
-    } catch (error) { this.#onError(error); } finally {
+    } catch (error) {
+      this.#onError(error);
+    } finally {
       this.#inFlight = false;
       if (this.#pending !== undefined) {
         const delay = Math.max(

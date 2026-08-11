@@ -1,5 +1,13 @@
 export type SchedulerPriority = "low" | "normal" | "high";
-export type SchedulableState = "queued" | "provisioning" | "running" | "blocked" | "succeeded" | "failed" | "cancelled" | "timed_out";
+export type SchedulableState =
+  | "queued"
+  | "provisioning"
+  | "running"
+  | "blocked"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "timed_out";
 
 export interface SchedulerDependency {
   readonly taskId: string;

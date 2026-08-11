@@ -1,8 +1,24 @@
 declare module "@earendil-works/pi-tui" {
   export type MouseButton = "left" | "middle" | "right";
   export type TuiMouseEvent =
-    | { type: "press" | "release" | "move"; button: MouseButton; x: number; y: number; shift: boolean; alt: boolean; ctrl: boolean }
-    | { type: "wheel"; direction: "up" | "down"; x: number; y: number; shift: boolean; alt: boolean; ctrl: boolean };
+    | {
+        type: "press" | "release" | "move";
+        button: MouseButton;
+        x: number;
+        y: number;
+        shift: boolean;
+        alt: boolean;
+        ctrl: boolean;
+      }
+    | {
+        type: "wheel";
+        direction: "up" | "down";
+        x: number;
+        y: number;
+        shift: boolean;
+        alt: boolean;
+        ctrl: boolean;
+      };
 
   export interface Component {
     render(width: number): string[];
@@ -66,7 +82,6 @@ declare module "@earendil-works/pi-tui" {
   export function visibleWidth(text: string): number;
   export function truncateToWidth(text: string, width: number): string;
 }
-
 
 declare module "@pi-herdr-deck/tui" {
   export * from "@earendil-works/pi-tui";

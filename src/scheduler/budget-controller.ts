@@ -7,7 +7,8 @@ import {
   type UsageSnapshot,
 } from "./budgets.js";
 
-export type BudgetTerminalOutcome = "succeeded" | "failed" | "cancelled" | "timed_out";
+export type BudgetTerminalOutcome =
+  "succeeded" | "failed" | "cancelled" | "timed_out";
 
 export interface BudgetControllerSnapshot {
   readonly assessment: BudgetAssessment;
@@ -23,7 +24,11 @@ export interface BudgetControllerState {
   readonly graceStartedAtMs?: number;
 }
 
-export function graceExpired(graceStartedAtMs: number | undefined, nowMs: number, graceMs: number): boolean {
+export function graceExpired(
+  graceStartedAtMs: number | undefined,
+  nowMs: number,
+  graceMs: number,
+): boolean {
   return graceStartedAtMs !== undefined && nowMs - graceStartedAtMs >= graceMs;
 }
 
@@ -37,13 +42,20 @@ export function selectTerminalOutcome(
 
 export class BudgetController {
   private readonly budget: EffectiveBudget;
-  private state: BudgetControllerState = { warningSent: false, gracefulStopRequested: false };
+  private state: BudgetControllerState = {
+    warningSent: false,
+    gracefulStopRequested: false,
+  };
 
   public constructor(budget: EffectiveBudget) {
     this.budget = budget;
   }
 
-  public evaluate(usage: UsageSnapshot, nowMs: number, nowPercent?: number): BudgetControllerSnapshot {
+  public evaluate(
+    usage: UsageSnapshot,
+    nowMs: number,
+    nowPercent?: number,
+  ): BudgetControllerSnapshot {
     if (!Number.isFinite(nowMs)) throw new RangeError("nowMs must be finite.");
     const assessment = assessBudget(this.budget, usage, nowPercent);
     const warning = assessment.action === "warning" && !this.state.warningSent;
@@ -58,13 +70,25 @@ export class BudgetController {
       gracefulStopRequested,
       ...(graceStartedAtMs === undefined ? {} : { graceStartedAtMs }),
     };
-    const graceElapsedMs = graceStartedAtMs === undefined ? 0 : Math.max(0, nowMs - graceStartedAtMs);
-    const action = forceStopAfterGrace(assessment, graceElapsedMs, this.budget.graceMs);
+    const graceElapsedMs =
+      graceStartedAtMs === undefined
+        ? 0
+        : Math.max(0, nowMs - graceStartedAtMs);
+    const action = forceStopAfterGrace(
+      assessment,
+      graceElapsedMs,
+      this.budget.graceMs,
+    );
     const snapshot: BudgetControllerSnapshot = {
       assessment,
       action,
       warning,
-      ...(graceStartedAtMs === undefined ? {} : { graceStartedAtMs, graceExpiresAtMs: graceStartedAtMs + this.budget.graceMs }),
+      ...(graceStartedAtMs === undefined
+        ? {}
+        : {
+            graceStartedAtMs,
+            graceExpiresAtMs: graceStartedAtMs + this.budget.graceMs,
+          }),
     };
     return snapshot;
   }

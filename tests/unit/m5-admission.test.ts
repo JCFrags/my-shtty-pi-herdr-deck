@@ -1,8 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { DeterministicScheduler } from "../../src/scheduler/scheduler.js";
-import { isReusableCandidate, planAdmission, selectReusableAgent } from "../../src/scheduler/admission.js";
-import type { ReuseCandidate, ReuseRequest, SchedulerTask } from "../../src/scheduler/types.js";
+import {
+  isReusableCandidate,
+  planAdmission,
+  selectReusableAgent,
+} from "../../src/scheduler/admission.js";
+import type {
+  ReuseCandidate,
+  ReuseRequest,
+  SchedulerTask,
+} from "../../src/scheduler/types.js";
 
 const task = (id: string, queuedAt: number): SchedulerTask => ({
   id,
@@ -24,7 +32,9 @@ const request: ReuseRequest = {
   modelPolicyHash: "model-a",
 };
 
-const candidate = (overrides: Partial<ReuseCandidate> = {}): ReuseCandidate => ({
+const candidate = (
+  overrides: Partial<ReuseCandidate> = {},
+): ReuseCandidate => ({
   agentId: "agt_a",
   ...request,
   cleanupPending: false,
@@ -48,18 +58,35 @@ test("admission plan delegates deterministic ordering and does not mutate the sc
 
 test("admission plan accepts an external frozen task map", () => {
   const scheduler = new DeterministicScheduler({ maxActiveAgents: 1 });
-  const tasks = new Map<string, SchedulerTask>([["tsk_external", task("tsk_external", 1)]]);
+  const tasks = new Map<string, SchedulerTask>([
+    ["tsk_external", task("tsk_external", 1)],
+  ]);
 
-  assert.deepEqual(planAdmission(scheduler, tasks).admittedTaskIds, ["tsk_external"]);
-  assert.deepEqual(scheduler.snapshot(), { queued: [], active: [], provisioning: 0 });
+  assert.deepEqual(planAdmission(scheduler, tasks).admittedTaskIds, [
+    "tsk_external",
+  ]);
+  assert.deepEqual(scheduler.snapshot(), {
+    queued: [],
+    active: [],
+    provisioning: 0,
+  });
 });
 
 test("reuse requires all policy identity fields and clean idle state", () => {
   assert.equal(isReusableCandidate(request, candidate()), true);
-  assert.equal(isReusableCandidate(request, candidate({ cleanupPending: true })), false);
+  assert.equal(
+    isReusableCandidate(request, candidate({ cleanupPending: true })),
+    false,
+  );
   assert.equal(isReusableCandidate(request, candidate({ idle: false })), false);
-  assert.equal(isReusableCandidate(request, candidate({ trustKey: "other" })), false);
-  assert.equal(isReusableCandidate(request, candidate({ worktreeKey: "other" })), false);
+  assert.equal(
+    isReusableCandidate(request, candidate({ trustKey: "other" })),
+    false,
+  );
+  assert.equal(
+    isReusableCandidate(request, candidate({ worktreeKey: "other" })),
+    false,
+  );
 });
 
 test("reuse selection is deterministic and excludes incompatible candidates", () => {
@@ -71,5 +98,8 @@ test("reuse selection is deterministic and excludes incompatible candidates", ()
   ]);
 
   assert.equal(selected, "agt_b");
-  assert.equal(selectReusableAgent(request, [candidate({ idle: false })]), undefined);
+  assert.equal(
+    selectReusableAgent(request, [candidate({ idle: false })]),
+    undefined,
+  );
 });

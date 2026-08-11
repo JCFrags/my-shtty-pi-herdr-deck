@@ -4,9 +4,7 @@
   "title": "Pi Herd Orchestrator Broker Configuration",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "version"
-  ],
+  "required": ["version"],
   "properties": {
     "version": {
       "const": 1
@@ -184,12 +182,7 @@
           "default": true
         },
         "notificationLevel": {
-          "enum": [
-            "critical",
-            "normal",
-            "all",
-            "none"
-          ],
+          "enum": ["critical", "normal", "all", "none"],
           "default": "normal"
         }
       }
@@ -199,13 +192,7 @@
       "additionalProperties": false,
       "properties": {
         "level": {
-          "enum": [
-            "error",
-            "warn",
-            "info",
-            "debug",
-            "trace"
-          ],
+          "enum": ["error", "warn", "info", "debug", "trace"],
           "default": "info"
         },
         "maxFileBytes": {

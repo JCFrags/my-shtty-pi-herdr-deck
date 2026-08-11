@@ -119,7 +119,14 @@ test("M3 fake Pi registers, heartbeats, and does not duplicate a connection", as
       ["agent.register_managed", "agent.heartbeat"],
     );
     assert.deepEqual(
-      (broker.requests[1]!.params as { agentId: string; state: { turnIndex: number } }).agentId, assignment.agentId);
+      (
+        broker.requests[1]!.params as {
+          agentId: string;
+          state: { turnIndex: number };
+        }
+      ).agentId,
+      assignment.agentId,
+    );
     assert.deepEqual(
       (broker.requests[1]!.params as { state: { turnIndex: number } }).state,
       { sessionId: assignment.piSessionId, activity: "idle", turnIndex: 2 },
@@ -134,15 +141,25 @@ test("M3 broker client fails closed on a post-handshake socket error", async () 
   const broker = await FakePiBroker.start();
   const originalOn = Socket.prototype.on;
   const errorHandlers: Array<(error: Error) => void> = [];
-  Socket.prototype.on = function (event: string | symbol, listener: (...args: any[]) => void): Socket {
-    if (event === "error") errorHandlers.push(listener as (error: Error) => void);
+  Socket.prototype.on = function (
+    event: string | symbol,
+    listener: (...args: any[]) => void,
+  ): Socket {
+    if (event === "error")
+      errorHandlers.push(listener as (error: Error) => void);
     return (originalOn as any).call(this, event, listener);
   };
-  const client = new PiBrokerClient({ socketPath: broker.path, sessionKey: "fake-session-key", piSessionId: assignment.piSessionId, secret: "fake-secret" });
+  const client = new PiBrokerClient({
+    socketPath: broker.path,
+    sessionKey: "fake-session-key",
+    piSessionId: assignment.piSessionId,
+    secret: "fake-secret",
+  });
   try {
     await client.connect();
     assert.ok(errorHandlers.length > 0);
-    for (const handler of errorHandlers) handler(new Error("injected socket error"));
+    for (const handler of errorHandlers)
+      handler(new Error("injected socket error"));
     assert.equal(client.connected, false);
   } finally {
     Socket.prototype.on = originalOn;

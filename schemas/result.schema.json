@@ -23,11 +23,7 @@
       "const": 1
     },
     "status": {
-      "enum": [
-        "succeeded",
-        "failed",
-        "cancelled"
-      ]
+      "enum": ["succeeded", "failed", "cancelled"]
     },
     "summary": {
       "type": "string",
@@ -49,13 +45,7 @@
         ],
         "properties": {
           "severity": {
-            "enum": [
-              "info",
-              "low",
-              "medium",
-              "high",
-              "critical"
-            ]
+            "enum": ["info", "low", "medium", "high", "critical"]
           },
           "title": {
             "type": "string",
@@ -88,10 +78,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "path",
-          "change"
-        ],
+        "required": ["path", "change"],
         "properties": {
           "path": {
             "type": "string",
@@ -99,19 +86,10 @@
             "maxLength": 4096
           },
           "change": {
-            "enum": [
-              "added",
-              "modified",
-              "deleted",
-              "renamed",
-              "unknown"
-            ]
+            "enum": ["added", "modified", "deleted", "renamed", "unknown"]
           },
           "previousPath": {
-            "type": [
-              "string",
-              "null"
-            ],
+            "type": ["string", "null"],
             "maxLength": 4096
           }
         }
@@ -123,11 +101,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "command",
-          "exitCode",
-          "outcome"
-        ],
+        "required": ["command", "exitCode", "outcome"],
         "properties": {
           "command": {
             "type": "string",
@@ -135,20 +109,12 @@
             "maxLength": 8192
           },
           "exitCode": {
-            "type": [
-              "integer",
-              "null"
-            ],
+            "type": ["integer", "null"],
             "minimum": 0,
             "maximum": 255
           },
           "outcome": {
-            "enum": [
-              "passed",
-              "failed",
-              "cancelled",
-              "unknown"
-            ]
+            "enum": ["passed", "failed", "cancelled", "unknown"]
           }
         }
       }
@@ -175,46 +141,26 @@
             "maxLength": 512
           },
           "command": {
-            "type": [
-              "string",
-              "null"
-            ],
+            "type": ["string", "null"],
             "maxLength": 8192
           },
           "status": {
-            "enum": [
-              "passed",
-              "failed",
-              "cancelled",
-              "unknown"
-            ]
+            "enum": ["passed", "failed", "cancelled", "unknown"]
           },
           "passed": {
-            "type": [
-              "integer",
-              "null"
-            ],
+            "type": ["integer", "null"],
             "minimum": 0
           },
           "failed": {
-            "type": [
-              "integer",
-              "null"
-            ],
+            "type": ["integer", "null"],
             "minimum": 0
           },
           "skipped": {
-            "type": [
-              "integer",
-              "null"
-            ],
+            "type": ["integer", "null"],
             "minimum": 0
           },
           "evidence": {
-            "type": [
-              "string",
-              "null"
-            ],
+            "type": ["string", "null"],
             "maxLength": 4096
           }
         }
@@ -226,10 +172,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "sha",
-          "subject"
-        ],
+        "required": ["sha", "subject"],
         "properties": {
           "sha": {
             "type": "string",
@@ -249,22 +192,10 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "kind",
-          "path",
-          "description",
-          "mediaType"
-        ],
+        "required": ["kind", "path", "description", "mediaType"],
         "properties": {
           "kind": {
-            "enum": [
-              "text",
-              "json",
-              "patch",
-              "log",
-              "report",
-              "other"
-            ]
+            "enum": ["text", "json", "patch", "log", "report", "other"]
           },
           "path": {
             "type": "string",
@@ -290,11 +221,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "title",
-          "description",
-          "blocking"
-        ],
+        "required": ["title", "description", "blocking"],
         "properties": {
           "title": {
             "type": "string",
@@ -318,11 +245,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "questionId",
-          "summary",
-          "answered"
-        ],
+        "required": ["questionId", "summary", "answered"],
         "properties": {
           "questionId": {
             "type": "string",
@@ -340,10 +263,7 @@
       }
     },
     "recommendedNextAction": {
-      "type": [
-        "string",
-        "null"
-      ],
+      "type": ["string", "null"],
       "maxLength": 8192
     }
   }

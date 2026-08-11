@@ -26,7 +26,10 @@ const question: QuestionBody = {
   timeoutMs: 10000,
 };
 
-async function openQuestion(): Promise<{ service: ResultService; questionId: string }> {
+async function openQuestion(): Promise<{
+  service: ResultService;
+  questionId: string;
+}> {
   const service = new ResultService();
   await service.registerRun({ ...run });
   const opened = await service.ask({ ...run, body: question });
@@ -40,8 +43,14 @@ test("concurrent answers accept exactly one winner", async () => {
     service.answer(questionId, { optionId: "reject" }, "parent-b"),
   ]);
 
-  assert.equal(outcomes.filter((outcome) => outcome.status === "fulfilled").length, 1);
-  assert.equal(outcomes.filter((outcome) => outcome.status === "rejected").length, 1);
+  assert.equal(
+    outcomes.filter((outcome) => outcome.status === "fulfilled").length,
+    1,
+  );
+  assert.equal(
+    outcomes.filter((outcome) => outcome.status === "rejected").length,
+    1,
+  );
   assert.equal(service.getQuestion(questionId).state, "answered");
   assert.equal(service.runs.get(run.runId)?.state, "working");
 });
@@ -63,7 +72,9 @@ test("an answer after timeout is rejected as a late answer", async () => {
 
   await assert.rejects(
     service.answer(questionId, { optionId: "accept" }, "late-parent"),
-    (error: unknown) => error instanceof Error && error.message === "Question is already terminal.",
+    (error: unknown) =>
+      error instanceof Error &&
+      error.message === "Question is already terminal.",
   );
   assert.equal(service.getQuestion(questionId).state, "timed_out");
 });
@@ -71,7 +82,11 @@ test("an answer after timeout is rejected as a late answer", async () => {
 test("answer releases the waiter with the same terminal question record", async () => {
   const { service, questionId } = await openQuestion();
   const waiting = service.waitForAnswer(questionId, 10000);
-  const accepted = await service.answer(questionId, { optionId: "reject" }, "parent");
+  const accepted = await service.answer(
+    questionId,
+    { optionId: "reject" },
+    "parent",
+  );
   const released = await waiting;
 
   assert.deepEqual(released, accepted);

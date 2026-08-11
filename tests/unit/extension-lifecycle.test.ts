@@ -8,43 +8,74 @@ import type { PiContextLike } from "../../src/pi/types.js";
 import { createFakePiHarness, waitFor } from "../helpers.js";
 
 interface FakeExtensionApi {
-  handlers: Map<string, Array<(event: unknown, context: PiContextLike) => void | Promise<void>>>;
-  commands: Map<string, { handler(args: string, context: PiContextLike): void | Promise<void> }>;
+  handlers: Map<
+    string,
+    Array<(event: unknown, context: PiContextLike) => void | Promise<void>>
+  >;
+  commands: Map<
+    string,
+    { handler(args: string, context: PiContextLike): void | Promise<void> }
+  >;
   api: Record<string, unknown>;
 }
 
 const TUI_MODULE_KEY = Symbol.for("pi-herdr-deck.tui-module.v1");
 
 function installCapableTuiStub(): void {
-  (globalThis as typeof globalThis & { [TUI_MODULE_KEY]?: unknown })[TUI_MODULE_KEY] = {
+  (globalThis as typeof globalThis & { [TUI_MODULE_KEY]?: unknown })[
+    TUI_MODULE_KEY
+  ] = {
     parseMouseInput: () => undefined,
     ProcessTerminal: class ProcessTerminal {},
-    TUI: class TUI { setMouseTracking(): void {} },
+    TUI: class TUI {
+      setMouseTracking(): void {}
+    },
   };
 }
 
 function removeCapableTuiStub(): void {
-  delete (globalThis as typeof globalThis & { [TUI_MODULE_KEY]?: unknown })[TUI_MODULE_KEY];
+  delete (globalThis as typeof globalThis & { [TUI_MODULE_KEY]?: unknown })[
+    TUI_MODULE_KEY
+  ];
 }
 
 function fakeExtensionApi(): FakeExtensionApi {
   const harness = createFakePiHarness();
-  const handlers = new Map<string, Array<(event: unknown, context: PiContextLike) => void | Promise<void>>>();
-  const commands = new Map<string, { handler(args: string, context: PiContextLike): void | Promise<void> }>();
+  const handlers = new Map<
+    string,
+    Array<(event: unknown, context: PiContextLike) => void | Promise<void>>
+  >();
+  const commands = new Map<
+    string,
+    { handler(args: string, context: PiContextLike): void | Promise<void> }
+  >();
   const api = {
     ...harness.pi,
-    on: (event: string, handler: (event: unknown, context: PiContextLike) => void | Promise<void>) => {
+    on: (
+      event: string,
+      handler: (event: unknown, context: PiContextLike) => void | Promise<void>,
+    ) => {
       const list = handlers.get(event) ?? [];
       list.push(handler);
       handlers.set(event, list);
     },
-    registerCommand: (name: string, command: { handler(args: string, context: PiContextLike): void | Promise<void> }) => commands.set(name, command),
+    registerCommand: (
+      name: string,
+      command: {
+        handler(args: string, context: PiContextLike): void | Promise<void>;
+      },
+    ) => commands.set(name, command),
   };
   return { handlers, commands, api };
 }
 
-async function emit(fake: FakeExtensionApi, event: string, context: PiContextLike): Promise<void> {
-  for (const handler of fake.handlers.get(event) ?? []) await handler({}, context);
+async function emit(
+  fake: FakeExtensionApi,
+  event: string,
+  context: PiContextLike,
+): Promise<void> {
+  for (const handler of fake.handlers.get(event) ?? [])
+    await handler({}, context);
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -65,14 +96,20 @@ test("extension removes its socket on reload and session shutdown", async () => 
   process.env.HERDR_PANE_ID = "reload/pane";
   process.env.XDG_RUNTIME_DIR = runtimeRoot;
   try {
-    const extension = (await import(`../../extensions/pi-herdr-deck.js?test=${Date.now()}`)).default;
+    const extension = (
+      await import(`../../extensions/pi-herdr-deck.js?test=${Date.now()}`)
+    ).default;
     const first = fakeExtensionApi();
     const firstHarness = createFakePiHarness();
     await extension(first.api as never);
     await emit(first, "session_start", firstHarness.context);
     const socketPath = socketLocationForPane("reload/pane").socketPath;
     await waitFor(() => {
-      try { return Boolean(requireStat(socketPath)); } catch { return false; }
+      try {
+        return Boolean(requireStat(socketPath));
+      } catch {
+        return false;
+      }
     });
     assert.equal(await pathExists(socketPath), true);
 
@@ -99,7 +136,9 @@ test("extension removes its socket on reload and session shutdown", async () => 
 
 function requireStat(path: string): boolean {
   try {
-    return (process.getBuiltinModule("node:fs") as typeof import("node:fs")).lstatSync(path).isSocket();
+    return (process.getBuiltinModule("node:fs") as typeof import("node:fs"))
+      .lstatSync(path)
+      .isSocket();
   } catch {
     return false;
   }
@@ -107,9 +146,14 @@ function requireStat(path: string): boolean {
 
 function asyncPredicate(predicate: () => Promise<boolean>): () => boolean {
   let value = false;
-  void predicate().then((result) => { value = result; });
+  void predicate().then((result) => {
+    value = result;
+  });
   return () => {
-    if (!value) void predicate().then((result) => { value = result; });
+    if (!value)
+      void predicate().then((result) => {
+        value = result;
+      });
     return value;
   };
 }
@@ -118,7 +162,9 @@ test("extension remains loadable outside Herdr and status explains missing HERDR
   const previousPane = process.env.HERDR_PANE_ID;
   delete process.env.HERDR_PANE_ID;
   try {
-    const extension = (await import(`../../extensions/pi-herdr-deck.js?outside=${Date.now()}`)).default;
+    const extension = (
+      await import(`../../extensions/pi-herdr-deck.js?outside=${Date.now()}`)
+    ).default;
     const fake = fakeExtensionApi();
     const harness = createFakePiHarness();
     const notices: string[] = [];
@@ -127,7 +173,10 @@ test("extension remains loadable outside Herdr and status explains missing HERDR
     const command = fake.commands.get("herdr-deck-status");
     assert.ok(command);
     await command.handler("", harness.context);
-    assert.equal(notices.at(-1), "Pi Deck is inactive because HERDR_PANE_ID is not available. Run Pi inside a Herdr pane.");
+    assert.equal(
+      notices.at(-1),
+      "Pi Deck is inactive because HERDR_PANE_ID is not available. Run Pi inside a Herdr pane.",
+    );
     await emit(fake, "session_shutdown", harness.context);
   } finally {
     if (previousPane !== undefined) process.env.HERDR_PANE_ID = previousPane;
