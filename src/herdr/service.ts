@@ -55,6 +55,7 @@ interface ExactPiPaneIdentity {
   tabId?: string;
   cwd?: string;
   worktreeId?: string;
+  worktreePath?: string;
   generation?: number;
 }
 function exactPiPane(
@@ -182,6 +183,9 @@ function exactPiPane(
     ...(pane.tabId ? { tabId: pane.tabId } : {}),
     ...(cwd ? { cwd } : {}),
     ...(worktrees[0]?.id ? { worktreeId: worktrees[0].id } : {}),
+    ...(workspaceWorktree?.checkoutPath
+      ? { worktreePath: workspaceWorktree.checkoutPath }
+      : {}),
     ...(typeof occupant.generation === "number"
       ? { generation: occupant.generation }
       : {}),
@@ -198,6 +202,7 @@ function samePaneIdentity(
     left.tabId === right.tabId &&
     left.cwd === right.cwd &&
     left.worktreeId === right.worktreeId &&
+    left.worktreePath === right.worktreePath &&
     left.generation === right.generation
   );
 }
@@ -252,7 +257,11 @@ export class HerdrService {
     await this.#preflight?.();
     this.#cli.requireMutationCapabilities(["session.snapshot"]);
     const snapshot = await this.#cli.snapshot();
-    const resolved = exactPiPane(
+    const {
+      worktreePath: _worktreePath,
+      generation: _generation,
+      ...resolved
+    } = exactPiPane(
       snapshot,
       identity.paneId,
       identity.terminalId,
@@ -633,12 +642,12 @@ export class HerdrService {
         );
       let removedWorktree = false;
       await revalidateAndRun(this.#cli, guard, async (identity) => {
-        if (
-          resource?.worktreePath &&
-          !resource.worktreeId &&
-          identity.workspaceId &&
-          identity.cwd === resource.worktreePath
-        ) {
+        if (resource?.worktreePath && !resource.worktreeId) {
+          if (
+            !identity.workspaceId ||
+            identity.worktreePath !== resource.worktreePath
+          )
+            throw new Error("HERDR_IDENTITY_MISMATCH");
           await this.#cli.removeWorktree(identity.workspaceId);
           removedWorktree = true;
         } else {
@@ -831,12 +840,19 @@ function legacyOccupantIdentity(
       ))
   )
     throw new Error("HERDR_IDENTITY_MISMATCH");
+  const workspaces = pane.workspaceId
+    ? snapshot.workspaces.filter((item) => item.id === pane.workspaceId)
+    : [];
+  if (workspaces.length > 1 || workspaces[0]?.worktreeInvalid === true)
+    throw new Error("HERDR_IDENTITY_MISMATCH");
+  const worktreePath = workspaces[0]?.worktree?.checkoutPath;
   return {
     paneId: pane.id,
     terminalId: terminalId ?? "legacy-terminal",
     ...(pane.workspaceId ? { workspaceId: pane.workspaceId } : {}),
     ...(pane.tabId ? { tabId: pane.tabId } : {}),
     ...(pane.cwd ? { cwd: pane.cwd } : {}),
+    ...(worktreePath ? { worktreePath } : {}),
     ...(typeof occupant.generation === "number"
       ? { generation: occupant.generation }
       : {}),

@@ -15,7 +15,10 @@ const agentId = "agent-official";
 const sessionId = "019ff30e-e9ae-7d2b-a35f-a5e43734df15";
 const worktreePath = "/managed/worktree";
 
-function snapshot(referenceValue = `/sessions/turn_${sessionId}.jsonl`) {
+function snapshot(
+  referenceValue = `/sessions/turn_${sessionId}.jsonl`,
+  liveCheckoutPath: string | null = worktreePath,
+) {
   return normalizeSnapshot({
     result: {
       snapshot: {
@@ -24,13 +27,17 @@ function snapshot(referenceValue = `/sessions/turn_${sessionId}.jsonl`) {
         workspaces: [
           {
             workspace_id: "w19",
-            worktree: {
-              repo_key: "/repo/.git",
-              repo_name: "repo",
-              repo_root: "/repo",
-              checkout_path: worktreePath,
-              is_linked_worktree: true,
-            },
+            ...(liveCheckoutPath === null
+              ? {}
+              : {
+                  worktree: {
+                    repo_key: "/repo/.git",
+                    repo_name: "repo",
+                    repo_root: "/repo",
+                    checkout_path: liveCheckoutPath,
+                    is_linked_worktree: true,
+                  },
+                }),
           },
         ],
         tabs: [{ tab_id: "w19:t2", workspace_id: "w19", cwd: worktreePath }],
@@ -64,7 +71,10 @@ function snapshot(referenceValue = `/sessions/turn_${sessionId}.jsonl`) {
   });
 }
 
-async function fixture(referenceValue?: string) {
+async function fixture(
+  referenceValue?: string,
+  liveCheckoutPath: string | null = worktreePath,
+) {
   const root = await mkdtemp(join(tmpdir(), "official-close-cleanup-"));
   const store = new EventStore(join(root, "events.ndjson"));
   await store.open();
@@ -92,11 +102,13 @@ async function fixture(referenceValue?: string) {
     },
   });
   let removedWorkspace: string | undefined;
+  let paneCloses = 0;
   const cli = {
     requireMutationCapabilities: () => undefined,
-    snapshot: async () => snapshot(referenceValue),
-    closePane: async () =>
-      assert.fail("managed worktree must use worktree remove"),
+    snapshot: async () => snapshot(referenceValue, liveCheckoutPath),
+    closePane: async () => {
+      paneCloses++;
+    },
     removeWorktree: async (workspaceId: string) => {
       removedWorkspace = workspaceId;
     },
@@ -114,17 +126,23 @@ async function fixture(referenceValue?: string) {
       changedFiles: [],
     }),
   });
-  return { service, store, removedWorkspace: () => removedWorkspace };
+  return {
+    service,
+    store,
+    removedWorkspace: () => removedWorkspace,
+    paneCloses: () => paneCloses,
+  };
 }
 
 test("official Herdr 0.8 close binds the Pi path session and removes its live workspace", async () => {
-  const { service, store, removedWorkspace } = await fixture();
+  const { service, store, removedWorkspace, paneCloses } = await fixture();
   await service.close({
     paneId: "w19:p2",
     terminalId: "terminal-child",
     sessionId,
   });
   assert.equal(removedWorkspace(), "w19");
+  assert.equal(paneCloses(), 0);
   assert.equal(store.state.herdrResources?.[agentId]?.state, "closed");
   assert.equal(
     store.state.herdrResources?.[agentId]?.cleanupOutcome,
@@ -146,4 +164,24 @@ test("official close rejects a different Pi path session before cleanup", async 
     /HERDR_IDENTITY_MISMATCH/,
   );
   assert.equal(removedWorkspace(), undefined);
+});
+
+test("official close rejects absent or replaced workspace worktree evidence", async () => {
+  for (const liveCheckoutPath of [null, "/managed/replacement"] as const) {
+    const { service, removedWorkspace, paneCloses } = await fixture(
+      undefined,
+      liveCheckoutPath,
+    );
+    await assert.rejects(
+      () =>
+        service.close({
+          paneId: "w19:p2",
+          terminalId: "terminal-child",
+          sessionId,
+        }),
+      /HERDR_IDENTITY_MISMATCH/,
+    );
+    assert.equal(removedWorkspace(), undefined);
+    assert.equal(paneCloses(), 0);
+  }
 });
