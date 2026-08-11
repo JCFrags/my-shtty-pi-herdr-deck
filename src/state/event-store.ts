@@ -11,9 +11,57 @@ import { createId, isEntityId } from "../shared/ids.js";
 import { canonicalJson, sha256 } from "../shared/canonical-json.js";
 import { OrchestratorError } from "../shared/errors.js";
 import { emptyState, reduce } from "./reducer.js";
-import type { EventInput, OrchestrationState, StoredEvent } from "./types.js";
+import type {
+  ErrorSummary,
+  EventInput,
+  OrchestrationState,
+  StoredEvent,
+} from "./types.js";
 import type { Snapshot } from "./snapshot-store.js";
 const MAX_RETAINED_EVENTS = 1_000;
+const MAX_TASK_WALL_MS = 24 * 60 * 60_000;
+function validDeadline(value: unknown, base: unknown): boolean {
+  if (typeof value !== "string" || typeof base !== "string") return false;
+  const parsed = Date.parse(value);
+  const baseMs = Date.parse(base);
+  return (
+    Number.isFinite(parsed) &&
+    Number.isFinite(baseMs) &&
+    new Date(parsed).toISOString() === value &&
+    parsed > baseMs &&
+    parsed - baseMs <= MAX_TASK_WALL_MS
+  );
+}
+function validDeadlineText(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === value;
+}
+function boundedText(value: unknown, max: number): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= max &&
+    !/[\u0000-\u001f\u007f]/u.test(value)
+  );
+}
+function validTaskProject(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const project = value as Record<string, unknown>;
+  const values =
+    boundedText(project.cwd, 4096) && boundedText(project.workspaceId, 256);
+  const basic = exactKeys(project, ["cwd", "workspaceId"]) && values;
+  const inherited =
+    exactKeys(project, ["cwd", "workspaceId", "worktreeId", "isolation"]) &&
+    values &&
+    boundedText(project.worktreeId, 256) &&
+    project.isolation === "shared-readonly";
+  const isolated =
+    exactKeys(project, ["cwd", "workspaceId", "isolation"]) &&
+    values &&
+    project.isolation === "shared-readonly";
+  return basic || inherited || isolated;
+}
 const EVENT_KEYS = [
   "schemaVersion",
   "seq",
@@ -35,6 +83,20 @@ const ACTOR_KINDS = new Set([
   "observer",
   "system",
 ]);
+const ERROR_SUMMARY_MESSAGES = new Map<string, string>([
+  ["TIMEOUT", "The task wall deadline expired."],
+  ["BUDGET_EXCEEDED", "The configured budget was exceeded."],
+]);
+function isErrorSummary(value: unknown): value is ErrorSummary {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const summary = value as Record<string, unknown>;
+  return (
+    exactKeys(summary, ["code", "message"]) &&
+    typeof summary.code === "string" &&
+    typeof summary.message === "string" &&
+    ERROR_SUMMARY_MESSAGES.get(summary.code) === summary.message
+  );
+}
 function exactKeys(
   value: Record<string, unknown>,
   keys: readonly string[],
@@ -470,7 +532,142 @@ export class EventStore {
 
     const p = payload as Record<string, unknown>;
     let valid = false;
-    if (event.type === "task.created") {
+    if (event.type === "task.created_m3") {
+      const taskKeyVariants: string[][] = [];
+      const optionalTaskKeys = [
+        "parentAgentId",
+        "workflowId",
+        "profileId",
+        "dependencies",
+        "project",
+      ];
+      for (let mask = 0; mask < 32; mask++)
+        for (const hasTimeout of [false, true]) {
+          const keys = ["taskId", "title", "objective", "createdAt"];
+          if (hasTimeout) keys.push("timeoutAt");
+          for (let index = 0; index < optionalTaskKeys.length; index++)
+            if (mask & (1 << index)) keys.push(optionalTaskKeys[index]!);
+          taskKeyVariants.push(keys);
+        }
+      valid =
+        exactKeys(refs, ["taskId"]) &&
+        isEntityId(refs.taskId, "tsk") &&
+        taskKeyVariants.some((keys) => exactKeys(p, keys)) &&
+        p.taskId === refs.taskId &&
+        typeof p.title === "string" &&
+        p.title.length > 0 &&
+        p.title.length <= 256 &&
+        typeof p.objective === "string" &&
+        p.objective.length > 0 &&
+        p.objective.length <= 65_536 &&
+        validTimestamp(p.createdAt) &&
+        (p.timeoutAt === undefined ||
+          validDeadline(p.timeoutAt, p.createdAt)) &&
+        (p.parentAgentId === undefined || isEntityId(p.parentAgentId, "agt")) &&
+        (p.workflowId === undefined || isEntityId(p.workflowId, "wfl")) &&
+        (p.profileId === undefined || boundedText(p.profileId, 256)) &&
+        (p.dependencies === undefined ||
+          (Array.isArray(p.dependencies) &&
+            p.dependencies.length <= 64 &&
+            p.dependencies.every((id) => isEntityId(id, "tsk")))) &&
+        (p.project === undefined || validTaskProject(p.project));
+    } else if (event.type === "run.created") {
+      const runKeyVariants = [
+        [
+          "runId",
+          "taskId",
+          "agentId",
+          "assignmentId",
+          "assignmentGeneration",
+          "agentGeneration",
+        ],
+        [
+          "runId",
+          "taskId",
+          "agentId",
+          "assignmentId",
+          "assignmentGeneration",
+          "agentGeneration",
+          "timeoutAt",
+        ],
+        [
+          "runId",
+          "taskId",
+          "agentId",
+          "assignmentId",
+          "assignmentGeneration",
+          "agentGeneration",
+          "piSessionId",
+        ],
+        [
+          "runId",
+          "taskId",
+          "agentId",
+          "assignmentId",
+          "assignmentGeneration",
+          "agentGeneration",
+          "terminalId",
+        ],
+        [
+          "runId",
+          "taskId",
+          "agentId",
+          "assignmentId",
+          "assignmentGeneration",
+          "agentGeneration",
+          "piSessionId",
+          "terminalId",
+        ],
+        [
+          "runId",
+          "taskId",
+          "agentId",
+          "assignmentId",
+          "assignmentGeneration",
+          "agentGeneration",
+          "timeoutAt",
+          "piSessionId",
+        ],
+        [
+          "runId",
+          "taskId",
+          "agentId",
+          "assignmentId",
+          "assignmentGeneration",
+          "agentGeneration",
+          "timeoutAt",
+          "terminalId",
+        ],
+        [
+          "runId",
+          "taskId",
+          "agentId",
+          "assignmentId",
+          "assignmentGeneration",
+          "agentGeneration",
+          "timeoutAt",
+          "piSessionId",
+          "terminalId",
+        ],
+      ];
+      valid =
+        exactKeys(refs, ["runId", "taskId", "agentId"]) &&
+        isEntityId(refs.runId, "run") &&
+        isEntityId(refs.taskId, "tsk") &&
+        isEntityId(refs.agentId, "agt") &&
+        runKeyVariants.some((keys) => exactKeys(p, keys)) &&
+        p.runId === refs.runId &&
+        p.taskId === refs.taskId &&
+        p.agentId === refs.agentId &&
+        isEntityId(p.assignmentId, "asg") &&
+        Number.isSafeInteger(p.assignmentGeneration) &&
+        Number(p.assignmentGeneration) >= 0 &&
+        Number.isSafeInteger(p.agentGeneration) &&
+        Number(p.agentGeneration) >= 0 &&
+        (p.piSessionId === undefined || boundedText(p.piSessionId, 256)) &&
+        (p.terminalId === undefined || boundedText(p.terminalId, 256)) &&
+        (p.timeoutAt === undefined || validDeadlineText(p.timeoutAt));
+    } else if (event.type === "task.created") {
       const basicKeys = ["id", "title", "objective", "createdAt"];
       const idempotentKeys = [
         ...basicKeys,
@@ -509,7 +706,13 @@ export class EventStore {
       valid =
         exactKeys(refs, ["taskId"]) &&
         isEntityId(refs.taskId, "tsk") &&
-        exactKeys(p, ["to"]) &&
+        (exactKeys(p, ["to"]) ||
+          (exactKeys(p, ["to", "reason"]) &&
+            p.to === "timed_out" &&
+            isErrorSummary(p.reason) &&
+            ["TIMEOUT", "BUDGET_EXCEEDED"].includes(
+              (p.reason as ErrorSummary).code,
+            ))) &&
         [
           "draft",
           "queued",
@@ -523,6 +726,44 @@ export class EventStore {
           "cancelled",
           "timed_out",
         ].includes(String(p.to));
+    } else if (event.type === "run.state_changed") {
+      valid =
+        exactKeys(refs, ["runId", "taskId"]) &&
+        isEntityId(refs.runId, "run") &&
+        isEntityId(refs.taskId, "tsk") &&
+        exactKeys(p, ["runId", "state"]) &&
+        p.runId === refs.runId &&
+        this.#state.runs[String(refs.runId)]?.taskId === refs.taskId &&
+        [
+          "created",
+          "prompting",
+          "working",
+          "blocked",
+          "result_pending",
+          "result_pending_missing",
+          "succeeded",
+          "failed",
+          "cancelled",
+          "timed_out",
+          "lost",
+          "settled",
+        ].includes(String(p.state));
+      if (
+        event.type === "run.state_changed" &&
+        exactKeys(refs, ["runId", "taskId"]) &&
+        exactKeys(p, ["runId", "state", "reason"])
+      ) {
+        valid =
+          isEntityId(refs.runId, "run") &&
+          isEntityId(refs.taskId, "tsk") &&
+          p.runId === refs.runId &&
+          this.#state.runs[String(refs.runId)]?.taskId === refs.taskId &&
+          p.state === "timed_out" &&
+          isErrorSummary(p.reason) &&
+          ["TIMEOUT", "BUDGET_EXCEEDED"].includes(
+            (p.reason as ErrorSummary).code,
+          );
+      }
     } else if (event.type === "herdr.provision.intent") {
       valid =
         exactKeys(refs, ["agentId"]) &&

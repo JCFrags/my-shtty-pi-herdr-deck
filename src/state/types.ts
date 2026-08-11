@@ -35,6 +35,10 @@ export type RunState =
   | "cancelled"
   | "timed_out"
   | "lost";
+export interface ErrorSummary {
+  code: "TIMEOUT" | "BUDGET_EXCEEDED";
+  message: string;
+}
 export interface Task {
   id: string;
   title: string;
@@ -51,6 +55,7 @@ export interface Task {
   runIds?: string[];
   resultId?: string;
   timeoutAt?: string;
+  terminalReason?: ErrorSummary;
   project?: Record<string, unknown>;
 }
 export interface Run {
@@ -70,6 +75,7 @@ export interface Run {
   settled: boolean;
   resultId?: string;
   timeoutAt?: string;
+  terminalReason?: ErrorSummary;
   cancelled?: boolean;
 }
 export interface Agent {

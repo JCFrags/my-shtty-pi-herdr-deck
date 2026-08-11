@@ -6,7 +6,19 @@ import type {
   RunState,
   Run,
   Workflow,
+  ErrorSummary,
 } from "./types.js";
+const timeoutReason = (value: unknown): value is ErrorSummary => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const reason = value as Record<string, unknown>;
+  return (
+    Object.keys(reason).length === 2 &&
+    ((reason.code === "TIMEOUT" &&
+      reason.message === "The task wall deadline expired.") ||
+      (reason.code === "BUDGET_EXCEEDED" &&
+        reason.message === "The configured budget was exceeded."))
+  );
+};
 export const emptyState = (): OrchestrationState => ({
   schemaVersion: 1,
   lastEventSeq: 0,
@@ -21,6 +33,20 @@ export const emptyState = (): OrchestrationState => ({
   idempotency: {},
 });
 const taskTerminal = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
+const runSharedTerminal = new Set([
+  "succeeded",
+  "failed",
+  "cancelled",
+  "timed_out",
+  "lost",
+]);
+const DEFAULT_TASK_WALL_MS = 15 * 60_000;
+function derivedDeadline(createdAt: unknown): string | undefined {
+  if (typeof createdAt !== "string") return undefined;
+  const created = Date.parse(createdAt);
+  if (!Number.isFinite(created)) return undefined;
+  return new Date(created + DEFAULT_TASK_WALL_MS).toISOString();
+}
 const known = new Set([
   "task.created",
   "task.state_changed",
@@ -142,8 +168,22 @@ export function reduce(
           "STATE_CORRUPT",
           "Invalid task transition.",
         );
+      if (
+        p.reason !== undefined &&
+        (to !== "timed_out" || !timeoutReason(p.reason))
+      )
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Invalid terminal reason.",
+        );
       next.tasks = { ...next.tasks };
-      next.tasks[taskId] = { ...task, state: to };
+      next.tasks[taskId] = {
+        ...task,
+        state: to,
+        ...(to === "timed_out" && timeoutReason(p.reason)
+          ? { terminalReason: p.reason as ErrorSummary }
+          : {}),
+      };
       break;
     }
     case "agent.registered": {
@@ -201,6 +241,11 @@ export function reduce(
           ...agent,
           ...(typeof p.state === "string"
             ? { state: p.state as AgentState }
+            : {}),
+          ...(event.type === "agent.replaced" &&
+          Number.isSafeInteger(p.generation) &&
+          Number(p.generation) >= 1
+            ? { generation: p.generation as number }
             : {}),
           ...(typeof p.paneId === "string" ? { paneId: p.paneId } : {}),
           ...(typeof p.terminalId === "string"
@@ -264,9 +309,13 @@ export function reduce(
                 ),
               }
             : {}),
-          ...(typeof p.timeoutAt === "string"
-            ? { timeoutAt: p.timeoutAt }
-            : {}),
+          ...(() => {
+            const timeoutAt =
+              typeof p.timeoutAt === "string"
+                ? p.timeoutAt
+                : derivedDeadline(p.createdAt);
+            return timeoutAt ? { timeoutAt } : {};
+          })(),
           ...(p.project &&
           typeof p.project === "object" &&
           !Array.isArray(p.project)
@@ -282,6 +331,18 @@ export function reduce(
         task = next.tasks[String(p.taskId)];
       if (!id || next.runs[id] || !task)
         throw new OrchestratorError("STATE_CORRUPT", "Run or task is invalid.");
+      if (taskTerminal.has(task.state))
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Run cannot be created for a terminal task.",
+        );
+      const runTimeoutAt =
+        typeof p.timeoutAt === "string" ? p.timeoutAt : task.timeoutAt;
+      if (task.timeoutAt !== runTimeoutAt)
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Run deadline does not match its task deadline.",
+        );
       const run: Run = {
         id,
         taskId: task.id,
@@ -301,7 +362,9 @@ export function reduce(
           ? { terminalId: p.terminalId }
           : {}),
         settled: false,
-        ...(typeof p.timeoutAt === "string" ? { timeoutAt: p.timeoutAt } : {}),
+        ...(typeof runTimeoutAt === "string"
+          ? { timeoutAt: runTimeoutAt }
+          : {}),
       };
       next.runs = { ...next.runs, [id]: run };
       if (run.agentId && next.agents[run.agentId])
@@ -337,13 +400,49 @@ export function reduce(
         run = next.runs[id];
       if (!run) throw new OrchestratorError("STATE_CORRUPT", "Run is missing.");
       const state = p.state as RunState | undefined;
+      if (
+        [
+          "assignment.delivered",
+          "assignment.accepted",
+          "assignment.delivery_failed",
+          "run.pi_started",
+          "run.pi_settled",
+        ].includes(event.type) &&
+        (run.settled ||
+          run.state === "settled" ||
+          runSharedTerminal.has(run.state))
+      )
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Adapter progress cannot mutate a terminal run.",
+        );
+      if (
+        event.type === "run.state_changed" &&
+        runSharedTerminal.has(run.state) &&
+        state !== run.state
+      )
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "A terminal run cannot transition to another state.",
+        );
+      if (
+        p.reason !== undefined &&
+        (state !== "timed_out" || !timeoutReason(p.reason))
+      )
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Invalid terminal reason.",
+        );
       const settled = event.type === "run.pi_settled" ? true : run.settled;
+      const reason =
+        state === "timed_out" && timeoutReason(p.reason) ? p.reason : undefined;
       next.runs = {
         ...next.runs,
         [id]: {
           ...run,
           ...(state ? { state } : {}),
           settled,
+          ...(reason ? { terminalReason: reason } : {}),
           ...(typeof p.piSessionId === "string"
             ? { piSessionId: p.piSessionId }
             : {}),
@@ -400,6 +499,7 @@ export function reduce(
           [run.taskId]: {
             ...next.tasks[run.taskId]!,
             state: state as TaskState,
+            ...(reason ? { terminalReason: reason } : {}),
           },
         };
       if (event.type === "run.pi_settled") {

@@ -210,6 +210,25 @@ function ok(frame: Frame): any {
   assert.equal(frame.ok, true, JSON.stringify(frame.error));
   return frame.result;
 }
+function bounded<T>(
+  promise: Promise<T>,
+  label: string,
+  ms = 5_000,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(label)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
 
 test("parent-bound broker vertical path provisions, assigns, correlates, bounds, replays, and denies cross-parent access", async () => {
   const root = await mkdtemp(join(tmpdir(), "parent-vertical-"));
@@ -230,15 +249,38 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
   });
   await broker.start();
   let brokerStopped = false;
+  let removeAssignmentAccepted = () => {};
+  let removeSecondProvisionReceipt: (() => void) | undefined;
   try {
     const secret = (await readFile(paths.secret, "utf8")).trim();
     const liveEvents: Frame[] = [];
+    const requiredEvents = [
+      "workflow.created",
+      "agent.registered",
+      "assignment.delivered",
+      "assignment.accepted",
+      "run.pi_started",
+      "run.pi_settled",
+      "result.published",
+    ];
+    const eventResolvers = new Map<string, (frame: Frame) => void>();
+    const eventReceipts = requiredEvents.map(
+      (eventName) =>
+        new Promise<Frame>((resolve) => {
+          eventResolvers.set(eventName, resolve);
+        }),
+    );
+    const recordEvent = (frame: Frame) => {
+      liveEvents.push(frame);
+      eventResolvers.get(frame.event ?? "")?.(frame);
+      eventResolvers.delete(frame.event ?? "");
+    };
     const p1 = await connect(
       paths,
       { kind: "client_secret", secret },
       "pi_parent",
       undefined,
-      (frame) => liveEvents.push(frame),
+      recordEvent,
     );
     const p2 = await connect(
       paths,
@@ -508,6 +550,17 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
       false,
     );
     assert.ok(assignmentFrame);
+    const assignmentAccepted = new Promise<void>((resolve) => {
+      removeAssignmentAccepted = broker.store.onAppend((event) => {
+        if (
+          event.type === "assignment.accepted" &&
+          event.entityRefs?.runId === runId
+        ) {
+          removeAssignmentAccepted();
+          resolve();
+        }
+      });
+    });
     assignmentFrame.socket.write(
       encodeFrame({
         v: 1,
@@ -517,13 +570,7 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
         result: { status: "accepted" },
       }),
     );
-    for (
-      let attempt = 0;
-      attempt < 100 &&
-      broker.store.state.runs[runId]?.assignmentDeliveryState !== "accepted";
-      attempt++
-    )
-      await new Promise<void>((resolve) => setImmediate(resolve));
+    await bounded(assignmentAccepted, "assignment.accepted append timeout");
     assert.equal(
       broker.store.state.runs[runId]?.assignmentDeliveryState,
       "accepted",
@@ -638,12 +685,7 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
         answer: { optionId: "a", text: null },
       }),
     );
-    await Promise.race([
-      deliverySeen,
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("question delivery timeout")), 2_000),
-      ),
-    ]);
+    await bounded(deliverySeen, "question delivery timeout");
     assert.equal(deliveryFrame?.params.state, "answered");
     assert.equal(
       (await send(p2.socket, "agent.get", { agentId: childId })).ok,
@@ -727,6 +769,20 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
         safeData: { toolName: null, contextPercent: 0 },
       }),
     );
+    const secondProvisionOutcome = new Promise<void>((resolve) => {
+      removeSecondProvisionReceipt = broker.store.onAppend((event) => {
+        const payload = event.payload as Record<string, unknown>;
+        if (
+          event.type === "herdr.provision.outcome" &&
+          payload.paneId === "pane-2" &&
+          payload.state === "pending"
+        ) {
+          removeSecondProvisionReceipt?.();
+          removeSecondProvisionReceipt = undefined;
+          resolve();
+        }
+      });
+    });
     ok(
       await send(child.socket, "result.publish", {
         agentId: childId,
@@ -736,7 +792,10 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
         result: resultBody,
       }),
     );
-    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    await bounded(
+      secondProvisionOutcome,
+      "second provision outcome was not appended",
+    );
     assert.equal(broker.store.state.tasks[taskId]?.state, "succeeded");
     assert.equal(
       broker.store.state.tasks[taskId]?.workflowId !== undefined,
@@ -783,6 +842,11 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
       ok(await send(p1.socket, "result.get", { taskId })).payload.summary,
       "vertical",
     );
+    await Promise.all(
+      eventReceipts.map((receipt, index) =>
+        bounded(receipt, `live event timeout ${requiredEvents[index]}`),
+      ),
+    );
     const eventSeqs = liveEvents
       .map((frame) => frame.seq)
       .filter((seq): seq is number => typeof seq === "number");
@@ -790,19 +854,12 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
       throw new Error(
         `duplicate live events ${JSON.stringify(liveEvents.map((frame) => ({ seq: frame.seq, event: frame.event })))}`,
       );
-    for (const requiredEvent of [
-      "workflow.created",
-      "agent.registered",
-      "assignment.delivered",
-      "assignment.accepted",
-      "run.pi_started",
-      "run.pi_settled",
-      "result.published",
-    ])
-      if (!liveEvents.some((frame) => frame.event === requiredEvent))
-        throw new Error(
-          `missing ${requiredEvent}: ${liveEvents.map((frame) => frame.event).join(",")}`,
-        );
+    assert.deepEqual(
+      requiredEvents.filter((eventName) =>
+        liveEvents.some((frame) => frame.event === eventName),
+      ),
+      requiredEvents,
+    );
     await Promise.all([child.socket, p1.socket, p2.socket].map(closeSocket));
     await broker.stop();
     brokerStopped = true;
@@ -826,6 +883,8 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
     await closeSocket(after.socket);
     await restarted.stop();
   } finally {
+    removeAssignmentAccepted();
+    removeSecondProvisionReceipt?.();
     if (!brokerStopped) await broker.stop().catch(() => undefined);
     await rm(root, { recursive: true, force: true });
     await rm(runtime, { recursive: true, force: true });
