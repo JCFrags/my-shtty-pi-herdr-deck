@@ -663,24 +663,35 @@ export class Broker {
       )
         throw new Error("Broker socket changed while securing its mode.");
     } catch (error) {
-      try {
-        if (this.#server) await this.stop();
-        else {
-          if (this.#processRecord) {
+      const cleanupFailures: unknown[] = [];
+      if (this.#server)
+        try {
+          await this.stop();
+        } catch (cleanupError) {
+          cleanupFailures.push(cleanupError);
+        }
+      else {
+        if (this.#processRecord)
+          try {
             await removeBrokerProcessRecord(
               this.paths.pid,
               this.#processRecord,
             );
             this.#processRecord = undefined;
+          } catch (cleanupError) {
+            cleanupFailures.push(cleanupError);
           }
+        try {
           await this.#lock.release();
+        } catch (cleanupError) {
+          cleanupFailures.push(cleanupError);
         }
-      } catch (cleanupError) {
+      }
+      if (cleanupFailures.length)
         throw new AggregateError(
-          [error, cleanupError],
+          [error, ...cleanupFailures],
           "Broker start and cleanup failed.",
         );
-      }
       throw error;
     }
   }
@@ -776,13 +787,13 @@ export class Broker {
       for (const timer of this.#deadlineTimers.values())
         this.#clearTimeout(timer);
       this.#deadlineTimers.clear();
-      try {
-        if (this.#processRecord)
+      if (this.#processRecord)
+        try {
           await removeBrokerProcessRecord(this.paths.pid, this.#processRecord);
-      } catch (error) {
-        failures.push(error);
-      }
-      this.#processRecord = undefined;
+          this.#processRecord = undefined;
+        } catch (error) {
+          failures.push(error);
+        }
       try {
         await this.#lock.release();
       } catch (error) {

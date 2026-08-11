@@ -1,5 +1,14 @@
 import assert from "node:assert/strict";
-import { access, readFile, rm } from "node:fs/promises";
+import {
+  access,
+  lstat,
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { createConnection, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -360,6 +369,51 @@ test("committed response survives snapshot failure and stop reports the sentinel
   } finally {
     parent?.destroy();
     await broker.stop().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+    await rm(runtime, { recursive: true, force: true });
+  }
+});
+
+test("failed start attempts lock release after process-record cleanup rejects", async () => {
+  const root = await mkdtemp(join(tmpdir(), "shutdown-start-cleanup-"));
+  const runtime = await mkdtemp(
+    join(tmpdir(), "shutdown-start-cleanup-runtime-"),
+  );
+  const paths = pathsFor(root, runtime);
+  const pid = `${paths.lock}.pid`;
+  const retained = `${pid}.owned-retained`;
+  const replacement = "replacement process record\n";
+  const primary = new Error("START_PRIMARY_FAILURE");
+  const broker = new Broker(paths, {
+    herdrFactory: async () => {
+      await rename(pid, retained);
+      await writeFile(pid, replacement, { mode: 0o600 });
+      throw primary;
+    },
+  });
+  try {
+    await assert.rejects(broker.start(), (error: unknown) => {
+      assert.ok(error instanceof AggregateError);
+      assert.equal(error.errors.length, 2);
+      assert.equal(error.errors[0], primary);
+      assert.match(String(error.errors[1]), /identity changed before removal/u);
+      return true;
+    });
+    assert.equal(await readFile(pid, "utf8"), replacement);
+    assert.equal((await lstat(retained)).isFile(), true);
+    await assert.rejects(lstat(paths.lock), { code: "ENOENT" });
+    assert.equal(
+      (await readdir(runtime)).filter(
+        (name) =>
+          name === "lock" ||
+          name.startsWith("lock.create.") ||
+          name.startsWith("lock.release."),
+      ).length,
+      0,
+    );
+    await assert.rejects(broker.stop(), /identity changed before removal/u);
+    await assert.rejects(lstat(paths.lock), { code: "ENOENT" });
+  } finally {
     await rm(root, { recursive: true, force: true });
     await rm(runtime, { recursive: true, force: true });
   }
