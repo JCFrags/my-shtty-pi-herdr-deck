@@ -35,6 +35,10 @@ export type RunState =
   | "cancelled"
   | "timed_out"
   | "lost";
+export interface ErrorSummary {
+  code: "TIMEOUT" | "BUDGET_EXCEEDED";
+  message: string;
+}
 export interface Task {
   id: string;
   title: string;
@@ -47,9 +51,12 @@ export interface Task {
   constraints?: string[];
   dependencies?: string[];
   currentRunId?: string;
+  assignedAgentId?: string;
   runIds?: string[];
   resultId?: string;
   timeoutAt?: string;
+  terminalReason?: ErrorSummary;
+  project?: Record<string, unknown>;
 }
 export interface Run {
   id: string;
@@ -58,12 +65,17 @@ export interface Run {
   agentId?: string;
   agentGeneration?: number;
   assignmentId?: string;
+  assignmentDeliveryState?: "pending" | "accepted" | "failed";
+  assignmentConnectionGeneration?: number;
   assignmentGeneration: number;
+  agentCycleId?: string;
+  firstTurnIndex?: number;
   piSessionId?: string;
   terminalId?: string;
   settled: boolean;
   resultId?: string;
   timeoutAt?: string;
+  terminalReason?: ErrorSummary;
   cancelled?: boolean;
 }
 export interface Agent {
@@ -80,12 +92,15 @@ export interface Agent {
   paneId?: string;
   workspaceId?: string;
   tabId?: string;
+  cwd?: string;
+  worktreeId?: string;
   piSessionId?: string;
   connectionGeneration?: number;
   detectedKind?: string;
   coarseStatus?: "idle" | "working" | "blocked" | "done" | "unknown";
   currentRunId?: string;
   currentAssignmentGeneration?: number;
+  lastAdapterSeq?: number;
   tokenDigest?: string;
 }
 export interface ResultRecord {
@@ -96,6 +111,10 @@ export interface ResultRecord {
   status: "succeeded" | "failed" | "cancelled";
   payloadHash: string;
   piSettled: boolean;
+  assignmentGeneration?: number;
+  payload?: unknown;
+  validation?: Record<string, unknown>;
+  publishedAt?: string;
 }
 export interface QuestionRecord {
   id: string;
@@ -103,7 +122,13 @@ export interface QuestionRecord {
   runId: string;
   agentId: string;
   state: "open" | "answered" | "cancelled" | "timed_out";
+  assignmentGeneration?: number;
+  toolCallId?: string;
+  payload?: unknown;
+  askedAt?: string;
+  answeredAt?: string;
   answeredBy?: string;
+  answer?: { optionId: string | null; text: string | null };
 }
 export interface Workflow {
   id: string;

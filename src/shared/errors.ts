@@ -22,7 +22,14 @@ export type ErrorCode =
   | "QUESTION_NOT_FOUND"
   | "QUESTION_ALREADY_ANSWERED"
   | "QUESTION_TIMED_OUT"
-  | "RUN_MISMATCH";
+  | "RUN_MISMATCH"
+  | "TASK_NOT_FOUND"
+  | "WORKFLOW_NOT_FOUND"
+  | "WORKFLOW_INVALID"
+  | "PI_COMMAND_REJECTED"
+  | "HERDR_UNAVAILABLE"
+  | "HERDR_IDENTITY_MISMATCH"
+  | "TASK_TERMINAL";
 export class OrchestratorError extends Error {
   readonly code: ErrorCode;
   readonly retryable: boolean;

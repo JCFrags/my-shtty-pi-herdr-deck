@@ -1,6 +1,24 @@
 import { OrchestratorError } from "../shared/errors.js";
 import type { EventInput, OrchestrationState, StoredEvent } from "./types.js";
-import type { TaskState, AgentState, RunState, Run } from "./types.js";
+import type {
+  TaskState,
+  AgentState,
+  RunState,
+  Run,
+  Workflow,
+  ErrorSummary,
+} from "./types.js";
+const timeoutReason = (value: unknown): value is ErrorSummary => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const reason = value as Record<string, unknown>;
+  return (
+    Object.keys(reason).length === 2 &&
+    ((reason.code === "TIMEOUT" &&
+      reason.message === "The task wall deadline expired.") ||
+      (reason.code === "BUDGET_EXCEEDED" &&
+        reason.message === "The configured budget was exceeded."))
+  );
+};
 export const emptyState = (): OrchestrationState => ({
   schemaVersion: 1,
   lastEventSeq: 0,
@@ -15,6 +33,20 @@ export const emptyState = (): OrchestrationState => ({
   idempotency: {},
 });
 const taskTerminal = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
+const runSharedTerminal = new Set([
+  "succeeded",
+  "failed",
+  "cancelled",
+  "timed_out",
+  "lost",
+]);
+const DEFAULT_TASK_WALL_MS = 15 * 60_000;
+function derivedDeadline(createdAt: unknown): string | undefined {
+  if (typeof createdAt !== "string") return undefined;
+  const created = Date.parse(createdAt);
+  if (!Number.isFinite(created)) return undefined;
+  return new Date(created + DEFAULT_TASK_WALL_MS).toISOString();
+}
 const known = new Set([
   "task.created",
   "task.state_changed",
@@ -32,6 +64,7 @@ const known = new Set([
   "run.created",
   "assignment.delivered",
   "assignment.accepted",
+  "assignment.delivery_failed",
   "run.pi_started",
   "run.pi_settled",
   "run.state_changed",
@@ -43,6 +76,12 @@ const known = new Set([
   "question.opened",
   "question.answered",
   "question.timed_out",
+  "question.cancelled",
+  "workflow.created",
+  "workflow.state_changed",
+  "scheduler.admitted",
+  "scheduler.blocked",
+  "task.collected",
 ]);
 export function reduce(
   state: OrchestrationState,
@@ -107,17 +146,44 @@ export function reduce(
         );
       const task = next.tasks[taskId];
       const to = p.to as TaskState;
+      const allowed = new Set([
+        "draft",
+        "queued",
+        "provisioning",
+        "assigned",
+        "running",
+        "blocked",
+        "collecting",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "timed_out",
+      ]);
       if (
         !task ||
-        (to !== "queued" && to !== "cancelled") ||
+        !allowed.has(String(to)) ||
         (taskTerminal.has(task.state) && task.state !== to)
       )
         throw new OrchestratorError(
           "STATE_CORRUPT",
           "Invalid task transition.",
         );
+      if (
+        p.reason !== undefined &&
+        (to !== "timed_out" || !timeoutReason(p.reason))
+      )
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Invalid terminal reason.",
+        );
       next.tasks = { ...next.tasks };
-      next.tasks[taskId] = { ...task, state: to };
+      next.tasks[taskId] = {
+        ...task,
+        state: to,
+        ...(to === "timed_out" && timeoutReason(p.reason)
+          ? { terminalReason: p.reason as ErrorSummary }
+          : {}),
+      };
       break;
     }
     case "agent.registered": {
@@ -144,6 +210,14 @@ export function reduce(
           ...(typeof p.terminalId === "string"
             ? { terminalId: p.terminalId }
             : {}),
+          ...(typeof p.workspaceId === "string"
+            ? { workspaceId: p.workspaceId }
+            : {}),
+          ...(typeof p.tabId === "string" ? { tabId: p.tabId } : {}),
+          ...(typeof p.cwd === "string" ? { cwd: p.cwd } : {}),
+          ...(typeof p.worktreeId === "string"
+            ? { worktreeId: p.worktreeId }
+            : {}),
           ...(typeof p.piSessionId === "string"
             ? { piSessionId: p.piSessionId }
             : {}),
@@ -168,9 +242,22 @@ export function reduce(
           ...(typeof p.state === "string"
             ? { state: p.state as AgentState }
             : {}),
+          ...(event.type === "agent.replaced" &&
+          Number.isSafeInteger(p.generation) &&
+          Number(p.generation) >= 1
+            ? { generation: p.generation as number }
+            : {}),
           ...(typeof p.paneId === "string" ? { paneId: p.paneId } : {}),
           ...(typeof p.terminalId === "string"
             ? { terminalId: p.terminalId }
+            : {}),
+          ...(typeof p.workspaceId === "string"
+            ? { workspaceId: p.workspaceId }
+            : {}),
+          ...(typeof p.tabId === "string" ? { tabId: p.tabId } : {}),
+          ...(typeof p.cwd === "string" ? { cwd: p.cwd } : {}),
+          ...(typeof p.worktreeId === "string"
+            ? { worktreeId: p.worktreeId }
             : {}),
           ...(typeof p.piSessionId === "string"
             ? { piSessionId: p.piSessionId }
@@ -186,6 +273,9 @@ export function reduce(
                 currentAssignmentGeneration:
                   p.currentAssignmentGeneration as number,
               }
+            : {}),
+          ...(Number.isSafeInteger(p.adapterSeq)
+            ? { lastAdapterSeq: p.adapterSeq as number }
             : {}),
         },
       };
@@ -206,6 +296,9 @@ export function reduce(
           ...(typeof p.parentAgentId === "string"
             ? { parentAgentId: p.parentAgentId }
             : {}),
+          ...(typeof p.workflowId === "string"
+            ? { workflowId: p.workflowId }
+            : {}),
           ...(typeof p.profileId === "string"
             ? { profileId: p.profileId }
             : {}),
@@ -216,8 +309,17 @@ export function reduce(
                 ),
               }
             : {}),
-          ...(typeof p.timeoutAt === "string"
-            ? { timeoutAt: p.timeoutAt }
+          ...(() => {
+            const timeoutAt =
+              typeof p.timeoutAt === "string"
+                ? p.timeoutAt
+                : derivedDeadline(p.createdAt);
+            return timeoutAt ? { timeoutAt } : {};
+          })(),
+          ...(p.project &&
+          typeof p.project === "object" &&
+          !Array.isArray(p.project)
+            ? { project: p.project as Record<string, unknown> }
             : {}),
           runIds: [],
         },
@@ -229,6 +331,18 @@ export function reduce(
         task = next.tasks[String(p.taskId)];
       if (!id || next.runs[id] || !task)
         throw new OrchestratorError("STATE_CORRUPT", "Run or task is invalid.");
+      if (taskTerminal.has(task.state))
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Run cannot be created for a terminal task.",
+        );
+      const runTimeoutAt =
+        typeof p.timeoutAt === "string" ? p.timeoutAt : task.timeoutAt;
+      if (task.timeoutAt !== runTimeoutAt)
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Run deadline does not match its task deadline.",
+        );
       const run: Run = {
         id,
         taskId: task.id,
@@ -248,14 +362,28 @@ export function reduce(
           ? { terminalId: p.terminalId }
           : {}),
         settled: false,
-        ...(typeof p.timeoutAt === "string" ? { timeoutAt: p.timeoutAt } : {}),
+        ...(typeof runTimeoutAt === "string"
+          ? { timeoutAt: runTimeoutAt }
+          : {}),
       };
       next.runs = { ...next.runs, [id]: run };
+      if (run.agentId && next.agents[run.agentId])
+        next.agents = {
+          ...next.agents,
+          [run.agentId]: {
+            ...next.agents[run.agentId]!,
+            currentRunId: id,
+            currentAssignmentGeneration: run.assignmentGeneration,
+          },
+        };
       next.tasks = {
         ...next.tasks,
         [task.id]: {
           ...task,
           currentRunId: id,
+          ...(typeof p.agentId === "string"
+            ? { assignedAgentId: p.agentId }
+            : {}),
           runIds: [...(task.runIds ?? []), id],
           state: "assigned",
         },
@@ -264,6 +392,7 @@ export function reduce(
     }
     case "assignment.delivered":
     case "assignment.accepted":
+    case "assignment.delivery_failed":
     case "run.pi_started":
     case "run.pi_settled":
     case "run.state_changed": {
@@ -271,19 +400,108 @@ export function reduce(
         run = next.runs[id];
       if (!run) throw new OrchestratorError("STATE_CORRUPT", "Run is missing.");
       const state = p.state as RunState | undefined;
+      if (
+        [
+          "assignment.delivered",
+          "assignment.accepted",
+          "assignment.delivery_failed",
+          "run.pi_started",
+          "run.pi_settled",
+        ].includes(event.type) &&
+        (run.settled ||
+          run.state === "settled" ||
+          runSharedTerminal.has(run.state))
+      )
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Adapter progress cannot mutate a terminal run.",
+        );
+      if (
+        event.type === "run.state_changed" &&
+        runSharedTerminal.has(run.state) &&
+        state !== run.state
+      )
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "A terminal run cannot transition to another state.",
+        );
+      if (
+        p.reason !== undefined &&
+        (state !== "timed_out" || !timeoutReason(p.reason))
+      )
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Invalid terminal reason.",
+        );
       const settled = event.type === "run.pi_settled" ? true : run.settled;
+      const reason =
+        state === "timed_out" && timeoutReason(p.reason) ? p.reason : undefined;
       next.runs = {
         ...next.runs,
         [id]: {
           ...run,
           ...(state ? { state } : {}),
           settled,
+          ...(reason ? { terminalReason: reason } : {}),
           ...(typeof p.piSessionId === "string"
             ? { piSessionId: p.piSessionId }
             : {}),
           ...(typeof p.agentId === "string" ? { agentId: p.agentId } : {}),
+          ...(event.type === "run.pi_started" &&
+          typeof p.agentCycleId === "string"
+            ? { agentCycleId: p.agentCycleId }
+            : {}),
+          ...(event.type === "run.pi_started" &&
+          Number.isSafeInteger(p.turnIndex)
+            ? { firstTurnIndex: p.turnIndex as number }
+            : {}),
+          ...(event.type.startsWith("assignment.") &&
+          typeof p.assignmentId === "string"
+            ? { assignmentId: p.assignmentId }
+            : {}),
+          ...(event.type.startsWith("assignment.") &&
+          Number.isSafeInteger(p.connectionGeneration)
+            ? {
+                assignmentConnectionGeneration:
+                  p.connectionGeneration as number,
+              }
+            : {}),
+          ...(event.type === "assignment.delivered"
+            ? { assignmentDeliveryState: "pending" as const }
+            : event.type === "assignment.accepted"
+              ? { assignmentDeliveryState: "accepted" as const }
+              : event.type === "assignment.delivery_failed"
+                ? { assignmentDeliveryState: "failed" as const }
+                : {}),
         },
       };
+      if (
+        run.agentId &&
+        Number.isSafeInteger(p.adapterSeq) &&
+        next.agents[run.agentId]
+      )
+        next.agents = {
+          ...next.agents,
+          [run.agentId]: {
+            ...next.agents[run.agentId]!,
+            lastAdapterSeq: p.adapterSeq as number,
+          },
+        };
+      if (
+        event.type === "run.state_changed" &&
+        ["succeeded", "failed", "cancelled", "timed_out", "lost"].includes(
+          String(state),
+        ) &&
+        next.tasks[run.taskId]
+      )
+        next.tasks = {
+          ...next.tasks,
+          [run.taskId]: {
+            ...next.tasks[run.taskId]!,
+            state: state as TaskState,
+            ...(reason ? { terminalReason: reason } : {}),
+          },
+        };
       if (event.type === "run.pi_settled") {
         const result = Object.values(next.results!).find(
           (item) => item.runId === id,
@@ -339,9 +557,22 @@ export function reduce(
           taskId: event.entityRefs.taskId,
           runId: event.entityRefs.runId,
           agentId: event.entityRefs.agentId,
-          status: "succeeded",
+          status:
+            p.status === "failed" || p.status === "cancelled"
+              ? p.status
+              : "succeeded",
           payloadHash: p.payloadHash,
-          piSettled: false,
+          piSettled: p.piSettled === true,
+          ...(Number.isSafeInteger(p.assignmentGeneration)
+            ? { assignmentGeneration: p.assignmentGeneration as number }
+            : {}),
+          ...(Object.hasOwn(p, "payload") ? { payload: p.payload } : {}),
+          ...(p.validation && typeof p.validation === "object"
+            ? { validation: p.validation as Record<string, unknown> }
+            : {}),
+          ...(typeof p.publishedAt === "string"
+            ? { publishedAt: p.publishedAt }
+            : {}),
         },
       };
       break;
@@ -362,7 +593,52 @@ export function reduce(
     }
     case "run.result_recovery_requested":
     case "run.result_missing":
+    case "scheduler.admitted":
+    case "scheduler.blocked":
+    case "task.collected":
       break;
+    case "workflow.created": {
+      const id = String(p.workflowId);
+      if (!id || next.workflows[id])
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Workflow already exists.",
+        );
+      next.workflows = {
+        ...next.workflows,
+        [id]: {
+          id,
+          state: "created",
+          taskIds: Array.isArray(p.taskIds)
+            ? p.taskIds.filter((x): x is string => typeof x === "string")
+            : [],
+        },
+      };
+      break;
+    }
+    case "workflow.state_changed": {
+      const id = String(event.entityRefs?.workflowId ?? p.workflowId),
+        workflow = next.workflows[id];
+      if (!workflow)
+        throw new OrchestratorError("STATE_CORRUPT", "Workflow is missing.");
+      const state = String(p.state) as Workflow["state"];
+      if (
+        ![
+          "created",
+          "running",
+          "blocked",
+          "succeeded",
+          "failed",
+          "cancelled",
+        ].includes(state)
+      )
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Workflow state is invalid.",
+        );
+      next.workflows = { ...next.workflows, [id]: { ...workflow, state } };
+      break;
+    }
     case "question.opened": {
       const id = String(p.questionId);
       if (!id || next.questions![id])
@@ -387,6 +663,14 @@ export function reduce(
           runId: event.entityRefs.runId,
           agentId: event.entityRefs.agentId,
           state: "open",
+          ...(Number.isSafeInteger(p.assignmentGeneration)
+            ? { assignmentGeneration: p.assignmentGeneration as number }
+            : {}),
+          ...(typeof p.toolCallId === "string"
+            ? { toolCallId: p.toolCallId }
+            : {}),
+          ...(Object.hasOwn(p, "payload") ? { payload: p.payload } : {}),
+          ...(typeof p.askedAt === "string" ? { askedAt: p.askedAt } : {}),
         },
       };
       break;
@@ -406,20 +690,40 @@ export function reduce(
           ...(typeof p.answeredBy === "string"
             ? { answeredBy: p.answeredBy }
             : {}),
+          ...(typeof p.answeredAt === "string"
+            ? { answeredAt: p.answeredAt }
+            : {}),
+          ...(Object.hasOwn(p, "answer") &&
+          p.answer &&
+          typeof p.answer === "object"
+            ? {
+                answer: p.answer as {
+                  optionId: string | null;
+                  text: string | null;
+                },
+              }
+            : {}),
         },
       };
       break;
     }
-    case "question.timed_out": {
+    case "question.timed_out":
+    case "question.cancelled": {
       const id = event.entityRefs?.questionId;
       if (!id || !next.questions![id] || next.questions![id].state !== "open")
         throw new OrchestratorError(
           "STATE_CORRUPT",
-          "Question timeout is not valid.",
+          event.type === "question.cancelled"
+            ? "Question cancellation is not valid."
+            : "Question timeout is not valid.",
         );
       next.questions = {
         ...next.questions,
-        [id]: { ...next.questions![id], state: "timed_out" },
+        [id]: {
+          ...next.questions![id],
+          state:
+            event.type === "question.cancelled" ? "cancelled" : "timed_out",
+        },
       };
       break;
     }
