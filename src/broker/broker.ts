@@ -4747,6 +4747,24 @@ export class Broker {
     const workflow = this.store.state.workflows[workflowId];
     if (!workflow) return;
     for (const taskId of workflow.taskIds) {
+      const task = this.store.state.tasks[taskId];
+      const run = task?.currentRunId
+        ? this.store.state.runs[task.currentRunId]
+        : undefined;
+      const published = run
+        ? Object.values(this.store.state.results ?? {}).find(
+            (candidate) => candidate.runId === run.id,
+          )
+        : undefined;
+      if (run?.settled && !isTerminal(run.state) && published)
+        await this.store.append({
+          type: "run.state_changed",
+          actor,
+          entityRefs: { runId: run.id, taskId },
+          payload: { runId: run.id, state: published.status },
+        });
+    }
+    for (const taskId of workflow.taskIds) {
       const candidate = this.store.state.tasks[taskId];
       if (candidate?.isolationMode !== "reuse-worktree") continue;
       const dependencies = candidate.dependencies ?? [];

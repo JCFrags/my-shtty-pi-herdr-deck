@@ -797,19 +797,6 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
       ).ok,
       false,
     );
-    ok(
-      await send(child.socket, "agent.lifecycle_event", {
-        agentId: childId,
-        connectionGeneration,
-        adapterSeq: 8,
-        event: "agent_settled",
-        piSessionId: "child-session",
-        turnIndex: 1,
-        agentCycleId: "cycle",
-        assignment: { assignmentId, generation: 1 },
-        safeData: { toolName: null, contextPercent: 0 },
-      }),
-    );
     const secondProvisionOutcome = new Promise<void>((resolve) => {
       removeSecondProvisionReceipt = broker.store.onAppend((event) => {
         const payload = event.payload as Record<string, unknown>;
@@ -824,13 +811,28 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
         }
       });
     });
-    ok(
+    const earlyResult = ok(
       await send(child.socket, "result.publish", {
         agentId: childId,
         taskId,
         runId,
         assignmentGeneration: 1,
         result: resultBody,
+      }),
+    );
+    assert.equal(earlyResult.state, "result_pending");
+    assert.notEqual(broker.store.state.tasks[taskId]?.state, "succeeded");
+    ok(
+      await send(child.socket, "agent.lifecycle_event", {
+        agentId: childId,
+        connectionGeneration,
+        adapterSeq: 8,
+        event: "agent_settled",
+        piSessionId: "child-session",
+        turnIndex: 1,
+        agentCycleId: "cycle",
+        assignment: { assignmentId, generation: 1 },
+        safeData: { toolName: null, contextPercent: 0 },
       }),
     );
     await bounded(

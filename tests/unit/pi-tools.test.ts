@@ -772,6 +772,83 @@ test("parent tools let the broker authorize child targets without model identity
   }
 });
 
+test("agent_wait polls fresh broker state to an allowed outcome and enforces the broker timeout bound", async () => {
+  const tools: Array<{
+    name: string;
+    parameters: {
+      properties?: Record<string, { maximum?: number }>;
+    };
+    execute: (...args: never[]) => Promise<unknown>;
+  }> = [];
+  const states = ["working", "settled", "succeeded"];
+  let calls = 0;
+  const client = {
+    connected: true,
+    principal: {
+      id: "principal_1",
+      kind: "pi_parent" as const,
+      permissions: ["read:state"],
+    },
+    request: async (method: string) => {
+      assert.equal(method, "agent.wait");
+      return {
+        agentId: "child_1",
+        taskId: "task_1",
+        runId: "run_1",
+        state: states[Math.min(calls++, states.length - 1)],
+        settled: calls > 1,
+      };
+    },
+  };
+  registerParentTools(
+    {
+      registerTool: (definition: (typeof tools)[number]) =>
+        tools.push(definition),
+    } as never,
+    fakeAdapter() as never,
+    client as never,
+  );
+  const wait = tools.find((tool) => tool.name === "agent_wait");
+  assert.ok(wait);
+  assert.equal(wait.parameters.properties?.timeoutMs?.maximum, 30_000);
+  const execute = wait.execute as unknown as (
+    ...args: unknown[]
+  ) => Promise<unknown>;
+  const response = await execute(
+    "call",
+    {
+      agentId: "child_1",
+      taskId: "task_1",
+      runId: "run_1",
+      until: ["succeeded"],
+      timeoutMs: 1000,
+    },
+    AbortSignal.timeout(2000),
+    undefined,
+    fakeContext(),
+  );
+  assert.equal(calls, 3);
+  assert.match(JSON.stringify(response), /succeeded/u);
+  await assert.rejects(
+    () =>
+      execute(
+        "call",
+        {
+          agentId: "child_1",
+          taskId: "task_1",
+          runId: "run_1",
+          until: ["succeeded"],
+          timeoutMs: 30_001,
+        },
+        AbortSignal.timeout(1000),
+        undefined,
+        fakeContext(),
+      ),
+    /INVALID_REQUEST/u,
+  );
+  assert.equal(calls, 3);
+});
+
 test("managed tools fail closed and do not queue while disconnected", async () => {
   const tools: Array<{
     name: string;

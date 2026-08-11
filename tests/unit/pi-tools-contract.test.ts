@@ -97,7 +97,7 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
       options?: Record<string, unknown>,
     ) => {
       calls.push({ method, params, ...(options ? { options } : {}) });
-      return {};
+      return method === "agent.wait" ? { state: "blocked" } : {};
     },
   };
   const adapter = { safeState: () => state };
