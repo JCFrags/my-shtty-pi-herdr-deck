@@ -49,6 +49,9 @@ function methods(schema: unknown): Set<string> {
     const r = x as Record<string, unknown>;
     if (Array.isArray(r.methods))
       for (const m of r.methods) if (typeof m === "string") set.add(m);
+    const schemas = r.schemas;
+    if (schemas && typeof schemas === "object" && !Array.isArray(schemas))
+      for (const schema of Object.values(schemas)) visit(schema, depth + 1);
     const p = r.properties;
     if (p && typeof p === "object") {
       const m = (p as Record<string, unknown>).method;

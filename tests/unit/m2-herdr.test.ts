@@ -71,6 +71,22 @@ test("M2 projects mandatory and optional Herdr capabilities", () => {
   assert.equal(caps.optional["agent.interrupt"], false);
   assert.match(caps.schemaHash, /^[0-9a-f]{64}$/);
 });
+test("M2 projects methods from the official Herdr 0.8 schema envelope", () => {
+  const caps = projectCapabilities({
+    protocol: 19,
+    schema_version: 1,
+    schemas: {
+      request: {
+        oneOf: [
+          { properties: { method: { const: "session.snapshot" } } },
+          { properties: { method: { const: "workspace.list" } } },
+        ],
+      },
+    },
+  });
+  assert.equal(caps.supports("session.snapshot"), true);
+  assert.equal(caps.supports("workspace.list"), true);
+});
 test("M2 names are bounded, deterministic, and collision safe", () => {
   const first = herdrName("Code Review", "agt-test", []);
   assert.match(first, /^[a-z][a-z0-9_-]{0,31}$/);
