@@ -118,6 +118,29 @@ class ControlledHerdr {
       },
     });
   }
+  async verifyManagedPane(agentId: string, identity: any): Promise<any> {
+    const resource = this.store.state.herdrResources?.[agentId];
+    return {
+      paneId: identity.paneId,
+      terminalId: identity.terminalId ?? resource?.terminalId,
+      workspaceId: "test-workspace",
+      cwd: "/controlled",
+    };
+  }
+  async recordRegistrationMismatch(agentId: string): Promise<void> {
+    await this.store.append({
+      type: "herdr.provision.outcome",
+      actor,
+      entityRefs: { agentId },
+      payload: {
+        agentId,
+        state: "replaced",
+        reason: "registration_identity_mismatch",
+        cleanupOutcome: "retained",
+        unknown: true,
+      },
+    });
+  }
   async stop(guard: unknown): Promise<void> {
     this.stops.push(guard);
   }

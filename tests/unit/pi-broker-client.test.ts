@@ -134,7 +134,17 @@ test("PiBrokerClient accepts real hello_result and binds adopted registration id
   assert.equal(registration.agentId, "agt_broker");
   assert.deepEqual(requests[0]?.params, {
     adapterVersion: "0.1.0",
-    herdr: { paneId: "p-1", terminalId: "t-1", detectedKind: "pi" },
+    herdr: {
+      paneId: "p-1",
+      terminalId: "t-1",
+      detectedKind: "pi",
+      sessionReference: {
+        source: "herdr:pi",
+        agent: "pi",
+        kind: "id",
+        value: "pi-session",
+      },
+    },
     pi: {
       sessionId: "pi-session",
       capabilities: state.capabilities,
@@ -193,7 +203,17 @@ test("PiBrokerClient emits the exact managed registration frame", async () => {
     adapterVersion: "0.1.0",
     agentId: "agt_managed",
     generation: 1,
-    herdr: { paneId: "p-1", terminalId: "t-1", detectedKind: "pi" },
+    herdr: {
+      paneId: "p-1",
+      terminalId: "t-1",
+      detectedKind: "pi",
+      sessionReference: {
+        source: "herdr:pi",
+        agent: "pi",
+        kind: "id",
+        value: "pi-session",
+      },
+    },
     pi: {
       sessionId: "pi-session",
       capabilities: state.capabilities,

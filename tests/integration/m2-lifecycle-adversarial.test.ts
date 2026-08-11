@@ -18,7 +18,16 @@ test("M2 concurrent repeated stop and register have one side effect and stable o
     startPi: async () => ({ pane_id: "pane-1" }),
     snapshot: async () => ({
       panes: [
-        { id: "pane-1", occupant: { agentId: "agent-1", generation: 1 } },
+        {
+          id: "pane-1",
+          terminalId: "terminal-1",
+          occupant: {
+            kind: "pi",
+            agentId: "agent-1",
+            terminalId: "terminal-1",
+            generation: 1,
+          },
+        },
       ],
       tabs: [],
       workspaces: [],
@@ -128,7 +137,16 @@ test("M2 concurrent broker registration attempts produce one transition and clea
     startPi: async () => ({ pane_id: "pane-1" }),
     snapshot: async () => ({
       panes: [
-        { id: "pane-1", occupant: { agentId: "agent-1", generation: 1 } },
+        {
+          id: "pane-1",
+          terminalId: "terminal-1",
+          occupant: {
+            kind: "pi",
+            agentId: "agent-1",
+            terminalId: "terminal-1",
+            generation: 1,
+          },
+        },
       ],
       tabs: [],
       workspaces: [],

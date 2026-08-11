@@ -11,6 +11,7 @@ import { lstat, open, realpath } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { brokerRequest } from "../cli/client.js";
+import { validateDoctorReport } from "./doctor.js";
 import { readPrivateRegular } from "../shared/private-fs.js";
 import {
   ensurePrivateDirectory,
@@ -26,6 +27,10 @@ import {
   removeBrokerProcessRecord,
 } from "./process-record.js";
 import { BrokerLock } from "./lock.js";
+import {
+  authoritativeHerdrBinary,
+  revalidateHerdrBinary,
+} from "../herdr/binary.js";
 
 const NOFOLLOW =
   (constants as typeof constants & { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
@@ -393,6 +398,7 @@ async function packageCommand(): Promise<{
 
 function minimalBrokerEnvironment(
   identity: HerdrSocketIdentity,
+  herdrBinary: string,
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const key of [
@@ -417,6 +423,7 @@ function minimalBrokerEnvironment(
   ])
     if (process.env[key] !== undefined) env[key] = process.env[key];
   env.HERDR_SOCKET_PATH = identity.path;
+  env.HERDR_BIN_PATH = herdrBinary;
   if (process.env.PI_HERDR_ORCH_RUNTIME_ROOT)
     env.PI_HERDR_ORCH_RUNTIME_ROOT = process.env.PI_HERDR_ORCH_RUNTIME_ROOT;
   if (process.env.PI_HERDR_ORCH_STATE_ROOT)
@@ -595,6 +602,21 @@ async function authenticatedPing(
   )
     throw new Error("Broker returned a malformed authenticated ping response.");
   return true;
+}
+
+async function validateRetainedBrokerBinary(
+  paths: CanonicalResolvedPaths,
+): Promise<void> {
+  const report = validateDoctorReport(
+    await brokerRequest(
+      paths.socket,
+      paths.secret,
+      "system.doctor",
+      {},
+      paths.sessionKey,
+    ),
+  );
+  if (!report.ok) throw new Error("Running broker failed its doctor checks.");
 }
 
 function delay(milliseconds: number): Promise<void> {
@@ -782,12 +804,15 @@ export async function ensureBroker(): Promise<CanonicalResolvedPaths> {
   if (process.platform !== "linux")
     throw new Error("Broker startup requires Linux.");
   const { identity: herdr, paths } = await resolveHerdrPaths();
+  const herdrBinary = await authoritativeHerdrBinary();
   await ensurePrivateDirectory(paths.root);
   await ensurePrivateDirectory(paths.runtime);
   await revalidateHerdrSocket(herdr);
   if (await authenticatedPing(paths)) {
     await inspectAuthenticatedStartup(paths);
     await revalidateHerdrSocket(herdr);
+    await revalidateHerdrBinary(herdrBinary);
+    await validateRetainedBrokerBinary(paths);
     return paths;
   }
   const command = await packageCommand();
@@ -831,10 +856,11 @@ export async function ensureBroker(): Promise<CanonicalResolvedPaths> {
       let primary: unknown;
       const cleanupErrors: unknown[] = [];
       try {
+        await revalidateHerdrBinary(herdrBinary);
         child = spawn(process.execPath, [command.path, "broker", "serve"], {
           shell: false,
           detached: true,
-          env: minimalBrokerEnvironment(herdr),
+          env: minimalBrokerEnvironment(herdr, herdrBinary.path),
           stdio: ["ignore", log.fd, log.fd],
         });
         childStart = child.pid ? linuxProcessStart(child.pid) : undefined;
@@ -842,6 +868,7 @@ export async function ensureBroker(): Promise<CanonicalResolvedPaths> {
           throw new Error("Spawned broker process identity is unavailable.");
         child.unref();
         await waitReady(paths, herdr, deadline, child);
+        await revalidateHerdrBinary(herdrBinary);
       } catch (error) {
         primary = error;
         if (child && childStart) {
@@ -873,15 +900,57 @@ export async function ensureBroker(): Promise<CanonicalResolvedPaths> {
         } catch (error) {
           cleanupErrors.push(error);
         }
-        if (primary !== undefined || cleanupErrors.length) {
-          const errors = [
-            ...(primary !== undefined ? [primary] : []),
-            ...cleanupErrors,
-          ];
-          throw errors.length === 1
-            ? errors[0]
-            : new AggregateError(errors, "Broker startup and cleanup failed.");
+      }
+      if (
+        primary === undefined &&
+        cleanupErrors.length > 0 &&
+        child &&
+        childStart
+      ) {
+        try {
+          await stopOwnedChild(child, childStart);
+        } catch (cleanupError) {
+          cleanupErrors.push(cleanupError);
         }
+        try {
+          if (child.pid && !exactChildStillAlive(child.pid, childStart))
+            await cleanupFailedChildArtifacts(paths, child.pid, childStart);
+        } catch (cleanupError) {
+          cleanupErrors.push(cleanupError);
+        }
+      }
+      if (primary !== undefined || cleanupErrors.length) {
+        const errors = [
+          ...(primary !== undefined ? [primary] : []),
+          ...cleanupErrors,
+        ];
+        throw errors.length === 1
+          ? errors[0]
+          : new AggregateError(errors, "Broker startup and cleanup failed.");
+      }
+      try {
+        await revalidateHerdrBinary(herdrBinary);
+      } catch (error) {
+        const errors: unknown[] = [error];
+        if (child && childStart) {
+          try {
+            await stopOwnedChild(child, childStart);
+          } catch (cleanupError) {
+            errors.push(cleanupError);
+          }
+          try {
+            if (child.pid && !exactChildStillAlive(child.pid, childStart))
+              await cleanupFailedChildArtifacts(paths, child.pid, childStart);
+          } catch (cleanupError) {
+            errors.push(cleanupError);
+          }
+        }
+        throw errors.length === 1
+          ? errors[0]
+          : new AggregateError(
+              errors,
+              "Broker startup post-check and cleanup failed.",
+            );
       }
       return paths;
     } catch (error) {
@@ -908,11 +977,15 @@ export async function ensureBroker(): Promise<CanonicalResolvedPaths> {
         throw new Error("Broker startup owner is live but cannot be verified.");
       if (state === "live") {
         await waitReady(paths, herdr, deadline);
+        await revalidateHerdrBinary(herdrBinary);
+        await validateRetainedBrokerBinary(paths);
         return paths;
       }
       if (await authenticatedPing(paths)) {
         await inspectAuthenticatedStartup(paths);
         await revalidateHerdrSocket(herdr);
+        await revalidateHerdrBinary(herdrBinary);
+        await validateRetainedBrokerBinary(paths);
         return paths;
       }
       await safeStaleSocket(paths.socket);
@@ -965,7 +1038,7 @@ async function exists(path: string): Promise<boolean> {
 export async function stopBroker(): Promise<"stopped" | "already_stopped"> {
   const { identity, paths } = await resolveHerdrPaths();
   await revalidateHerdrSocket(identity);
-  let healthy = await authenticatedPing(paths);
+  const healthy = await authenticatedPing(paths);
   if (!healthy) {
     const remnants = await Promise.all([
       exists(paths.pid),
@@ -1012,10 +1085,9 @@ export async function stopBroker(): Promise<"stopped" | "already_stopped"> {
         throw new Error("Concurrent broker shutdown timed out.");
       }
     }
-    await ensureBroker();
-    healthy = await authenticatedPing(paths);
-    if (!healthy)
-      throw new Error("Broker recovery did not reach an authenticated state.");
+    throw new Error(
+      "Broker is unavailable; authenticated stop cannot recover it.",
+    );
   }
   const processRecord = await readBrokerProcessRecord(paths.pid);
   if (

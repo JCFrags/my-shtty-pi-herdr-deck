@@ -1,7 +1,16 @@
+export interface HerdrWorkspaceWorktree {
+  repoKey: string;
+  repoName: string;
+  repoRoot: string;
+  checkoutPath: string;
+  isLinkedWorktree: boolean;
+}
 export interface HerdrWorkspace {
   id: string;
   label?: string;
   cwd?: string;
+  worktree?: HerdrWorkspaceWorktree;
+  worktreeInvalid?: boolean;
   tabs: HerdrTab[];
   [key: string]: unknown;
 }
@@ -29,8 +38,15 @@ export interface HerdrOccupant {
   terminalId?: string;
   status?: string;
   sessionId?: string;
+  sessionReference?: HerdrSessionReference;
   generation?: number;
   [key: string]: unknown;
+}
+export interface HerdrSessionReference {
+  source: string;
+  agent: string;
+  kind: string;
+  value: string;
 }
 export interface HerdrAgent {
   id?: string;
@@ -38,7 +54,10 @@ export interface HerdrAgent {
   kind?: string;
   paneId: string;
   terminalId?: string;
+  workspaceId?: string;
+  tabId?: string;
   sessionId?: string;
+  sessionReference?: HerdrSessionReference;
   status?: string;
   [key: string]: unknown;
 }

@@ -154,6 +154,12 @@ export interface PiBrokerClientOptions {
   onServerRequest?: (request: PiServerRequest) => Promise<unknown>;
   onControlRequest?: (request: PiServerRequest) => Promise<unknown>;
 }
+export interface PiHerdrSessionReference {
+  source: "herdr:pi";
+  agent: "pi";
+  kind: "path" | "id";
+  value: string;
+}
 export interface PiRequestOptions {
   timeoutMs?: number;
   idempotencyKey?: string;
@@ -496,7 +502,15 @@ export class PiBrokerClient {
       void this.handleServerRequest(frame);
     }
   }
-  async register(state: PiSafeState): Promise<{
+  async register(
+    state: PiSafeState,
+    sessionReference: PiHerdrSessionReference = {
+      source: "herdr:pi",
+      agent: "pi",
+      kind: "id",
+      value: state.sessionId,
+    },
+  ): Promise<{
     agentId: string;
     generation: number;
     connectionGeneration: number;
@@ -529,8 +543,11 @@ export class PiBrokerClient {
           : {}),
         herdr: {
           paneId: process.env.HERDR_PANE_ID,
-          terminalId: process.env.HERDR_TERMINAL_ID,
+          ...(process.env.HERDR_TERMINAL_ID
+            ? { terminalId: process.env.HERDR_TERMINAL_ID }
+            : {}),
           detectedKind: "pi",
+          sessionReference,
           ...(safeName &&
           safeName.length <= 256 &&
           !/[\u0000-\u001f\u007f]/u.test(safeName)

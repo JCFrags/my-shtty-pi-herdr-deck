@@ -209,6 +209,29 @@ class ControlledHerdr {
       paneId: `shutdown-pane-${this.#count}`,
     };
   }
+  async verifyManagedPane(agentId: string, identity: any) {
+    const resource = this.store.state.herdrResources?.[agentId];
+    return {
+      paneId: identity.paneId,
+      terminalId: identity.terminalId ?? resource?.terminalId,
+      workspaceId: "w",
+      cwd: "/fake",
+    };
+  }
+  async recordRegistrationMismatch(agentId: string) {
+    await this.store.append({
+      type: "herdr.provision.outcome",
+      actor: { principalId: "prn_00000000000000000000000000", kind: "system" },
+      entityRefs: { agentId },
+      payload: {
+        agentId,
+        state: "replaced",
+        reason: "registration_identity_mismatch",
+        cleanupOutcome: "retained",
+        unknown: true,
+      },
+    });
+  }
   async register(agentId: string, identity: any) {
     const resource = this.store.state.herdrResources?.[agentId];
     await this.store.append({
@@ -305,6 +328,12 @@ async function registerParent(socket: Socket): Promise<any> {
         paneId: "shutdown-root",
         terminalId: "shutdown-root",
         detectedKind: "pi",
+        sessionReference: {
+          source: "herdr:pi",
+          agent: "pi",
+          kind: "id",
+          value: "integration-session",
+        },
         name: "shutdown-root",
       },
       pi: {
@@ -693,6 +722,12 @@ test("production shutdown waits for cancellation fallback", async () => {
           paneId: "shutdown-child",
           terminalId: "shutdown-child",
           detectedKind: "pi",
+          sessionReference: {
+            source: "herdr:pi",
+            agent: "pi",
+            kind: "id",
+            value: "integration-session",
+          },
           name: "shutdown-child",
         },
         pi: {
@@ -825,6 +860,12 @@ test("production shutdown reports an unexpected deferred fallback after cleanup"
           paneId: "shutdown-error-child",
           terminalId: "shutdown-error-child",
           detectedKind: "pi",
+          sessionReference: {
+            source: "herdr:pi",
+            agent: "pi",
+            kind: "id",
+            value: "integration-session",
+          },
           name: "shutdown-error-child",
         },
         pi: {
@@ -930,6 +971,12 @@ test("shutdown tracks a held assignment finalization without late durable append
           paneId: "shutdown-assignment-child",
           terminalId: "shutdown-assignment-child",
           detectedKind: "pi",
+          sessionReference: {
+            source: "herdr:pi",
+            agent: "pi",
+            kind: "id",
+            value: "integration-session",
+          },
           name: "shutdown-assignment-child",
         },
         pi: {
@@ -986,6 +1033,12 @@ test("shutdown tracks a held assignment finalization without late durable append
           paneId: "shutdown-assignment-child",
           terminalId: "shutdown-assignment-child",
           detectedKind: "pi",
+          sessionReference: {
+            source: "herdr:pi",
+            agent: "pi",
+            kind: "id",
+            value: "integration-session",
+          },
           name: "shutdown-assignment-child",
         },
         pi: {

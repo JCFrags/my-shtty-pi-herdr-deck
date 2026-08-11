@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import {
+  chmodSync,
+  readFileSync,
+  unlinkSync,
+  watch,
+  writeFileSync,
+} from "node:fs";
 import { createServer, type Socket } from "node:net";
 import {
   chmod,
@@ -16,8 +23,14 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { resolvePaths, sessionKey } from "../../src/shared/paths.js";
-import { linuxProcessStart } from "../../src/broker/startup.js";
+import {
+  resolveHerdrPaths,
+  resolvePaths,
+  sessionKey,
+} from "../../src/shared/paths.js";
+import { ensureBroker, linuxProcessStart } from "../../src/broker/startup.js";
+import { Broker } from "../../src/broker/broker.js";
+import { createProductionHerdrService } from "../../src/herdr/service.js";
 
 const root = process.cwd();
 
@@ -58,7 +71,20 @@ else if (command === "tab create") {
   provision.agentArgs = args;
   const pane = state.snapshot.panes.find((item) => item.id === paneId);
   pane.occupant = { kind: "pi", terminalId: provision.terminalId, sessionId: provision.sessionId, generation: 1 };
-  state.snapshot.agents.push({ paneId, terminalId: provision.terminalId, sessionId: provision.sessionId, kind: "pi" });
+  state.snapshot.agents.push({
+    agentId: provision.agentId,
+    paneId,
+    terminalId: provision.terminalId,
+    workspaceId: pane.workspaceId,
+    tabId: pane.tabId,
+    kind: "pi",
+    sessionReference: {
+      source: "herdr:pi",
+      agent: "pi",
+      kind: "id",
+      value: provision.sessionId,
+    },
+  });
   console.log(JSON.stringify({ pane_id: paneId }));
 } else { console.error("unsupported fake Herdr command"); process.exitCode = 31; }
 writeFileSync(path, JSON.stringify(state));
@@ -119,6 +145,52 @@ function runChild(
 
 function mode(value: number): number {
   return value & 0o777;
+}
+
+async function waitExactProcessGone(
+  pid: number,
+  startIdentity: string,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (linuxProcessStart(pid) === startIdentity) {
+    if (Date.now() >= deadline)
+      throw new Error("Timed out waiting for exact test process exit.");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+async function terminateExactTestProcess(identity: {
+  pid: number;
+  startIdentity: string;
+}): Promise<void> {
+  if (linuxProcessStart(identity.pid) !== identity.startIdentity) return;
+  try {
+    process.kill(identity.pid, "SIGKILL");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  }
+  await waitExactProcessGone(identity.pid, identity.startIdentity);
+}
+
+async function collectTerminalOutcome(
+  primary: unknown,
+  actions: Array<() => void | Promise<void>>,
+  message: string,
+): Promise<void> {
+  const teardownErrors: unknown[] = [];
+  for (const action of actions)
+    try {
+      await action();
+    } catch (error) {
+      teardownErrors.push(error);
+    }
+  if (primary !== undefined && teardownErrors.length)
+    throw new AggregateError([primary, ...teardownErrors], message);
+  if (primary !== undefined) throw primary;
+  if (teardownErrors.length === 1) throw teardownErrors[0];
+  if (teardownErrors.length > 1)
+    throw new AggregateError(teardownErrors, message);
 }
 
 async function missing(path: string): Promise<void> {
@@ -190,10 +262,18 @@ test("built separate processes start, reuse, adopt, expose tools, and stop the p
     ],
     agents: [
       {
+        agentId: "agent-root",
         paneId: "pane-root",
         terminalId: "terminal-root",
-        sessionId: "session-1",
+        workspaceId: "workspace-root",
+        tabId: "tab-root",
         kind: "pi",
+        sessionReference: {
+          source: "herdr:pi",
+          agent: "pi",
+          kind: "path",
+          value: "/tmp/session.jsonl",
+        },
       },
     ],
     worktrees: [],
@@ -296,10 +376,17 @@ test("built separate processes start, reuse, adopt, expose tools, and stop the p
       throw new AggregateError(errors, "Production startup teardown failed.");
   });
 
-  const [started, concurrent] = await Promise.all([
+  const [startupHook, started, concurrent] = await Promise.all([
+    runChild(
+      [join(root, "bin", "pi-herdr-orchestrator"), "broker", "startup"],
+      environment,
+    ),
     runChild([childModule, "starter"], environment),
     runChild([childModule, "starter"], environment),
   ]);
+  assert.equal(startupHook.code, 0, startupHook.stderr);
+  assert.equal(startupHook.stdout, "");
+  assert.equal(startupHook.stderr, "");
   for (const result of [started, concurrent])
     assert.equal(
       result.code,
@@ -320,6 +407,15 @@ test("built separate processes start, reuse, adopt, expose tools, and stop the p
   assert.equal(startReceipt.sessionKey, paths.sessionKey);
   assert.equal(receipts[1]?.pid, startReceipt.pid);
   assert.equal(receipts[1]?.startIdentity, startReceipt.startIdentity);
+  const publicStart = await runChild(
+    [join(root, "bin", "pi-herdr-orchestrator"), "broker", "start"],
+    environment,
+  );
+  assert.equal(publicStart.code, 0, publicStart.stderr);
+  assert.deepEqual(JSON.parse(publicStart.stdout), {
+    status: "running",
+    sessionKey: paths.sessionKey,
+  });
   assert.equal(mode((await lstat(paths.runtime)).mode), 0o700);
   assert.equal(mode((await lstat(paths.root)).mode), 0o700);
   assert.equal(mode((await lstat(paths.socket)).mode), 0o600);
@@ -476,11 +572,17 @@ test("built separate processes start, reuse, adopt, expose tools, and stop the p
   assert.equal(cliStatus.code, 0, cliStatus.stderr);
   assert.equal(JSON.parse(cliStatus.stdout).status, "running");
 
-  const extension = await runChild([childModule, "extension"], environment);
+  const ordinaryPiEnvironment = { ...environment };
+  delete ordinaryPiEnvironment.HERDR_BIN_PATH;
+  delete ordinaryPiEnvironment.HERDR_TERMINAL_ID;
+  const extension = await runChild(
+    [childModule, "extension"],
+    ordinaryPiEnvironment,
+  );
   assert.equal(
     extension.code,
     0,
-    `${extension.stderr}\n${await readFile(paths.events, "utf8").catch(() => "no events")}`,
+    `${extension.stderr}\nBROKER LOG:\n${await readFile(paths.log, "utf8").catch(() => "no log")}\nEVENTS:\n${await readFile(paths.events, "utf8").catch(() => "no events")}`,
   );
   const extensionReceipt = JSON.parse(extension.stdout) as {
     event: string;
@@ -789,6 +891,485 @@ test("held live broker readiness failure proves exact exit and preserves a repla
   released = true;
   assert.notEqual(linuxProcessStart(receipt.pid), heldStart);
   await unlink(paths.socket);
+});
+
+test("fresh owned startup revalidates the retained binary after readiness and cleans its exact child", async () => {
+  const temporary = await mkdtemp(join(tmpdir(), "orch-binary-startup-"));
+  const herdrSocket = join(temporary, "herdr.sock");
+  const fakeBinary = join(temporary, "fake-herdr.mjs");
+  const fakeState = join(temporary, "fake-state.json");
+  const runtimeBase = join(temporary, "runtime");
+  const stateBase = join(temporary, "state");
+  const herdrServer = createServer((socket) => socket.resume());
+  await new Promise<void>((resolve, reject) => {
+    herdrServer.once("error", reject);
+    herdrServer.listen(herdrSocket, resolve);
+  });
+  await chmod(herdrSocket, 0o600);
+  await writeFile(fakeBinary, fakeHerdrProgram(), { mode: 0o700 });
+  await writeFile(
+    fakeState,
+    JSON.stringify({
+      calls: [],
+      schema: {
+        methods: [
+          "session.snapshot",
+          "events.subscribe",
+          "workspace.list",
+          "workspace.get",
+          "workspace.focus",
+          "workspace.close",
+          "tab.create",
+          "tab.get",
+          "tab.close",
+          "pane.list",
+          "pane.get",
+          "pane.focus",
+          "pane.close",
+          "agent.list",
+          "agent.get",
+          "agent.start",
+          "agent.focus",
+          "worktree.list",
+          "worktree.create",
+          "worktree.open",
+          "worktree.remove",
+        ],
+      },
+      snapshot: { workspaces: [], tabs: [], panes: [], agents: [] },
+      provisions: [],
+    }),
+    { mode: 0o600 },
+  );
+  const key = sessionKey(herdrSocket);
+  const base = resolvePaths(herdrSocket);
+  const paths = {
+    ...base,
+    root: join(stateBase, key),
+    runtime: join(runtimeBase, key),
+    events: join(stateBase, key, "events-v1.jsonl"),
+    snapshot: join(stateBase, key, "snapshot-v1.json"),
+    lock: join(runtimeBase, key, "broker.lock"),
+    startup: join(runtimeBase, key, "startup.lock"),
+    pid: join(runtimeBase, key, "broker.pid"),
+    socket: join(runtimeBase, key, "broker.sock"),
+    secret: join(runtimeBase, key, "client.secret"),
+    log: join(runtimeBase, key, "broker.log"),
+  };
+  await mkdir(paths.runtime, { recursive: true, mode: 0o700 });
+  let brokerIdentity: { pid: number; startIdentity: string } | undefined;
+  let mutated = false;
+  let mutationResolve!: () => void;
+  let mutationReject!: (error: Error) => void;
+  const mutation = new Promise<void>((resolve, reject) => {
+    mutationResolve = resolve;
+    mutationReject = reject;
+  });
+  const watcher = watch(paths.runtime, (_event, filename) => {
+    if (mutated || filename !== "broker.sock") return;
+    try {
+      brokerIdentity = JSON.parse(readFileSync(paths.pid, "utf8")) as {
+        pid: number;
+        startIdentity: string;
+      };
+      chmodSync(fakeBinary, 0o722);
+      mutated = true;
+      mutationResolve();
+    } catch (error) {
+      mutationReject(error as Error);
+    }
+  });
+  let starter:
+    Promise<{ stdout: string; stderr: string; code: number }> | undefined;
+  let starterObserved = false;
+  let bodyError: unknown;
+  try {
+    const environment: NodeJS.ProcessEnv = {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      USER: process.env.USER,
+      LOGNAME: process.env.LOGNAME,
+      LANG: "C.UTF-8",
+      HERDR_ENV: "1",
+      HERDR_SOCKET_PATH: herdrSocket,
+      HERDR_BIN_PATH: fakeBinary,
+      HERDR_CONFIG_PATH: fakeState,
+      HERDR_PANE_ID: "pane-binary",
+      HERDR_TERMINAL_ID: "terminal-binary",
+      PI_HERDR_ORCH_RUNTIME_ROOT: runtimeBase,
+      PI_HERDR_ORCH_STATE_ROOT: stateBase,
+    };
+    const childModule = join(
+      root,
+      "dist",
+      "tests",
+      "helpers",
+      "production-startup-child.js",
+    );
+    starter = runChild([childModule, "starter"], environment);
+    let mutationTimer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      mutation,
+      new Promise<never>((_resolve, reject) => {
+        mutationTimer = setTimeout(
+          () =>
+            reject(new Error("Timed out waiting for broker socket receipt.")),
+          10_000,
+        );
+      }),
+    ]).finally(() => {
+      if (mutationTimer) clearTimeout(mutationTimer);
+    });
+    const failed = await starter.finally(() => {
+      starterObserved = true;
+    });
+    assert.notEqual(failed.code, 0);
+    assert.match(
+      failed.stderr,
+      /HERDR_BIN_PATH is missing, replaced, or unsafe/u,
+    );
+    assert.ok(brokerIdentity);
+    assert.notEqual(
+      linuxProcessStart(brokerIdentity.pid),
+      brokerIdentity.startIdentity,
+    );
+    await missing(paths.pid);
+    await missing(paths.lock);
+    await missing(paths.socket);
+    await noStartupLinks(paths.runtime);
+    assert.equal(mode((await lstat(herdrSocket)).mode), 0o600);
+  } catch (error) {
+    bodyError = error;
+  } finally {
+    await collectTerminalOutcome(
+      bodyError,
+      [
+        () => watcher.close(),
+        () =>
+          brokerIdentity
+            ? terminateExactTestProcess(brokerIdentity)
+            : undefined,
+        async () => {
+          if (starter && !starterObserved)
+            await starter.finally(() => {
+              starterObserved = true;
+            });
+        },
+        () =>
+          new Promise<void>((resolve, reject) =>
+            herdrServer.close((error) => (error ? reject(error) : resolve())),
+          ),
+        () => rm(temporary, { recursive: true, force: true }),
+      ],
+      "Retained-binary startup test body and teardown failed.",
+    );
+  }
+});
+
+test("existing-broker reuse rejects an unsafe broker-retained binary instead of trusting a safe caller binary", async () => {
+  const temporary = await mkdtemp(join(tmpdir(), "orch-reuse-binary-"));
+  const herdrSocket = join(temporary, "herdr.sock");
+  const stateRoot = join(temporary, "state");
+  const runtimeRoot = join(temporary, "runtime");
+  const schemaPath = join(temporary, "schema.json");
+  const callsA = join(temporary, "calls-a");
+  const callsB = join(temporary, "calls-b");
+  const binaryA = join(temporary, "herdr-a.mjs");
+  const binaryB = join(temporary, "herdr-b.mjs");
+  const methods = [
+    "session.snapshot",
+    "events.subscribe",
+    "workspace.list",
+    "workspace.get",
+    "workspace.focus",
+    "workspace.close",
+    "tab.create",
+    "tab.get",
+    "tab.close",
+    "pane.list",
+    "pane.get",
+    "pane.focus",
+    "pane.close",
+    "agent.list",
+    "agent.get",
+    "agent.start",
+    "agent.focus",
+    "agent.stop",
+    "agent.interrupt",
+    "worktree.list",
+    "worktree.create",
+    "worktree.open",
+    "worktree.remove",
+  ];
+  await writeFile(schemaPath, JSON.stringify({ methods }), { mode: 0o600 });
+  const fakeBinary = (calls: string) => `#!/usr/bin/env node
+import { appendFileSync, readFileSync } from "node:fs";
+const command = process.argv.slice(2).join(" ");
+appendFileSync(${JSON.stringify(calls)}, command + "\\n");
+if (command === "api schema --json")
+  process.stdout.write(readFileSync(${JSON.stringify(schemaPath)}, "utf8"));
+else if (command === "session snapshot --json")
+  process.stdout.write(JSON.stringify({ result: { snapshot: { version: "0.8.0", protocol: 19, workspaces: [], tabs: [], panes: [], layouts: [], agents: [] } } }));
+else {
+  process.stderr.write("unexpected command");
+  process.exitCode = 31;
+}
+`;
+  await writeFile(binaryA, fakeBinary(callsA), { mode: 0o700 });
+  await writeFile(binaryB, fakeBinary(callsB), { mode: 0o700 });
+  const connections = new Set<Socket>();
+  const server = createServer((socket) => {
+    connections.add(socket);
+    socket.resume();
+    socket.once("close", () => connections.delete(socket));
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(herdrSocket, resolve);
+  });
+  await chmod(herdrSocket, 0o600);
+  const environmentKeys = [
+    "HERDR_ENV",
+    "HERDR_SOCKET_PATH",
+    "HERDR_BIN_PATH",
+    "PI_HERDR_ORCH_STATE_ROOT",
+    "PI_HERDR_ORCH_RUNTIME_ROOT",
+  ] as const;
+  const priorEnvironment = new Map(
+    environmentKeys.map((key) => [key, process.env[key]]),
+  );
+  Object.assign(process.env, {
+    HERDR_ENV: "1",
+    HERDR_SOCKET_PATH: herdrSocket,
+    HERDR_BIN_PATH: binaryA,
+    PI_HERDR_ORCH_STATE_ROOT: stateRoot,
+    PI_HERDR_ORCH_RUNTIME_ROOT: runtimeRoot,
+  });
+  let broker: Broker | undefined;
+  let bodyError: unknown;
+  try {
+    const { paths } = await resolveHerdrPaths();
+    broker = new Broker(paths, {
+      herdrFactory: (store, resolved) =>
+        createProductionHerdrService(store, resolved, binaryA),
+    });
+    await broker.start();
+    const retainedCalls = await readFile(callsA, "utf8");
+    await chmod(binaryA, 0o722);
+    process.env.HERDR_BIN_PATH = binaryB;
+    await assert.rejects(ensureBroker(), /Request failed/u);
+    assert.equal(await readFile(callsA, "utf8"), retainedCalls);
+    await assert.rejects(readFile(callsB, "utf8"), { code: "ENOENT" });
+  } catch (error) {
+    bodyError = error;
+  } finally {
+    await collectTerminalOutcome(
+      bodyError,
+      [
+        () => broker?.stop(),
+        () => {
+          for (const socket of connections) socket.destroy();
+        },
+        () =>
+          new Promise<void>((resolve, reject) =>
+            server.close((error) => (error ? reject(error) : resolve())),
+          ),
+        () => {
+          for (const [key, value] of priorEnvironment)
+            if (value === undefined) delete process.env[key];
+            else process.env[key] = value;
+        },
+        () => rm(temporary, { recursive: true, force: true }),
+      ],
+      "Existing-broker retained-binary test body and teardown failed.",
+    );
+  }
+});
+
+test("fresh readiness finalization failure stops its exact child and preserves replacements", async () => {
+  const temporary = await mkdtemp(join(tmpdir(), "orch-finalize-startup-"));
+  const herdrSocket = join(temporary, "herdr.sock");
+  const fakeBinary = join(temporary, "fake-herdr.mjs");
+  const fakeState = join(temporary, "fake-state.json");
+  const runtimeBase = join(temporary, "runtime");
+  const stateBase = join(temporary, "state");
+  const herdrServer = createServer((socket) => socket.resume());
+  await new Promise<void>((resolve, reject) => {
+    herdrServer.once("error", reject);
+    herdrServer.listen(herdrSocket, resolve);
+  });
+  await chmod(herdrSocket, 0o600);
+  await writeFile(fakeBinary, fakeHerdrProgram(), { mode: 0o700 });
+  await writeFile(
+    fakeState,
+    JSON.stringify({
+      calls: [],
+      schema: {
+        methods: [
+          "session.snapshot",
+          "events.subscribe",
+          "workspace.list",
+          "workspace.get",
+          "workspace.focus",
+          "workspace.close",
+          "tab.create",
+          "tab.get",
+          "tab.close",
+          "pane.list",
+          "pane.get",
+          "pane.focus",
+          "pane.close",
+          "agent.list",
+          "agent.get",
+          "agent.start",
+          "agent.focus",
+          "worktree.list",
+          "worktree.create",
+          "worktree.open",
+          "worktree.remove",
+        ],
+      },
+      snapshot: { workspaces: [], tabs: [], panes: [], agents: [] },
+      provisions: [],
+    }),
+    { mode: 0o600 },
+  );
+  const key = sessionKey(herdrSocket);
+  const base = resolvePaths(herdrSocket);
+  const paths = {
+    ...base,
+    root: join(stateBase, key),
+    runtime: join(runtimeBase, key),
+    events: join(stateBase, key, "events-v1.jsonl"),
+    snapshot: join(stateBase, key, "snapshot-v1.json"),
+    lock: join(runtimeBase, key, "broker.lock"),
+    startup: join(runtimeBase, key, "startup.lock"),
+    pid: join(runtimeBase, key, "broker.pid"),
+    socket: join(runtimeBase, key, "broker.sock"),
+    secret: join(runtimeBase, key, "client.secret"),
+    log: join(runtimeBase, key, "broker.log"),
+  };
+  await mkdir(paths.runtime, { recursive: true, mode: 0o700 });
+  const pidReplacement = '{"replacement":true}\n';
+  let brokerIdentity: { pid: number; startIdentity: string } | undefined;
+  let mutated = false;
+  let mutationResolve!: () => void;
+  let mutationReject!: (error: Error) => void;
+  const mutation = new Promise<void>((resolve, reject) => {
+    mutationResolve = resolve;
+    mutationReject = reject;
+  });
+  const watcher = watch(paths.runtime, (_event, filename) => {
+    if (mutated || filename !== "broker.sock") return;
+    mutated = true;
+    try {
+      brokerIdentity = JSON.parse(readFileSync(paths.pid, "utf8")) as {
+        pid: number;
+        startIdentity: string;
+      };
+      unlinkSync(paths.pid);
+      writeFileSync(paths.pid, pidReplacement, { mode: 0o600 });
+      chmodSync(paths.runtime, 0o500);
+      mutationResolve();
+    } catch (error) {
+      mutationReject(error as Error);
+    }
+  });
+  let bodyError: unknown;
+  try {
+    const environment: NodeJS.ProcessEnv = {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      USER: process.env.USER,
+      LOGNAME: process.env.LOGNAME,
+      LANG: "C.UTF-8",
+      HERDR_ENV: "1",
+      HERDR_SOCKET_PATH: herdrSocket,
+      HERDR_BIN_PATH: fakeBinary,
+      HERDR_CONFIG_PATH: fakeState,
+      HERDR_PANE_ID: "pane-finalize",
+      HERDR_TERMINAL_ID: "terminal-finalize",
+      PI_HERDR_ORCH_RUNTIME_ROOT: runtimeBase,
+      PI_HERDR_ORCH_STATE_ROOT: stateBase,
+    };
+    const childModule = join(
+      root,
+      "dist",
+      "tests",
+      "helpers",
+      "production-startup-child.js",
+    );
+    const starter = runChild(
+      [childModule, "expected-starter-failure"],
+      environment,
+    );
+    let mutationTimer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      mutation,
+      new Promise<never>((_resolve, reject) => {
+        mutationTimer = setTimeout(
+          () =>
+            reject(new Error("Timed out waiting for finalization receipt.")),
+          10_000,
+        );
+      }),
+    ]).finally(() => {
+      if (mutationTimer) clearTimeout(mutationTimer);
+    });
+    const failed = await starter;
+    await chmod(paths.runtime, 0o700);
+    assert.equal(failed.code, 87, failed.stderr);
+    type ErrorReceipt = {
+      message: string;
+      errors?: ErrorReceipt[];
+    };
+    const receipt = JSON.parse(failed.stdout) as {
+      event: string;
+      error: ErrorReceipt;
+    };
+    const errorMessages = (error: ErrorReceipt): string[] => [
+      error.message,
+      ...(error.errors ?? []).flatMap(errorMessages),
+    ];
+    assert.equal(receipt.event, "starter-failed");
+    assert.equal(receipt.error.message, "Broker startup and cleanup failed.");
+    assert.match(
+      receipt.error.errors?.[0]?.message ?? "",
+      /EACCES|permission denied/iu,
+    );
+    assert.ok(
+      errorMessages(receipt.error).some((message) =>
+        /process record/iu.test(message),
+      ),
+    );
+    assert.ok(brokerIdentity);
+    assert.notEqual(
+      linuxProcessStart(brokerIdentity.pid),
+      brokerIdentity.startIdentity,
+    );
+    assert.equal(await readFile(paths.pid, "utf8"), pidReplacement);
+    assert.equal(mode((await lstat(herdrSocket)).mode), 0o600);
+  } catch (error) {
+    bodyError = error;
+  } finally {
+    await collectTerminalOutcome(
+      bodyError,
+      [
+        () => chmod(paths.runtime, 0o700),
+        () => watcher.close(),
+        () =>
+          brokerIdentity
+            ? terminateExactTestProcess(brokerIdentity)
+            : undefined,
+        () =>
+          new Promise<void>((resolve, reject) =>
+            herdrServer.close((error) => (error ? reject(error) : resolve())),
+          ),
+        () => rm(temporary, { recursive: true, force: true }),
+      ],
+      "Finalization test body and teardown failed.",
+    );
+  }
 });
 
 const PARENT_TOOL_COUNT = 16;

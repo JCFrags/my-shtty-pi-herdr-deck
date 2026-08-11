@@ -112,6 +112,29 @@ class DomainHerdr {
       paneId: `pane-${this.count}`,
     };
   }
+  async verifyManagedPane(agentId: string, identity: any) {
+    const resource = this.store.state.herdrResources?.[agentId];
+    return {
+      paneId: identity.paneId,
+      terminalId: identity.terminalId ?? resource?.terminalId,
+      workspaceId: "w",
+      cwd: "/fake",
+    };
+  }
+  async recordRegistrationMismatch(agentId: string) {
+    await this.store.append({
+      type: "herdr.provision.outcome",
+      actor: { principalId: "prn_00000000000000000000000000", kind: "system" },
+      entityRefs: { agentId },
+      payload: {
+        agentId,
+        state: "replaced",
+        reason: "registration_identity_mismatch",
+        cleanupOutcome: "retained",
+        unknown: true,
+      },
+    });
+  }
   async register(agentId: string, identity: any) {
     const resource = this.store.state.herdrResources?.[agentId];
     await this.store.append({
@@ -431,6 +454,12 @@ test("broker domain wire persists correlated result, question, workflow, and rep
           paneId: "pane",
           terminalId: "terminal",
           detectedKind: "pi",
+          sessionReference: {
+            source: "herdr:pi",
+            agent: "pi",
+            kind: "id",
+            value: "integration-session",
+          },
           name: "primary",
         },
         pi: {
@@ -660,6 +689,12 @@ test("production broker restarts an open question from its durable absolute dead
           paneId: "pane-timeout",
           terminalId: "terminal-timeout",
           detectedKind: "pi",
+          sessionReference: {
+            source: "herdr:pi",
+            agent: "pi",
+            kind: "id",
+            value: "integration-session",
+          },
           name: "timeout",
         },
         pi: {
@@ -773,6 +808,12 @@ test("production broker restarts an open question from its durable absolute dead
           paneId: "pane-expired",
           terminalId: "terminal-expired",
           detectedKind: "pi",
+          sessionReference: {
+            source: "herdr:pi",
+            agent: "pi",
+            kind: "id",
+            value: "integration-session",
+          },
           name: "expired",
         },
         pi: {
@@ -907,6 +948,12 @@ test("production broker immediately terminalizes an already expired durable ques
           paneId: "pane-timeout",
           terminalId: "terminal-timeout",
           detectedKind: "pi",
+          sessionReference: {
+            source: "herdr:pi",
+            agent: "pi",
+            kind: "id",
+            value: "integration-session",
+          },
           name: "timeout",
         },
         pi: {
@@ -1047,6 +1094,12 @@ test("production broker task cancellation terminalizes an open question durably"
           paneId: "pane-timeout",
           terminalId: "terminal-timeout",
           detectedKind: "pi",
+          sessionReference: {
+            source: "herdr:pi",
+            agent: "pi",
+            kind: "id",
+            value: "integration-session",
+          },
           name: "timeout",
         },
         pi: {
@@ -1176,6 +1229,12 @@ test("production A to B queue races do not resurrect or provision cancelled work
             paneId: "ab-root",
             terminalId: "ab-root",
             detectedKind: "pi",
+            sessionReference: {
+              source: "herdr:pi",
+              agent: "pi",
+              kind: "id",
+              value: "integration-session",
+            },
             name: "ab-root",
           },
           pi: {
@@ -1258,6 +1317,12 @@ test("production A to B queue races do not resurrect or provision cancelled work
             paneId: "ab-a",
             terminalId: "ab-a",
             detectedKind: "pi",
+            sessionReference: {
+              source: "herdr:pi",
+              agent: "pi",
+              kind: "id",
+              value: "integration-session",
+            },
             name: "ab-a",
           },
           pi: {
@@ -1511,6 +1576,12 @@ test("production A to B queue races do not resurrect or provision cancelled work
               paneId: "ab-b",
               terminalId: "ab-b",
               detectedKind: "pi",
+              sessionReference: {
+                source: "herdr:pi",
+                agent: "pi",
+                kind: "id",
+                value: "integration-session",
+              },
               name: "ab-b",
             },
             pi: {
@@ -1611,6 +1682,12 @@ test("production mutation queue orders cancel and run creation without resurrect
             paneId: "root-pane",
             terminalId: "root-terminal",
             detectedKind: "pi",
+            sessionReference: {
+              source: "herdr:pi",
+              agent: "pi",
+              kind: "id",
+              value: "integration-session",
+            },
             name: "parent",
           },
           pi: {
@@ -1691,6 +1768,12 @@ test("production mutation queue orders cancel and run creation without resurrect
             paneId: "queue-pane",
             terminalId: "queue-terminal",
             detectedKind: "pi",
+            sessionReference: {
+              source: "herdr:pi",
+              agent: "pi",
+              kind: "id",
+              value: "integration-session",
+            },
             name: "queue-child",
           },
           pi: {
@@ -1856,6 +1939,12 @@ test("production managed identity rejects duplicate hello and reconnects exactly
           paneId: "root-pane",
           terminalId: "root-terminal",
           detectedKind: "pi",
+          sessionReference: {
+            source: "herdr:pi",
+            agent: "pi",
+            kind: "id",
+            value: "integration-session",
+          },
           name: "parent",
         },
         pi: {
@@ -1891,6 +1980,7 @@ test("production managed identity rejects duplicate hello and reconnects exactly
     const token = herdr.tokens.get(item.agentId)!;
     let firstAssignmentCount = 0;
     let reconnectAssignmentCount = 0;
+    let reconnectDeliveryGeneration: number | undefined;
     let resolveFirstAssignment!: () => void;
     const firstAssignment = new Promise<void>((resolve) => {
       resolveFirstAssignment = resolve;
@@ -1930,6 +2020,12 @@ test("production managed identity rejects duplicate hello and reconnects exactly
           paneId: "managed-pane",
           terminalId: "managed-terminal",
           detectedKind: "pi",
+          sessionReference: {
+            source: "herdr:pi",
+            agent: "pi",
+            kind: "id",
+            value: "integration-session",
+          },
           name: "managed-identity",
         },
         pi: {
@@ -1980,6 +2076,10 @@ test("production managed identity rejects duplicate hello and reconnects exactly
       (frame, socket) => {
         assert.equal(frame.method, "assignment.deliver");
         reconnectAssignmentCount++;
+        reconnectDeliveryGeneration = Number(
+          (frame.params?.expected as Record<string, unknown> | undefined)
+            ?.connectionGeneration,
+        );
         socket.write(
           encodeFrame({
             v: 1,
@@ -2001,6 +2101,12 @@ test("production managed identity rejects duplicate hello and reconnects exactly
           paneId: "managed-pane",
           terminalId: "managed-terminal",
           detectedKind: "pi",
+          sessionReference: {
+            source: "herdr:pi",
+            agent: "pi",
+            kind: "id",
+            value: "integration-session",
+          },
           name: "managed-identity",
         },
         pi: {
@@ -2016,6 +2122,14 @@ test("production managed identity rejects duplicate hello and reconnects exactly
     assert.equal(
       reconnectRegistration.connectionGeneration,
       firstRegistration.connectionGeneration + 1,
+    );
+    assert.equal(
+      reconnectDeliveryGeneration,
+      reconnectRegistration.connectionGeneration,
+    );
+    assert.equal(
+      broker.store.state.agents[item.agentId]?.connectionGeneration,
+      reconnectRegistration.connectionGeneration,
     );
     assert.equal(firstAssignmentCount, 1);
     assert.equal(reconnectAssignmentCount, 1);
@@ -2076,6 +2190,12 @@ test("production strict managed child task.cancel-versus-timeout race", async ()
           paneId: "root-pane",
           terminalId: "root-term",
           detectedKind: "pi",
+          sessionReference: {
+            source: "herdr:pi",
+            agent: "pi",
+            kind: "id",
+            value: "integration-session",
+          },
           name: "parent",
         },
         pi: {
@@ -2222,6 +2342,12 @@ test("production strict managed child task.cancel-versus-timeout race", async ()
           paneId: "pane-1",
           terminalId: "term-1",
           detectedKind: "pi",
+          sessionReference: {
+            source: "herdr:pi",
+            agent: "pi",
+            kind: "id",
+            value: "integration-session",
+          },
           name: "strict-child",
         },
         pi: {
@@ -2366,6 +2492,12 @@ test("production settled managed run times out without adapter abort", async () 
           paneId: "root-pane",
           terminalId: "root-terminal",
           detectedKind: "pi",
+          sessionReference: {
+            source: "herdr:pi",
+            agent: "pi",
+            kind: "id",
+            value: "integration-session",
+          },
           name: "parent",
         },
         pi: {
@@ -2470,6 +2602,12 @@ test("production settled managed run times out without adapter abort", async () 
           paneId: "settled-pane",
           terminalId: "settled-terminal",
           detectedKind: "pi",
+          sessionReference: {
+            source: "herdr:pi",
+            agent: "pi",
+            kind: "id",
+            value: "integration-session",
+          },
           name: "settled-timeout",
         },
         pi: {
@@ -2581,6 +2719,12 @@ test("production strict child receives durable task wall-deadline delivery", asy
           paneId: "root-pane",
           terminalId: "root-term",
           detectedKind: "pi",
+          sessionReference: {
+            source: "herdr:pi",
+            agent: "pi",
+            kind: "id",
+            value: "integration-session",
+          },
           name: "parent",
         },
         pi: {
@@ -2723,6 +2867,12 @@ test("production strict child receives durable task wall-deadline delivery", asy
           paneId: "pane-1",
           terminalId: "term-1",
           detectedKind: "pi",
+          sessionReference: {
+            source: "herdr:pi",
+            agent: "pi",
+            kind: "id",
+            value: "integration-session",
+          },
           name: "strict-child",
         },
         pi: {
@@ -2886,6 +3036,12 @@ test("production managed socket accepts abort without a current Herdr resource",
             paneId: "root-pane",
             terminalId: "root-term",
             detectedKind: "pi",
+            sessionReference: {
+              source: "herdr:pi",
+              agent: "pi",
+              kind: "id",
+              value: "integration-session",
+            },
             name: "parent",
           },
           pi: {
@@ -2993,6 +3149,12 @@ test("production managed socket accepts abort without a current Herdr resource",
             paneId: "pane-1",
             terminalId: "term-1",
             detectedKind: "pi",
+            sessionReference: {
+              source: "herdr:pi",
+              agent: "pi",
+              kind: "id",
+              value: "integration-session",
+            },
             name: "abort-child",
           },
           pi: {
@@ -3097,6 +3259,12 @@ test("production managed cancellation falls back to one exact Herdr stop", async
             paneId: "root-pane",
             terminalId: "root-term",
             detectedKind: "pi",
+            sessionReference: {
+              source: "herdr:pi",
+              agent: "pi",
+              kind: "id",
+              value: "integration-session",
+            },
             name: "parent",
           },
           pi: {
@@ -3222,6 +3390,12 @@ test("production managed cancellation falls back to one exact Herdr stop", async
             paneId: "pane-1",
             terminalId: "term-1",
             detectedKind: "pi",
+            sessionReference: {
+              source: "herdr:pi",
+              agent: "pi",
+              kind: "id",
+              value: "integration-session",
+            },
             name: "fallback-child",
           },
           pi: {
@@ -3341,6 +3515,12 @@ test("held adapter abort skips stop after replacement or resource-byte mutation"
             paneId: "root-pane",
             terminalId: "root-term",
             detectedKind: "pi",
+            sessionReference: {
+              source: "herdr:pi",
+              agent: "pi",
+              kind: "id",
+              value: "integration-session",
+            },
             name: "parent",
           },
           pi: {
@@ -3448,6 +3628,12 @@ test("held adapter abort skips stop after replacement or resource-byte mutation"
             paneId: "pane-old",
             terminalId: "term-old",
             detectedKind: "pi",
+            sessionReference: {
+              source: "herdr:pi",
+              agent: "pi",
+              kind: "id",
+              value: "integration-session",
+            },
             name: "held-child",
           },
           pi: {
@@ -3712,6 +3898,12 @@ async function runHeldGuardCase(guardCase: HeldGuardCase): Promise<void> {
           paneId: "root-pane",
           terminalId: "root-terminal",
           detectedKind: "pi",
+          sessionReference: {
+            source: "herdr:pi",
+            agent: "pi",
+            kind: "id",
+            value: "integration-session",
+          },
           name: "parent",
         },
         pi: {
@@ -3819,6 +4011,12 @@ async function runHeldGuardCase(guardCase: HeldGuardCase): Promise<void> {
           paneId: "guard-pane-old",
           terminalId: "guard-terminal-old",
           detectedKind: "pi",
+          sessionReference: {
+            source: "herdr:pi",
+            agent: "pi",
+            kind: "id",
+            value: "integration-session",
+          },
           name: "guard-child",
         },
         pi: {

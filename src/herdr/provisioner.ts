@@ -98,13 +98,20 @@ export class HerdrProvisioner {
     readonly liveNames: () => Iterable<string> = () => [],
     readonly retainRegistrationFiles = false,
     readonly gitEvidence?: (cwd: string, base?: string) => Promise<GitEvidence>,
-    readonly orchestration?: { socketPath: string; sessionKey: string },
+    readonly orchestration?: {
+      socketPath: string;
+      sessionKey: string;
+      herdrBinary?: string;
+    },
   ) {
     if (
       orchestration &&
       (!orchestration.socketPath.startsWith("/") ||
         /[\u0000-\u001f\u007f]/u.test(orchestration.socketPath) ||
-        !/^[0-9a-f]{24}$/u.test(orchestration.sessionKey))
+        !/^[0-9a-f]{24}$/u.test(orchestration.sessionKey) ||
+        (orchestration.herdrBinary !== undefined &&
+          (!orchestration.herdrBinary.startsWith("/") ||
+            /[\u0000-\u001f\u007f]/u.test(orchestration.herdrBinary))))
     )
       throw new Error("HERDR_ORCHESTRATION_IDENTITY_INVALID");
   }
@@ -207,6 +214,9 @@ export class HerdrProvisioner {
         ? {
             PI_HERDR_ORCH_BROKER_SOCKET: this.orchestration.socketPath,
             PI_HERDR_ORCH_SESSION_KEY: this.orchestration.sessionKey,
+            ...(this.orchestration.herdrBinary
+              ? { HERDR_BIN_PATH: this.orchestration.herdrBinary }
+              : {}),
           }
         : {}),
     };
@@ -217,6 +227,7 @@ export class HerdrProvisioner {
           "PI_HERDR_ORCH_BROKER_SOCKET",
           "PI_HERDR_ORCH_SESSION_KEY",
           "PI_HERDR_ORCH_AGENT_TOKEN",
+          "HERDR_BIN_PATH",
         ].includes(key),
     );
     if (forbidden.length)

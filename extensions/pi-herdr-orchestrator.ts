@@ -1,6 +1,10 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { PiAdapter, piSessionId } from "../src/pi/adapter.js";
-import { PiBrokerClient } from "../src/pi/broker-client.js";
+import {
+  PiBrokerClient,
+  type PiHerdrSessionReference,
+} from "../src/pi/broker-client.js";
+import { isAbsolute, resolve } from "node:path";
 import type {
   PiApiLike,
   PiAssignment,
@@ -22,7 +26,7 @@ import {
   readManagedTokenFile,
   siblingSecretPath,
 } from "../src/pi/token-file.js";
-import { ensureBroker } from "../src/broker/startup.js";
+import { resolveHerdrPaths } from "../src/shared/paths.js";
 const ORCHESTRATION_TOOLS = new Set([
   "orchestrator_result",
   "orchestrator_ask",
@@ -78,6 +82,29 @@ function text(value: unknown, max = 4096): string {
   )
     throw new Error("INVALID_REQUEST");
   return value;
+}
+export function piHerdrSessionReference(
+  context: PiContextLike,
+): PiHerdrSessionReference {
+  const path = context.sessionManager.getSessionFile?.();
+  if (path !== undefined) {
+    if (
+      !isAbsolute(path) ||
+      resolve(path) !== path ||
+      Buffer.byteLength(path, "utf8") > 4096 ||
+      /[\u0000-\u001f\u007f]/u.test(path)
+    )
+      throw new Error("PI_SESSION_REFERENCE_INVALID");
+    return { source: "herdr:pi", agent: "pi", kind: "path", value: path };
+  }
+  const id = context.sessionManager.getSessionId?.();
+  if (
+    !id ||
+    Buffer.byteLength(id, "utf8") > 256 ||
+    /[\u0000-\u001f\u007f]/u.test(id)
+  )
+    throw new Error("PI_SESSION_REFERENCE_INVALID");
+  return { source: "herdr:pi", agent: "pi", kind: "id", value: id };
 }
 function integer(
   value: unknown,
@@ -340,14 +367,9 @@ export default async function piHerdrOrchestrator(
   const herdrActive = herdrPaneActive && !!process.env.HERDR_SOCKET_PATH;
   const managedContext =
     herdrPaneActive &&
-    !!process.env.HERDR_BIN_PATH &&
     !!process.env.PI_HERDR_ORCH_BROKER_SOCKET &&
     !!process.env.PI_HERDR_ORCH_SESSION_KEY;
-  const adoptedContext =
-    herdrActive &&
-    !!process.env.HERDR_TERMINAL_ID &&
-    !!process.env.HERDR_BIN_PATH &&
-    process.env.HERDR_BIN_PATH.startsWith("/");
+  const adoptedContext = herdrActive;
   const runtime: Runtime = {
     cleanup(reason) {
       const preserveCredential = ["reload", "new", "resume", "fork"].includes(
@@ -383,6 +405,7 @@ export default async function piHerdrOrchestrator(
   ): Promise<void> => {
     if (!reconnect) {
       reconnectAttempts = 0;
+      reconnectDelay = 1_000;
       reconnectDeadline = Date.now() + 120_000;
     }
     const epoch = ++startEpoch;
@@ -402,14 +425,26 @@ export default async function piHerdrOrchestrator(
     binding.client = undefined;
     lifecycleInFlight = false;
     if (managed ? !managedContext : !adoptedContext) {
-      if (herdrActive && !process.env.HERDR_BIN_PATH)
-        next.ui.setStatus?.(
-          "pi-herdr-orchestrator",
-          "Orchestrator inactive: this Herdr version did not inject HERDR_BIN_PATH. Upgrade to Herdr 0.8.0 or newer, then reopen Pi.",
-        );
-      else inactive(next);
+      inactive(next);
       return;
     }
+    const scheduleAttachRetry = (): void => {
+      if (
+        epoch !== startEpoch ||
+        reconnectTimer ||
+        reconnectAttempts >= 8 ||
+        Date.now() >= reconnectDeadline
+      )
+        return;
+      const delay = reconnectDelay;
+      reconnectAttempts++;
+      reconnectDelay = Math.min(30_000, reconnectDelay * 2);
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = undefined;
+        void start(next, true);
+      }, delay);
+      reconnectTimer.unref?.();
+    };
     let socketPath: string;
     let orchestrationSessionKey: string;
     if (managed) {
@@ -417,7 +452,7 @@ export default async function piHerdrOrchestrator(
       orchestrationSessionKey = process.env.PI_HERDR_ORCH_SESSION_KEY!;
     } else {
       try {
-        const paths = await ensureBroker();
+        const { paths } = await resolveHerdrPaths();
         socketPath = paths.socket;
         orchestrationSessionKey = paths.sessionKey;
       } catch (error) {
@@ -427,6 +462,7 @@ export default async function piHerdrOrchestrator(
             ? `Orchestrator inactive: ${error.message}`
             : "Orchestrator startup failed.",
         );
+        scheduleAttachRetry();
         return;
       }
     }
@@ -627,8 +663,9 @@ export default async function piHerdrOrchestrator(
     if (!managed && !secret) {
       next.ui.setStatus?.(
         "pi-herdr-orchestrator",
-        "Broker secret file unavailable; orchestration controls are disabled.",
+        "Broker startup is pending; orchestration controls are disabled.",
       );
+      scheduleAttachRetry();
       return;
     }
     const candidateClient =
@@ -661,6 +698,7 @@ export default async function piHerdrOrchestrator(
       }
       const registration = await candidateClient.register(
         candidateAdapter.safeState(),
+        piHerdrSessionReference(next),
       );
       if (epoch !== startEpoch) {
         pendingClients.delete(candidateClient);
@@ -729,21 +767,7 @@ export default async function piHerdrOrchestrator(
       candidateClient.markRegistrationReady();
       scheduleReconnect = () => {
         if (reconnectAttempts === 0) reconnectDeadline = Date.now() + 120_000;
-        if (
-          epoch !== startEpoch ||
-          reconnectTimer ||
-          reconnectAttempts >= 8 ||
-          Date.now() >= reconnectDeadline
-        )
-          return;
-        const delay = reconnectDelay;
-        reconnectAttempts++;
-        reconnectDelay = Math.min(30_000, reconnectDelay * 2);
-        reconnectTimer = setTimeout(() => {
-          reconnectTimer = undefined;
-          void start(next, true);
-        }, delay);
-        reconnectTimer.unref?.();
+        scheduleAttachRetry();
       };
       reconnectNow = scheduleReconnect;
       stateReporter = createStateReporter(

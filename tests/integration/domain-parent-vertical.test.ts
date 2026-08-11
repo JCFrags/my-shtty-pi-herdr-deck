@@ -107,6 +107,29 @@ class FakeHerdr {
       paneId: `pane-${this.provisions}`,
     };
   }
+  async verifyManagedPane(agentId: string, identity: any) {
+    const resource = this.store.state.herdrResources?.[agentId];
+    return {
+      paneId: identity.paneId,
+      terminalId: identity.terminalId ?? resource?.terminalId,
+      workspaceId: "w",
+      cwd: "/fake",
+    };
+  }
+  async recordRegistrationMismatch(agentId: string) {
+    await this.store.append({
+      type: "herdr.provision.outcome",
+      actor: { principalId: "prn_00000000000000000000000000", kind: "system" },
+      entityRefs: { agentId },
+      payload: {
+        agentId,
+        state: "replaced",
+        reason: "registration_identity_mismatch",
+        cleanupOutcome: "retained",
+        unknown: true,
+      },
+    });
+  }
   async register(agentId: string, identity: any) {
     const current = this.resources[agentId];
     await this.store.append({
@@ -301,6 +324,12 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
           paneId: "root-1",
           terminalId: "root-term-1",
           detectedKind: "pi",
+          sessionReference: {
+            source: "herdr:pi",
+            agent: "pi",
+            kind: "id",
+            value: "integration-session",
+          },
           name: "primary-1",
         },
         pi: {
@@ -318,6 +347,12 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
           paneId: "root-2",
           terminalId: "root-term-2",
           detectedKind: "pi",
+          sessionReference: {
+            source: "herdr:pi",
+            agent: "pi",
+            kind: "id",
+            value: "integration-session",
+          },
           name: "primary-2",
         },
         pi: {
@@ -350,7 +385,7 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
     );
     assert.equal(dry.state, "created");
     assert.equal(fake.provisions, 0);
-    assert.equal(fake.adoptions, 4);
+    assert.equal(fake.adoptions, 6);
     const invalidSeq = broker.store.state.lastEventSeq;
     for (const steps of [
       [
@@ -511,6 +546,12 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
           paneId: "pane-1",
           terminalId: "term-1",
           detectedKind: "pi",
+          sessionReference: {
+            source: "herdr:pi",
+            agent: "pi",
+            kind: "id",
+            value: "integration-session",
+          },
           name: "child",
         },
         pi: {

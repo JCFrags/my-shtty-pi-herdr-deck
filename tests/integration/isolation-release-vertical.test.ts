@@ -116,7 +116,9 @@ async function productionParent(
   let broker!: Broker;
   let herdrFactoryCalls = 0;
   const herdr = (store: EventStore, factoryCall: number) => ({
-    resources: store.state.herdrResources ?? {},
+    get resources() {
+      return store.state.herdrResources ?? {};
+    },
     async startupReconcile() {
       if (!options.realReconcileWorktree || factoryCall === 1) return [];
       const resources = Object.values(store.state.herdrResources ?? {});
@@ -260,6 +262,61 @@ async function productionParent(
           generation: 1,
         },
       };
+    },
+    async register(agentId: string, identity: Record<string, unknown>) {
+      const resource = store.state.herdrResources?.[agentId];
+      await store.append({
+        type: "herdr.provision.outcome",
+        actor,
+        entityRefs: { agentId },
+        payload: {
+          agentId,
+          state: "registered",
+          paneId: identity.paneId,
+          terminalId: identity.terminalId,
+          sessionId: identity.sessionId,
+          generation: identity.generation,
+          tokenDigest: resource?.tokenDigest,
+          parentAgentId: resource?.parentAgentId,
+          ownerId: agentId,
+          ...(resource?.workspaceId
+            ? { workspaceId: resource.workspaceId }
+            : {}),
+          ...(resource?.worktreeId ? { worktreeId: resource.worktreeId } : {}),
+          ...(resource?.worktreePath
+            ? { worktreePath: resource.worktreePath }
+            : {}),
+        },
+      });
+    },
+    async verifyManagedPane(
+      agentId: string,
+      identity: { paneId: string; terminalId?: string },
+    ) {
+      const resource = store.state.herdrResources?.[agentId];
+      return {
+        paneId: identity.paneId,
+        terminalId: identity.terminalId ?? resource?.terminalId,
+        workspaceId: resource?.workspaceId,
+        worktreeId: resource?.worktreeId,
+        cwd: resource?.worktreePath ?? root,
+      };
+    },
+    async recordRegistrationMismatch(agentId: string) {
+      const resource = store.state.herdrResources?.[agentId];
+      await store.append({
+        type: "herdr.provision.outcome",
+        actor,
+        entityRefs: { agentId },
+        payload: {
+          agentId,
+          state: "replaced",
+          reason: "registration_identity_mismatch",
+          cleanupOutcome: "retained",
+          unknown: true,
+          ...(resource?.paneId ? { paneId: resource.paneId } : {}),
+        },
+      });
     },
   });
   broker = new Broker(paths, {

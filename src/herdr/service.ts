@@ -6,17 +6,18 @@ import {
   type ProvisionInput,
   type ProvisionResult,
 } from "./provisioner.js";
-import type { HerdrSnapshot } from "./types.js";
-import { HerdrSocketClient } from "./socket-client.js";
+import type { HerdrSessionReference, HerdrSnapshot } from "./types.js";
+import type { HerdrSocketClient } from "./socket-client.js";
 import { HerdrCli } from "./cli.js";
 import { focus, interrupt, type OccupantGuard } from "./controls.js";
 import { HerdrProcessRunner } from "./runner.js";
 import { projectCapabilities } from "./capabilities.js";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import type { CanonicalResolvedPaths } from "../shared/paths.js";
 import { collectGitEvidence } from "../git/evidence.js";
 import type { GitEvidence } from "../git/porcelain.js";
-import { doctor } from "../broker/doctor.js";
+import { doctor, type DoctorReport } from "../broker/doctor.js";
+import { authoritativeHerdrBinary, revalidateHerdrBinary } from "./binary.js";
 export class ProvisionOutcomeRecordingError extends AggregateError {
   readonly provisionError: unknown;
   readonly outcomeError: unknown;
@@ -39,8 +40,154 @@ export interface HerdrServiceOptions {
   watcher?: HerdrSocketClient;
   gitEvidence?: (cwd: string, base?: string) => Promise<GitEvidence>;
   preflight?: () => Promise<void>;
+  diagnostic?: () => Promise<DoctorReport>;
 }
 const actor = { principalId: "prn_00000000000000000000000000", kind: "system" };
+interface ExactPiPaneIdentity {
+  paneId: string;
+  terminalId: string;
+  workspaceId?: string;
+  tabId?: string;
+  cwd?: string;
+  worktreeId?: string;
+}
+function exactPiPane(
+  snapshot: HerdrSnapshot,
+  paneId: string,
+  expectedTerminalId?: string,
+  expectedAgentId?: string,
+  expectedSessionReference?: HerdrSessionReference,
+  expectedLegacySessionId?: string,
+): ExactPiPaneIdentity {
+  const panes = snapshot.panes.filter((item) => item.id === paneId);
+  if (panes.length !== 1) throw new Error("HERDR_IDENTITY_MISMATCH");
+  const pane = panes[0]!;
+  const terminalId = pane.terminalId;
+  const terminalPanes = terminalId
+    ? snapshot.panes.filter((item) => item.terminalId === terminalId)
+    : [];
+  const terminalAgents = terminalId
+    ? snapshot.agents.filter((item) => item.terminalId === terminalId)
+    : [];
+  const paneAgents = snapshot.agents.filter((item) => item.paneId === paneId);
+  const occupant =
+    snapshot.agents.length > 0
+      ? terminalAgents.length === 1
+        ? terminalAgents[0]
+        : undefined
+      : pane.occupant;
+  if (
+    !terminalId ||
+    terminalPanes.length !== 1 ||
+    !occupant ||
+    (occupant.kind !== "pi" &&
+      !(snapshot.agents.length === 0 && occupant.kind === undefined)) ||
+    occupant.terminalId !== terminalId ||
+    (snapshot.agents.length > 0 && occupant.paneId !== paneId) ||
+    (expectedTerminalId !== undefined && expectedTerminalId !== terminalId) ||
+    (expectedAgentId !== undefined &&
+      occupant.agentId !== undefined &&
+      occupant.agentId !== expectedAgentId) ||
+    (expectedLegacySessionId !== undefined &&
+      snapshot.agents.length === 0 &&
+      occupant.sessionId !== expectedLegacySessionId) ||
+    (expectedSessionReference !== undefined &&
+      (!occupant.sessionReference ||
+        occupant.sessionReference.source !== expectedSessionReference.source ||
+        occupant.sessionReference.agent !== expectedSessionReference.agent ||
+        occupant.sessionReference.kind !== expectedSessionReference.kind ||
+        occupant.sessionReference.value !== expectedSessionReference.value)) ||
+    (snapshot.agents.length > 0 &&
+      (!pane.workspaceId ||
+        !pane.tabId ||
+        occupant.workspaceId !== pane.workspaceId ||
+        occupant.tabId !== pane.tabId)) ||
+    (snapshot.agents.length === 0 &&
+      occupant.workspaceId !== undefined &&
+      pane.workspaceId !== undefined &&
+      occupant.workspaceId !== pane.workspaceId) ||
+    (snapshot.agents.length === 0 &&
+      occupant.tabId !== undefined &&
+      pane.tabId !== undefined &&
+      occupant.tabId !== pane.tabId)
+  )
+    throw new Error("HERDR_IDENTITY_MISMATCH");
+  const exactReference = expectedSessionReference ?? occupant.sessionReference;
+  const referenceAgents = exactReference
+    ? snapshot.agents.filter(
+        (item) =>
+          item.sessionReference?.source === exactReference.source &&
+          item.sessionReference.agent === exactReference.agent &&
+          item.sessionReference.kind === exactReference.kind &&
+          item.sessionReference.value === exactReference.value,
+      )
+    : [];
+  if (
+    snapshot.agents.length > 0 &&
+    (paneAgents.length !== 1 ||
+      (exactReference !== undefined && referenceAgents.length !== 1))
+  )
+    throw new Error("HERDR_IDENTITY_MISMATCH");
+  const workspaces = pane.workspaceId
+    ? snapshot.workspaces.filter((item) => item.id === pane.workspaceId)
+    : [];
+  const tabs = pane.tabId
+    ? snapshot.tabs.filter((item) => item.id === pane.tabId)
+    : [];
+  const worktrees =
+    snapshot.agents.length === 0
+      ? snapshot.worktrees.filter(
+          (item) =>
+            item.workspaceId === pane.workspaceId &&
+            item.rootPaneId === pane.id,
+        )
+      : [];
+  const workspace = workspaces[0];
+  const workspaceWorktree = workspace?.worktree;
+  if (
+    (snapshot.agents.length > 0 &&
+      (workspaces.length !== 1 ||
+        tabs.length !== 1 ||
+        tabs[0]?.workspaceId !== pane.workspaceId)) ||
+    (snapshot.agents.length === 0 &&
+      (workspaces.length > 1 || tabs.length > 1)) ||
+    worktrees.length > 1 ||
+    workspace?.worktreeInvalid === true ||
+    (workspaceWorktree !== undefined &&
+      (!isAbsolute(workspaceWorktree.repoRoot) ||
+        resolve(workspaceWorktree.repoRoot) !== workspaceWorktree.repoRoot ||
+        !isAbsolute(workspaceWorktree.checkoutPath) ||
+        resolve(workspaceWorktree.checkoutPath) !==
+          workspaceWorktree.checkoutPath))
+  )
+    throw new Error("HERDR_IDENTITY_MISMATCH");
+  const cwd =
+    workspaceWorktree?.checkoutPath ??
+    pane.cwd ??
+    tabs[0]?.cwd ??
+    workspace?.cwd;
+  return {
+    paneId,
+    terminalId,
+    ...(pane.workspaceId ? { workspaceId: pane.workspaceId } : {}),
+    ...(pane.tabId ? { tabId: pane.tabId } : {}),
+    ...(cwd ? { cwd } : {}),
+    ...(worktrees[0]?.id ? { worktreeId: worktrees[0].id } : {}),
+  };
+}
+function samePaneIdentity(
+  left: ExactPiPaneIdentity,
+  right: ExactPiPaneIdentity,
+): boolean {
+  return (
+    left.paneId === right.paneId &&
+    left.terminalId === right.terminalId &&
+    left.workspaceId === right.workspaceId &&
+    left.tabId === right.tabId &&
+    left.cwd === right.cwd &&
+    left.worktreeId === right.worktreeId
+  );
+}
 export class HerdrService {
   readonly #store: EventStore;
   readonly #cli: HerdrCli;
@@ -49,6 +196,7 @@ export class HerdrService {
   readonly #watcher: HerdrSocketClient | undefined;
   readonly #pending = new Map<string, ProvisionResult>();
   readonly #preflight: (() => Promise<void>) | undefined;
+  readonly #diagnostic: (() => Promise<DoctorReport>) | undefined;
   readonly #gitEvidence:
     ((cwd: string, base?: string) => Promise<GitEvidence>) | undefined;
   readonly #watchAbort = new AbortController();
@@ -62,6 +210,7 @@ export class HerdrService {
     this.#watcher = options.watcher;
     this.#gitEvidence = options.gitEvidence;
     this.#preflight = options.preflight;
+    this.#diagnostic = options.diagnostic;
   }
   get store(): EventStore {
     return this.#store;
@@ -69,11 +218,16 @@ export class HerdrService {
   get resources() {
     return this.#store.state.herdrResources ?? {};
   }
+  async diagnose(): Promise<DoctorReport> {
+    if (!this.#diagnostic) throw new Error("HERDR_DOCTOR_UNAVAILABLE");
+    return await this.#diagnostic();
+  }
   async verifyRoot(identity: {
     paneId: string;
-    terminalId: string;
+    terminalId?: string;
     sessionId?: string;
     generation?: number;
+    sessionReference?: HerdrSessionReference;
   }): Promise<{
     paneId: string;
     terminalId: string;
@@ -85,41 +239,15 @@ export class HerdrService {
     await this.#preflight?.();
     this.#cli.requireMutationCapabilities(["session.snapshot"]);
     const snapshot = await this.#cli.snapshot();
-    const pane = snapshot.panes.find((item) => item.id === identity.paneId);
-    const occupant = pane?.occupant;
-    if (
-      !pane ||
-      !occupant ||
-      occupant.kind !== "pi" ||
-      (occupant.terminalId ?? pane.terminalId) !== identity.terminalId ||
-      (identity.sessionId !== undefined &&
-        occupant.sessionId !== identity.sessionId) ||
-      (identity.generation !== undefined &&
-        occupant.generation !== identity.generation)
-    )
-      throw new Error("HERDR_IDENTITY_MISMATCH");
-    const workspace = snapshot.workspaces.find(
-      (item) => item.id === pane.workspaceId,
+    const resolved = exactPiPane(
+      snapshot,
+      identity.paneId,
+      identity.terminalId,
+      undefined,
+      identity.sessionReference,
+      identity.sessionId,
     );
-    const tab = snapshot.tabs.find((item) => item.id === pane.tabId);
-    const worktree = snapshot.worktrees.find(
-      (item) =>
-        item.workspaceId === pane.workspaceId && item.rootPaneId === pane.id,
-    );
-    const context: {
-      paneId: string;
-      terminalId: string;
-      workspaceId?: string;
-      tabId?: string;
-      cwd?: string;
-      worktreeId?: string;
-    } = { paneId: pane.id, terminalId: identity.terminalId };
-    if (pane.workspaceId) context.workspaceId = pane.workspaceId;
-    if (pane.tabId) context.tabId = pane.tabId;
-    const cwd = pane.cwd ?? tab?.cwd ?? workspace?.cwd;
-    if (cwd) context.cwd = cwd;
-    if (worktree?.id) context.worktreeId = worktree.id;
-    return context;
+    return resolved;
   }
   async adoptRoot(
     agent: Agent,
@@ -130,23 +258,7 @@ export class HerdrService {
       generation?: number;
     },
   ): Promise<void> {
-    await this.verifyRoot({
-      paneId: identity.paneId,
-      terminalId: identity.terminalId ?? "",
-    });
-    const snapshot = await this.#cli.snapshot();
-    const pane = snapshot.panes.find((item) => item.id === identity.paneId);
-    const occupant = pane?.occupant;
-    if (
-      !pane ||
-      !occupant ||
-      (identity.terminalId &&
-        (occupant.terminalId ?? pane.terminalId) !== identity.terminalId) ||
-      (identity.sessionId && occupant.sessionId !== identity.sessionId) ||
-      (identity.generation !== undefined &&
-        occupant.generation !== identity.generation)
-    )
-      throw new Error("HERDR_IDENTITY_MISMATCH");
+    const context = await this.verifyRoot(identity);
     await this.#store.append({
       type: "herdr.provision.intent",
       actor: this.#actor,
@@ -160,8 +272,8 @@ export class HerdrService {
       payload: {
         agentId: agent.id,
         state: "adopted",
-        paneId: identity.paneId,
-        ...(identity.terminalId ? { terminalId: identity.terminalId } : {}),
+        paneId: context.paneId,
+        terminalId: context.terminalId,
         ...(identity.sessionId ? { sessionId: identity.sessionId } : {}),
         ...(identity.generation !== undefined
           ? { generation: identity.generation }
@@ -293,6 +405,30 @@ export class HerdrService {
       }
     });
   }
+  async verifyManagedPane(
+    agentId: string,
+    identity: {
+      paneId: string;
+      terminalId?: string;
+      sessionReference?: HerdrSessionReference;
+    },
+  ): Promise<ExactPiPaneIdentity> {
+    await this.#preflight?.();
+    const resource = this.resources[agentId];
+    if (!resource?.paneId || resource.paneId !== identity.paneId)
+      throw new Error("HERDR_REGISTRATION_IDENTITY_MISMATCH");
+    try {
+      return exactPiPane(
+        await this.#cli.snapshot(),
+        resource.paneId,
+        identity.terminalId ?? resource.terminalId,
+        resource.ownerId,
+        identity.sessionReference,
+      );
+    } catch {
+      throw new Error("HERDR_REGISTRATION_IDENTITY_MISMATCH");
+    }
+  }
   async register(
     agentId: string,
     identity: {
@@ -300,11 +436,12 @@ export class HerdrService {
       terminalId?: string;
       sessionId?: string;
       generation?: number;
+      sessionReference?: HerdrSessionReference;
     },
     supplied?: ProvisionResult,
     tokenProof?: string,
-  ): Promise<void> {
-    await this.withAgentLock(agentId, async () => {
+  ): Promise<ExactPiPaneIdentity> {
+    return await this.withAgentLock(agentId, async () => {
       await this.#preflight?.();
       const result =
         supplied ??
@@ -319,51 +456,60 @@ export class HerdrService {
         Date.parse(resource.registrationDeadline) <= Date.now()
       )
         throw new Error("HERDR_REGISTRATION_DEADLINE");
-      const snapshot = await this.#cli.snapshot();
-      const pane = snapshot.panes.find((item) => item.id === identity.paneId);
-      const occupant = pane?.occupant;
-      if (
-        !pane ||
-        !occupant ||
-        (occupant.agentId !== undefined &&
-          occupant.agentId !== resource.ownerId) ||
-        (identity.terminalId !== undefined &&
-          (occupant.terminalId ?? pane.terminalId) !== identity.terminalId) ||
-        (identity.sessionId !== undefined &&
-          occupant.sessionId !== identity.sessionId) ||
-        (identity.generation !== undefined &&
-          occupant.generation !== identity.generation)
-      )
+      if (!resource.paneId || resource.paneId !== identity.paneId)
         throw new Error("HERDR_REGISTRATION_IDENTITY_MISMATCH");
+      const snapshot = await this.#cli.snapshot();
+      let resolved: ExactPiPaneIdentity;
+      try {
+        resolved = exactPiPane(
+          snapshot,
+          resource.paneId,
+          identity.terminalId,
+          resource.ownerId,
+          identity.sessionReference,
+          identity.sessionId,
+        );
+      } catch {
+        throw new Error("HERDR_REGISTRATION_IDENTITY_MISMATCH");
+      }
       await this.#provisioner.verifyRegistration(
         result,
         identity,
         tokenProof,
         false,
       );
-      const secondSnapshot = await this.#cli.snapshot();
-      const secondPane = secondSnapshot.panes.find(
-        (item) => item.id === identity.paneId,
-      );
-      const secondOccupant = secondPane?.occupant;
-      if (
-        !secondPane ||
-        !secondOccupant ||
-        (secondOccupant.agentId !== undefined &&
-          secondOccupant.agentId !== resource.ownerId) ||
-        secondOccupant.generation !== result.token.generation ||
-        !sameIdentity(secondPane, secondOccupant, identity)
-      ) {
-        await this.recordLifecycle(
-          agentId,
-          "pending",
-          "registration_identity_mismatch",
-          true,
-        );
-        throw new Error("HERDR_REGISTRATION_IDENTITY_MISMATCH");
-      }
       const cleanupOutcome =
         await this.#provisioner.cleanupRegistration(result);
+      let finalIdentity: ExactPiPaneIdentity;
+      try {
+        finalIdentity = exactPiPane(
+          await this.#cli.snapshot(),
+          resource.paneId,
+          resolved.terminalId,
+          resource.ownerId,
+          identity.sessionReference,
+          identity.sessionId,
+        );
+        if (!samePaneIdentity(resolved, finalIdentity))
+          throw new Error("HERDR_REGISTRATION_IDENTITY_MISMATCH");
+      } catch (primary) {
+        try {
+          await this.recordLifecycle(
+            agentId,
+            "pending",
+            "registration_identity_mismatch",
+            true,
+          );
+        } catch (eventError) {
+          throw new AggregateError(
+            [primary, eventError],
+            "Registration identity mismatch and outcome recording failed.",
+          );
+        }
+        throw new Error("HERDR_REGISTRATION_IDENTITY_MISMATCH", {
+          cause: primary,
+        });
+      }
       await this.#store.append({
         type: "herdr.provision.outcome",
         actor: this.#actor,
@@ -371,8 +517,8 @@ export class HerdrService {
         payload: {
           agentId,
           state: "registered",
-          paneId: identity.paneId,
-          ...(identity.terminalId ? { terminalId: identity.terminalId } : {}),
+          paneId: finalIdentity.paneId,
+          terminalId: finalIdentity.terminalId,
           ...(identity.sessionId ? { sessionId: identity.sessionId } : {}),
           generation: result.token.generation,
           tokenDigest: result.token.digest,
@@ -380,6 +526,21 @@ export class HerdrService {
           cleanupOutcome,
         },
       });
+      this.#pending.delete(agentId);
+      const timer = this.#expiryTimers.get(agentId);
+      if (timer) clearTimeout(timer);
+      this.#expiryTimers.delete(agentId);
+      return finalIdentity;
+    });
+  }
+  async recordRegistrationMismatch(agentId: string): Promise<void> {
+    await this.withAgentLock(agentId, async () => {
+      await this.recordLifecycle(
+        agentId,
+        "replaced",
+        "registration_identity_mismatch",
+        true,
+      );
       this.#pending.delete(agentId);
       const timer = this.#expiryTimers.get(agentId);
       if (timer) clearTimeout(timer);
@@ -626,29 +787,6 @@ export class HerdrService {
     await interrupt(this.#cli, () => this.#cli.snapshot(), guard);
   }
 }
-function sameIdentity(
-  pane: { terminalId?: string },
-  occupant: {
-    terminalId?: string;
-    sessionId?: string;
-    generation?: number;
-  },
-  identity: {
-    terminalId?: string;
-    sessionId?: string;
-    generation?: number;
-  },
-): boolean {
-  return (
-    (identity.terminalId === undefined ||
-      (occupant.terminalId ?? pane.terminalId) === identity.terminalId) &&
-    (identity.sessionId === undefined ||
-      occupant.sessionId === identity.sessionId) &&
-    (identity.generation === undefined ||
-      occupant.generation === identity.generation)
-  );
-}
-
 async function revalidateAndRun(
   cli: HerdrCli,
   guard: OccupantGuard,
@@ -711,11 +849,13 @@ export async function createProductionHerdrService(
   paths: CanonicalResolvedPaths,
   binary = process.env.HERDR_BIN_PATH,
 ): Promise<HerdrService> {
-  if (!binary)
-    throw new Error("HERDR_UNAVAILABLE: HERDR_BIN_PATH is not configured.");
-  const runner = new HerdrProcessRunner({ binary });
+  const binaryIdentity = await authoritativeHerdrBinary(binary);
+  const runner = new HerdrProcessRunner({
+    binary: binaryIdentity.path,
+    revalidate: () => revalidateHerdrBinary(binaryIdentity),
+  });
   const schema = await runner.json(["api", "schema", "--json"]);
-  const capabilities = projectCapabilities(schema, binary);
+  const capabilities = projectCapabilities(schema, binaryIdentity.path);
   capabilities.require(Object.keys(capabilities.mandatory));
   const cli = new HerdrCli(runner, capabilities);
   const socketPath = paths.herdrSocket;
@@ -732,23 +872,34 @@ export async function createProductionHerdrService(
       () => [],
       true,
       collectGitEvidence,
-      { socketPath: paths.socket, sessionKey: paths.sessionKey },
+      {
+        socketPath: paths.socket,
+        sessionKey: paths.sessionKey,
+        herdrBinary: binaryIdentity.path,
+      },
     ),
     gitEvidence: collectGitEvidence,
-    preflight: async () =>
+    preflight: async () => {
+      await revalidateHerdrBinary(binaryIdentity);
       await runProductionPreflight({
         runner,
-        binary,
+        binary: binaryIdentity.path,
         socketPath,
         expectedSchemaHash,
         ...(adapterIdentity !== undefined ? { adapterIdentity } : {}),
-        expectedBinaryIdentity: binary,
-        binaryIdentity: binary,
-      }),
-    watcher: new HerdrSocketClient({
-      socketPath,
-      protocol: 17,
-      reconnectDelaysMs: [50, 100, 250],
-    }),
+        expectedBinaryIdentity: binaryIdentity.path,
+        binaryIdentity: binaryIdentity.path,
+      });
+    },
+    diagnostic: async () => {
+      await revalidateHerdrBinary(binaryIdentity);
+      const report = await doctor({
+        herdrBinary: binaryIdentity.path,
+        herdrSocket: socketPath,
+        schema: await runner.json(["api", "schema", "--json"]),
+      });
+      await revalidateHerdrBinary(binaryIdentity);
+      return report;
+    },
   });
 }

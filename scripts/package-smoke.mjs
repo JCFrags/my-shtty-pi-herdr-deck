@@ -22,6 +22,30 @@ for (const name of [
 assert.deepEqual(packageJson.pi.extensions, [
   "./dist/extensions/pi-herdr-orchestrator.js",
 ]);
+function assertExactPluginManifest(value, source) {
+  assert.equal(
+    (value.match(/^\[\[startup\]\]\s*$/gm) ?? []).length,
+    1,
+    `${source} must contain exactly one startup entry`,
+  );
+  assert.equal(
+    (value.match(/^\[\[panes\]\]\s*$/gm) ?? []).length,
+    1,
+    `${source} must contain exactly one managed pane`,
+  );
+  const startup = value.match(
+    /^\[\[startup\]\]\s*$([\s\S]*?)(?=^\[\[|(?![\s\S]))/m,
+  )?.[1];
+  assert.ok(startup, `${source} is missing its startup body`);
+  assert.deepEqual(
+    JSON.parse(
+      startup.match(/^command\s*=\s*(\[[^\n]+\])\s*$/m)?.[1] ?? "null",
+    ),
+    ["./bin/pi-herdr-orchestrator", "broker", "startup"],
+    `${source} has the wrong startup command`,
+  );
+}
+assertExactPluginManifest(manifest, "source manifest");
 for (const expected of [
   'id = "pi.herdr.orchestrator"',
   'min_herdr_version = "0.8.0"',
@@ -61,6 +85,18 @@ try {
   assert.equal(
     files.some((file) => file.includes("node_modules/")),
     false,
+  );
+  const packedManifest = spawnSync(
+    "tar",
+    ["-xOf", archivePath, "package/herdr-plugin.toml"],
+    { encoding: "utf8" },
+  );
+  if (packedManifest.status !== 0) throw new Error(packedManifest.stderr);
+  assertExactPluginManifest(packedManifest.stdout, "packed manifest");
+  assert.equal(
+    packedManifest.stdout,
+    manifest,
+    "packed manifest bytes differ from the reviewed source manifest",
   );
   process.stdout.write(`package smoke: ${filename} (${files.length} files)\n`);
 } finally {
