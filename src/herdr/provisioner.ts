@@ -232,9 +232,10 @@ export class HerdrProvisioner {
         worktreeId = input.reuseWorktreeId!;
         worktreePath = input.reuseWorktreePath!;
         const current = await this.cli.snapshot();
-        const live = current.worktrees.find(
+        const liveMatches = current.worktrees.filter(
           (worktree) => worktree.id === worktreeId,
         );
+        const live = liveMatches.length === 1 ? liveMatches[0] : undefined;
         if (
           !live ||
           live.path !== worktreePath ||

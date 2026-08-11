@@ -83,10 +83,10 @@ export function reconcileAgents(
         });
         continue;
       }
-      const live = snapshot.worktrees.find(
+      const liveMatches = snapshot.worktrees.filter(
         (worktree) => worktree.id === resource.worktreeId,
       );
-      if (!live) {
+      if (liveMatches.length === 0) {
         out.push({
           agentId: agent.id,
           kind: "missing",
@@ -96,6 +96,17 @@ export function reconcileAgents(
         });
         continue;
       }
+      if (liveMatches.length !== 1) {
+        out.push({
+          agentId: agent.id,
+          kind: "replaced",
+          paneId: pane.id,
+          ...(terminalId ? { terminalId } : {}),
+          reason: "Recorded worktree identity is ambiguous.",
+        });
+        continue;
+      }
+      const live = liveMatches[0]!;
       if (
         live.path !== resource.worktreePath ||
         live.workspaceId !== resource.workspaceId

@@ -69,7 +69,12 @@ async function productionParent(
     holdProvisions?: boolean;
     holdReuseProvisions?: boolean;
     realReconcileWorktree?:
-      "exact" | "missing" | "replaced" | "wrong-workspace";
+      | "exact"
+      | "missing"
+      | "replaced"
+      | "wrong-workspace"
+      | "duplicate-exact-first"
+      | "duplicate-conflict-first";
   } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "isolation-release-"));
@@ -139,17 +144,31 @@ async function productionParent(
             options.realReconcileWorktree === "missing"
           )
             return [];
+          const exact = {
+            worktree_id: resource.worktreeId,
+            path: resource.worktreePath,
+            workspace_id: resource.workspaceId,
+          };
+          const conflict = {
+            worktree_id: resource.worktreeId,
+            path: `${resource.worktreePath}-conflict`,
+            workspace_id: "wrong-workspace",
+          };
+          if (options.realReconcileWorktree === "duplicate-exact-first")
+            return [exact, conflict];
+          if (options.realReconcileWorktree === "duplicate-conflict-first")
+            return [conflict, exact];
           return [
             {
-              worktree_id: resource.worktreeId,
+              ...exact,
               path:
                 options.realReconcileWorktree === "replaced"
                   ? `${resource.worktreePath}-replacement`
-                  : resource.worktreePath,
+                  : exact.path,
               workspace_id:
                 options.realReconcileWorktree === "wrong-workspace"
                   ? "wrong-workspace"
-                  : resource.workspaceId,
+                  : exact.workspace_id,
             },
           ];
         }),
@@ -870,8 +889,14 @@ test("reuse admission fails closed for missing, wrong-owner, and stale resources
   }
 });
 
-test("real startup reconciliation rejects missing, replaced, and wrong-workspace reuse", async () => {
-  for (const mode of ["missing", "replaced", "wrong-workspace"] as const) {
+test("real startup reconciliation rejects missing, changed, and ambiguous reuse", async () => {
+  for (const mode of [
+    "missing",
+    "replaced",
+    "wrong-workspace",
+    "duplicate-exact-first",
+    "duplicate-conflict-first",
+  ] as const) {
     const h = await productionParent({ realReconcileWorktree: mode });
     let removeBinding: () => void = () => undefined;
     try {
@@ -1171,6 +1196,36 @@ test("HerdrProvisioner reuses an exact worktree without creating one", async () 
           {
             id: "retained-worktree-id",
             workspaceId: "wrong-workspace",
+            path: "/tmp/retained-worktree-path",
+          },
+        ],
+      ],
+      [
+        "duplicate_exact_first",
+        [
+          {
+            id: "retained-worktree-id",
+            workspaceId: "workspace-reuse",
+            path: "/tmp/retained-worktree-path",
+          },
+          {
+            id: "retained-worktree-id",
+            workspaceId: "wrong-workspace",
+            path: "/tmp/conflicting-worktree-path",
+          },
+        ],
+      ],
+      [
+        "duplicate_conflict_first",
+        [
+          {
+            id: "retained-worktree-id",
+            workspaceId: "wrong-workspace",
+            path: "/tmp/conflicting-worktree-path",
+          },
+          {
+            id: "retained-worktree-id",
+            workspaceId: "workspace-reuse",
             path: "/tmp/retained-worktree-path",
           },
         ],
