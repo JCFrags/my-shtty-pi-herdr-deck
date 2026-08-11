@@ -58,6 +58,10 @@ import {
   validateWorkflow,
   type WorkflowDefinition,
 } from "../scheduler/workflows.js";
+import {
+  resolveIsolation,
+  resolveWorkflowIsolation,
+} from "./isolation-policy.js";
 interface SubscriptionFilter {
   events?: string[];
   agentIds?: string[];
@@ -152,6 +156,25 @@ function safeText(value: unknown, max = 4096): value is string {
     value.length <= max &&
     !/[\u0000-\u001f\u007f]/u.test(value)
   );
+}
+function exactRequestedIsolation(value: unknown): unknown {
+  if (value === undefined) return undefined;
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.keys(value).length !== 1 ||
+    !Object.hasOwn(value, "mode") ||
+    !safeText((value as Record<string, unknown>).mode, 64)
+  )
+    throw new OrchestratorError(
+      "INVALID_REQUEST",
+      "Isolation must be an exact object with one mode.",
+    );
+  return (value as Record<string, unknown>).mode;
+}
+function isRegisteredHerdrResourceState(value: unknown): boolean {
+  return value === "registered" || value === "present" || value === "moved";
 }
 function safeBoundedRecord(value: unknown): value is Record<string, unknown> {
   return (
@@ -2874,10 +2897,6 @@ export class Broker {
         const inheritedProject: Record<string, unknown> = {
           cwd: parentAgent.cwd,
           workspaceId: parentAgent.workspaceId,
-          ...(parentAgent.worktreeId
-            ? { worktreeId: parentAgent.worktreeId }
-            : {}),
-          isolation: "shared-readonly",
         };
         if (
           request.method === "agent.spawn" &&
@@ -2886,13 +2905,18 @@ export class Broker {
             typeof p.project !== "object" ||
             (p.project as Record<string, unknown>).cwd !==
               inheritedProject.cwd ||
-            (p.project as Record<string, unknown>).workspaceId !==
-              inheritedProject.workspaceId)
+            ((p.project as Record<string, unknown>).workspaceId !== undefined &&
+              (p.project as Record<string, unknown>).workspaceId !==
+                inheritedProject.workspaceId))
         )
           throw new OrchestratorError(
             "PERMISSION_DENIED",
             "Spawn project is outside the authenticated parent context.",
           );
+        const requestedIsolation =
+          request.method === "agent.spawn"
+            ? exactRequestedIsolation(p.isolation)
+            : undefined;
         const dryRun = p.dryRun === true;
         const creationNow = this.#now();
         const createdAt = new Date(creationNow).toISOString();
@@ -2952,24 +2976,28 @@ export class Broker {
             "Delegation steps are invalid.",
           );
         const workflowId = createId("wfl");
-        const planned = steps.map((raw) => ({
-          key: safeText((raw as Record<string, unknown>).key, 64)
-            ? ((raw as Record<string, unknown>).key as string)
-            : createId("tsk"),
-          profileId: (raw as Record<string, unknown>).profileId as string,
-          title: safeText((raw as Record<string, unknown>).title, 256)
-            ? ((raw as Record<string, unknown>).title as string)
-            : "Delegated task",
-          objective: (raw as Record<string, unknown>).objective as string,
-          constraints: Array.isArray(
-            (raw as Record<string, unknown>).constraints,
-          )
-            ? ((raw as Record<string, unknown>).constraints as unknown[])
-            : [],
-          dependsOn: Array.isArray((raw as Record<string, unknown>).dependsOn)
-            ? ((raw as Record<string, unknown>).dependsOn as unknown[])
-            : [],
-        }));
+        const planned = steps.map((raw) => {
+          const record = raw as Record<string, unknown>;
+          const profileId = record.profileId as string;
+          const requested = requestedIsolation;
+          return {
+            key: safeText(record.key, 64)
+              ? (record.key as string)
+              : createId("tsk"),
+            profileId,
+            title: safeText(record.title, 256)
+              ? (record.title as string)
+              : "Delegated task",
+            objective: record.objective as string,
+            constraints: Array.isArray(record.constraints)
+              ? (record.constraints as unknown[])
+              : [],
+            dependsOn: Array.isArray(record.dependsOn)
+              ? (record.dependsOn as unknown[])
+              : [],
+            isolation: resolveIsolation(profileId, requested),
+          };
+        });
         const taskIds = planned.map(() => createId("tsk"));
         try {
           validateWorkflow({
@@ -3002,7 +3030,7 @@ export class Broker {
                 (item): item is string => typeof item === "string",
               ),
               resultProjection: [],
-              isolationMode: "shared-readonly",
+              isolationMode: step.isolation,
             })),
           });
         } catch (error) {
@@ -3075,7 +3103,10 @@ export class Broker {
                   )
                   .filter(Boolean)
                   .map((candidate) => taskIds[planned.indexOf(candidate!)]),
-                project: inheritedProject,
+                project: {
+                  ...inheritedProject,
+                  isolation: step.isolation,
+                },
                 timeoutAt: wallDeadline,
               },
             });
@@ -3152,7 +3183,24 @@ export class Broker {
           objective: p.objective as string,
           dryRun: p.dryRun === true,
         });
-        const taskIds = plan.steps.map((step) => step.taskId);
+        const resolvedPlan = plan.steps.map((step) => ({
+          ...step,
+          isolationMode: resolveWorkflowIsolation(
+            step.profileId,
+            step.isolationMode,
+          ),
+          requestedIsolationMode: step.isolationMode,
+        }));
+        for (const step of plan.steps)
+          if (
+            step.isolationMode === "reuse-worktree" &&
+            step.dependsOn.length !== 1
+          )
+            throw new OrchestratorError(
+              "INVALID_REQUEST",
+              "reuse-worktree requires exactly one dependency.",
+            );
+        const taskIds = resolvedPlan.map((step) => step.taskId);
         const creationNow = this.#now();
         const createdAt = new Date(creationNow).toISOString();
         const queueLimit = new DeterministicScheduler().limits.maxQueuedTasks;
@@ -3161,7 +3209,7 @@ export class Broker {
           Object.values(this.store.state.tasks).filter(
             (task) => task.state === "queued",
           ).length +
-            plan.steps.length >
+            resolvedPlan.length >
             queueLimit
         )
           throw new OrchestratorError(
@@ -3181,7 +3229,7 @@ export class Broker {
             },
           });
         if (p.dryRun !== true)
-          for (const step of plan.steps) {
+          for (const step of resolvedPlan) {
             await this.store.append({
               type: "task.created_m3",
               actor: { principalId: principal.id, kind: principal.kind },
@@ -3203,11 +3251,12 @@ export class Broker {
                         cwd: this.store.state.agents[parentAgentId]!.cwd,
                         workspaceId:
                           this.store.state.agents[parentAgentId]!.workspaceId,
-                        isolation: "shared-readonly",
+                        isolation: step.isolationMode,
                       },
                     }
                   : {}),
                 profileId: step.profileId,
+                isolationMode: step.requestedIsolationMode,
                 dependencies: step.dependsOn
                   .map((key) => plan.steps.find((x) => x.key === key)?.taskId)
                   .filter((x): x is string => Boolean(x)),
@@ -3228,7 +3277,7 @@ export class Broker {
               ? "created"
               : (this.store.state.workflows[plan.workflowId]?.state ??
                 "running"),
-          tasks: plan.steps.map((s) => ({
+          tasks: resolvedPlan.map((s) => ({
             key: s.key,
             taskId: s.taskId,
             state: "queued",
@@ -4332,6 +4381,74 @@ export class Broker {
   ): Promise<void> {
     const workflow = this.store.state.workflows[workflowId];
     if (!workflow) return;
+    for (const taskId of workflow.taskIds) {
+      const candidate = this.store.state.tasks[taskId];
+      if (candidate?.isolationMode !== "reuse-worktree") continue;
+      const dependencies = candidate.dependencies ?? [];
+      if (dependencies.length !== 1)
+        throw new OrchestratorError(
+          "INVALID_REQUEST",
+          "reuse-worktree requires exactly one dependency.",
+        );
+      const predecessor = this.store.state.tasks[dependencies[0]!];
+      const predecessorRun = predecessor?.currentRunId
+        ? this.store.state.runs[predecessor.currentRunId]
+        : undefined;
+      const resource = predecessorRun?.agentId
+        ? this.store.state.herdrResources?.[predecessorRun.agentId]
+        : undefined;
+      if (candidate.state === "queued" && predecessor?.state === "succeeded") {
+        const existingWorktreeId = candidate.project?.worktreeId;
+        const existingWorktreePath = candidate.project?.cwd;
+        if (
+          (existingWorktreeId !== undefined &&
+            !safeText(existingWorktreePath)) ||
+          !resource ||
+          !predecessorRun ||
+          resource.ownerId !== predecessorRun.agentId ||
+          !isRegisteredHerdrResourceState(resource.state) ||
+          !safeText(resource.worktreeId) ||
+          !safeText(resource.worktreePath) ||
+          !candidate.project ||
+          !safeText(candidate.project.workspaceId)
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "The dependency worktree is missing or not owned by its succeeded task.",
+          );
+        if (
+          existingWorktreeId !== undefined &&
+          (existingWorktreeId !== resource.worktreeId ||
+            existingWorktreePath !== resource.worktreePath ||
+            candidate.project.isolation !==
+              resolveWorkflowIsolation(
+                candidate.profileId ?? "scout",
+                candidate.isolationMode,
+              ))
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "The retained worktree binding does not match its predecessor.",
+          );
+        if (existingWorktreeId === undefined) {
+          const project = {
+            cwd: resource.worktreePath,
+            workspaceId: candidate.project.workspaceId,
+            worktreeId: resource.worktreeId,
+            isolation: resolveWorkflowIsolation(
+              candidate.profileId ?? "scout",
+              candidate.isolationMode,
+            ),
+          };
+          await this.store.append({
+            type: "task.project_bound",
+            actor,
+            entityRefs: { taskId },
+            payload: { taskId, project },
+          });
+        }
+      }
+    }
     const tasks = workflow.taskIds
       .map((id) => this.store.state.tasks[id])
       .filter((task): task is NonNullable<typeof task> => Boolean(task));
@@ -4347,7 +4464,10 @@ export class Broker {
         objective: task.objective,
         constraints: task.constraints ?? [],
         dependsOn: task.dependencies ?? [],
-        isolationMode: "shared-readonly" as const,
+        isolationMode: resolveWorkflowIsolation(
+          task.profileId ?? "scout",
+          task.isolationMode ?? task.project?.isolation,
+        ),
       })),
       estimatedAgentCount: tasks.length,
       limits: {
@@ -4478,6 +4598,27 @@ export class Broker {
         !scheduler.canProvision()
       )
         continue;
+      const project = task.project;
+      if (
+        !project ||
+        !safeText(project.cwd) ||
+        !safeText(project.workspaceId) ||
+        (project.isolation !== "worktree" &&
+          project.isolation !== "shared-readonly")
+      )
+        throw new OrchestratorError(
+          "INVALID_REQUEST",
+          "The canonical task isolation is invalid.",
+        );
+      const isolation = resolveIsolation(
+        task.profileId ?? "scout",
+        project.isolation,
+      );
+      if (isolation !== project.isolation)
+        throw new OrchestratorError(
+          "PERMISSION_DENIED",
+          "The canonical task isolation violates its profile policy.",
+        );
       scheduler.setProvisioning(1);
       const agentId = createId("agt"),
         runId = createId("run"),
@@ -4516,12 +4657,6 @@ export class Broker {
         payload: { to: "provisioning" },
       });
       try {
-        const project = task.project ?? {};
-        if (!safeText(project.cwd) || !safeText(project.workspaceId))
-          throw new OrchestratorError(
-            "INVALID_REQUEST",
-            "A trusted project context is required.",
-          );
         const provisioned = await this.#herdr.provision({
           agentId,
           parentAgentId: task.parentAgentId ?? "",
@@ -4529,9 +4664,14 @@ export class Broker {
           workspaceId: project.workspaceId,
           cwd: project.cwd,
           profileId: task.profileId ?? "scout",
-          isolation:
-            project.isolation === "worktree" ? "worktree" : "shared-readonly",
+          isolation,
           prompt: task.objective,
+          ...(task.isolationMode === "reuse-worktree"
+            ? {
+                reuseWorktreeId: project.worktreeId as string,
+                reuseWorktreePath: project.cwd,
+              }
+            : {}),
         });
         await this.store.append({
           type: "agent.state_changed",

@@ -163,7 +163,7 @@ export class HerdrService {
     return await this.withAgentLock(input.agentId, async () => {
       await this.#preflight?.();
       this.#cli.requireMutationCapabilities(
-        input.isolation === "worktree"
+        input.isolation === "worktree" && !input.reuseWorktreeId
           ? [
               "tab.create",
               "agent.start",
@@ -175,7 +175,9 @@ export class HerdrService {
           : ["tab.create", "agent.start", "tab.close", "pane.close"],
       );
       const beforeGit =
-        input.isolation === "worktree" && this.#gitEvidence
+        input.isolation === "worktree" &&
+        !input.reuseWorktreeId &&
+        this.#gitEvidence
           ? await this.#gitEvidence(input.cwd, input.projectBase)
           : undefined;
       if (beforeGit?.dirty) throw new Error("HERDR_DIRTY_PARENT");

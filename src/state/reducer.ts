@@ -7,6 +7,7 @@ import type {
   Run,
   Workflow,
   ErrorSummary,
+  Task,
 } from "./types.js";
 const timeoutReason = (value: unknown): value is ErrorSummary => {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -49,6 +50,7 @@ function derivedDeadline(createdAt: unknown): string | undefined {
 }
 const known = new Set([
   "task.created",
+  "task.project_bound",
   "task.state_changed",
   "audit.action",
   "audit.authorization_denied",
@@ -302,6 +304,20 @@ export function reduce(
           ...(typeof p.profileId === "string"
             ? { profileId: p.profileId }
             : {}),
+          ...(typeof p.isolationMode === "string" &&
+          [
+            "profile-default",
+            "shared-readonly",
+            "worktree",
+            "shared-explicit",
+            "reuse-worktree",
+          ].includes(p.isolationMode)
+            ? {
+                isolationMode: p.isolationMode as NonNullable<
+                  Task["isolationMode"]
+                >,
+              }
+            : {}),
           ...(Array.isArray(p.dependencies)
             ? {
                 dependencies: p.dependencies.filter(
@@ -323,6 +339,25 @@ export function reduce(
             : {}),
           runIds: [],
         },
+      };
+      break;
+    }
+    case "task.project_bound": {
+      const id = String(p.taskId);
+      const task = next.tasks[id];
+      if (
+        !task ||
+        !p.project ||
+        typeof p.project !== "object" ||
+        Array.isArray(p.project)
+      )
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Task project binding is invalid.",
+        );
+      next.tasks = {
+        ...next.tasks,
+        [id]: { ...task, project: p.project as Record<string, unknown> },
       };
       break;
     }
