@@ -4,7 +4,8 @@ import {
   type Server,
   type Socket,
 } from "node:net";
-import { chmod, lstat, rename, unlink } from "node:fs/promises";
+import { lstatSync, renameSync, unlinkSync } from "node:fs";
+import { chmod, lstat } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import {
@@ -276,6 +277,59 @@ async function listening(path: string): Promise<boolean> {
     });
   });
 }
+function sameSocketIdentity(
+  stat: { dev: number; ino: number; uid: number },
+  expected: SocketIdentity,
+): boolean {
+  return (
+    stat.dev === expected.dev &&
+    stat.ino === expected.ino &&
+    stat.uid === expected.uid
+  );
+}
+function exactSocketSync(path: string, expected: SocketIdentity): void {
+  const stat = lstatSync(path);
+  if (
+    !stat.isSocket() ||
+    stat.nlink !== 1 ||
+    (stat.mode & 0o077) !== 0 ||
+    stat.uid !== process.getuid?.() ||
+    !sameSocketIdentity(stat, expected)
+  )
+    throw new Error("Broker socket identity changed during quarantine.");
+}
+function absentSocketPathSync(path: string): void {
+  try {
+    lstatSync(path);
+    throw new Error(`Replacement socket was preserved at ${path}.`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+function restoreSocketSync(
+  original: string,
+  quarantine: string,
+  expected: SocketIdentity,
+): void {
+  try {
+    exactSocketSync(quarantine, expected);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  absentSocketPathSync(original);
+  renameSync(quarantine, original);
+  exactSocketSync(original, expected);
+}
+export function finalizeStaleSocketRemovalSync(
+  original: string,
+  quarantine: string,
+  expected: SocketIdentity,
+): void {
+  exactSocketSync(quarantine, expected);
+  absentSocketPathSync(original);
+  unlinkSync(quarantine);
+}
 export async function safeStaleSocket(
   path: string,
   expected?: SocketIdentity,
@@ -291,87 +345,85 @@ export async function safeStaleSocket(
     throw new Error("Refusing to remove non-socket broker path.");
   if (
     observed.nlink !== 1 ||
-    (process.getuid?.() !== undefined && observed.uid !== process.getuid()) ||
+    observed.uid !== process.getuid?.() ||
     (observed.mode & 0o077) !== 0
   )
     throw new Error("Broker socket ownership or mode is unsafe.");
+  const identity = { dev: observed.dev, ino: observed.ino, uid: observed.uid };
+  if (expected && !sameSocketIdentity(identity, expected))
+    throw new Error("Broker socket identity changed before quarantine.");
   if (await listening(path)) throw new Error("Broker socket is already live.");
 
   const quarantine = socketQuarantine(path, "stale");
-  await rename(path, quarantine);
-  const restore = async (): Promise<void> => {
-    try {
-      await lstat(path);
-      throw new Error(
-        `Broker socket was preserved at ${quarantine}; its path was replaced.`,
+  exactSocketSync(path, identity);
+  renameSync(path, quarantine);
+  const failures: unknown[] = [];
+  try {
+    const quarantined = await lstat(quarantine);
+    if (!sameSocketIdentity(quarantined, identity))
+      throw new Error("Broker socket identity changed during quarantine.");
+    if (await listening(quarantine))
+      throw new Error("Broker socket became live during quarantine.");
+    finalizeStaleSocketRemovalSync(path, quarantine, identity);
+    return;
+  } catch (error) {
+    failures.push(error);
+  }
+  try {
+    restoreSocketSync(path, quarantine, identity);
+  } catch (error) {
+    failures.push(error);
+  }
+  throw failures.length === 1
+    ? failures[0]
+    : new AggregateError(
+        failures,
+        "Broker socket identity cleanup and restoration failed.",
       );
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-    await rename(quarantine, path);
-  };
-
-  const quarantined = await lstat(quarantine);
-  const sameObserved =
-    quarantined.isSocket() &&
-    quarantined.nlink === 1 &&
-    (quarantined.mode & 0o077) === 0 &&
-    quarantined.dev === observed.dev &&
-    quarantined.ino === observed.ino &&
-    quarantined.uid === observed.uid;
-  const sameExpected =
-    !expected ||
-    (expected.dev === quarantined.dev &&
-      expected.ino === quarantined.ino &&
-      expected.uid === quarantined.uid);
-  if (!sameObserved || !sameExpected) {
-    await restore();
-    throw new Error("Broker socket identity changed during quarantine.");
-  }
-  if (await listening(quarantine)) {
-    await restore();
-    throw new Error("Broker socket became live during quarantine.");
-  }
-  await unlink(quarantine);
 }
 interface CloseQuarantine {
   path: string;
   owned: boolean;
+  identity: SocketIdentity;
+}
+function exactPathIdentitySync(path: string, expected: SocketIdentity): void {
+  const stat = lstatSync(path);
+  if (!sameSocketIdentity(stat, expected))
+    throw new Error("Replacement socket path identity changed.");
 }
 async function quarantineForClose(
   path: string,
   expected: SocketIdentity,
 ): Promise<CloseQuarantine | undefined> {
   const quarantine = socketQuarantine(path, "close");
+  let current;
   try {
-    await rename(path, quarantine);
+    current = lstatSync(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw error;
   }
-  const stat = await lstat(quarantine);
-  return {
-    path: quarantine,
-    owned:
-      stat.isSocket() &&
-      stat.dev === expected.dev &&
-      stat.ino === expected.ino &&
-      stat.uid === expected.uid,
-  };
+  const identity = { dev: current.dev, ino: current.ino, uid: current.uid };
+  const owned =
+    current.isSocket() &&
+    current.nlink === 1 &&
+    (current.mode & 0o077) === 0 &&
+    current.uid === process.getuid?.() &&
+    sameSocketIdentity(identity, expected);
+  renameSync(path, quarantine);
+  exactPathIdentitySync(quarantine, identity);
+  absentSocketPathSync(path);
+  return { path: quarantine, owned, identity };
 }
-async function restoreReplacement(
+function restoreReplacement(
   original: string,
   quarantine: string,
-): Promise<void> {
-  try {
-    await lstat(original);
-    throw new Error(
-      `Replacement socket was preserved at ${quarantine}; the original path is occupied.`,
-    );
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  await rename(quarantine, original);
+  expected: SocketIdentity,
+): void {
+  exactPathIdentitySync(quarantine, expected);
+  absentSocketPathSync(original);
+  renameSync(quarantine, original);
+  exactPathIdentitySync(original, expected);
 }
 export function sessionKeyMatches(
   expectedSessionKey: string,
@@ -686,15 +738,34 @@ export class Broker {
       if (quarantined?.owned) await safeStaleSocket(quarantined.path, identity);
       else if (quarantined) {
         const replacement = quarantined.path;
-        await restoreReplacement(this.paths.socket, replacement);
+        restoreReplacement(
+          this.paths.socket,
+          replacement,
+          quarantined.identity,
+        );
         quarantined = undefined;
         throw new Error("Broker socket identity changed before shutdown.");
       }
     } catch (error) {
       failures.push(error);
+      if (this.#server)
+        try {
+          await new Promise<void>((resolve, reject) =>
+            this.#server!.close((closeError) =>
+              closeError ? reject(closeError) : resolve(),
+            ),
+          );
+        } catch (closeError) {
+          failures.push(closeError);
+        }
+      this.#server = undefined;
       if (quarantined && !quarantined.owned)
         try {
-          await restoreReplacement(this.paths.socket, quarantined.path);
+          restoreReplacement(
+            this.paths.socket,
+            quarantined.path,
+            quarantined.identity,
+          );
         } catch (restoreError) {
           failures.push(restoreError);
         }
