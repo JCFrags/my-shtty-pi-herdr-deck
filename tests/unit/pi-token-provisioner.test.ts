@@ -69,6 +69,48 @@ test("provisioner inserts the created owner-only token path into the tab environ
   );
 });
 
+test("official worktree creation returns the child workspace identity", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-official-worktree-"));
+  let tabWorkspace: string | undefined;
+  const cli = {
+    requireMutationCapabilities: () => undefined,
+    createWorktree: async () => ({
+      worktree: { path: "/managed/child" },
+      workspace: { workspace_id: "w-child" },
+      tab: { tab_id: "w-child:t1" },
+    }),
+    createTab: async (input: { workspaceId: string }) => {
+      tabWorkspace = input.workspaceId;
+      return {
+        tab: { tab_id: "w-child:t1" },
+        root_pane: { pane_id: "w-child:p1" },
+      };
+    },
+    startPi: async () => ({ pane_id: "w-child:p1" }),
+    snapshot: async () => ({ panes: [], tabs: [] }),
+  };
+  const result = await new HerdrProvisioner(
+    cli as never,
+    join(root, "private"),
+    () => [],
+    true,
+  ).provision({
+    agentId: "agt",
+    parentAgentId: "parent",
+    role: "implementer",
+    workspaceId: "w-parent",
+    cwd: root,
+    profileId: "implementer",
+    isolation: "worktree",
+    projectBase: "HEAD",
+    prompt: "prompt",
+  });
+  assert.equal(tabWorkspace, "w-child");
+  assert.equal(result.workspaceId, "w-child");
+  assert.equal(result.worktreePath, "/managed/child");
+  assert.equal(result.worktreeId, undefined);
+});
+
 test("provisioner always rejects caller broker and session overrides", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-token-override-"));
   t.after(() => rm(root, { recursive: true, force: true }));

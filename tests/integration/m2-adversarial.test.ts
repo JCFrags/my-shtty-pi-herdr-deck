@@ -30,6 +30,31 @@ const snapshot = (agentId = "agent-1"): HerdrSnapshot => ({
   worktrees: [],
 });
 
+function managedWorktreeSnapshot(): HerdrSnapshot {
+  const current = snapshot();
+  current.panes[0]!.workspaceId = "workspace-child";
+  current.panes[0]!.tabId = "tab-1";
+  current.panes[0]!.cwd = "/fake/worktree";
+  current.panes[0]!.occupant!.workspaceId = "workspace-child";
+  current.panes[0]!.occupant!.tabId = "tab-1";
+  current.tabs[0]!.workspaceId = "workspace-child";
+  current.workspaces = [
+    {
+      id: "workspace-child",
+      cwd: "/fake/worktree",
+      worktree: {
+        repoKey: "/repo/.git",
+        repoName: "repo",
+        repoRoot: "/repo",
+        checkoutPath: "/fake/worktree",
+        isLinkedWorktree: true,
+      },
+      tabs: [],
+    },
+  ];
+  return current;
+}
+
 function baseCli(current = snapshot()): any {
   return {
     requireMutationCapabilities: () => undefined,
@@ -129,26 +154,23 @@ test("M2 registration rechecks the occupant before committing registration", asy
   assert.equal((await readdir(prompts)).length, 2);
 });
 
-test("M2 close retains a replacement worktree after pane close", async () => {
-  const root = await mkdtemp(join(tmpdir(), "m2-close-toctou-"));
+test("M2 close removes the exact clean managed worktree workspace", async () => {
+  const root = await mkdtemp(join(tmpdir(), "m2-close-managed-worktree-"));
   let snapshots = 0;
   let removals = 0;
+  let removedWorkspace: string | undefined;
   const cli = {
     ...baseCli(),
     snapshot: async () => {
       snapshots++;
-      return {
-        ...snapshot(),
-        worktrees: [
-          {
-            id: "worktree-1",
-            path: snapshots < 3 ? "/fake/worktree" : "/replacement",
-          },
-        ],
-      };
+      return managedWorktreeSnapshot();
     },
-    closePane: async () => undefined,
-    removeWorktree: async () => void removals++,
+    closePane: async () =>
+      assert.fail("worktree close must use worktree remove"),
+    removeWorktree: async (workspaceId: string) => {
+      removals++;
+      removedWorkspace = workspaceId;
+    },
   } as never;
   const store = new EventStore(join(root, "events.ndjson"));
   await store.open();
@@ -184,17 +206,17 @@ test("M2 close retains a replacement worktree after pane close", async () => {
       agentId: "agent-1",
       state: "registered",
       paneId: "pane-1",
-      worktreeId: "worktree-1",
       worktreePath: "/fake/worktree",
       generation: 1,
     },
   });
   await service.close({ paneId: "pane-1", generation: 1 });
   assert.equal(snapshots, 2);
-  assert.equal(removals, 0);
+  assert.equal(removals, 1);
+  assert.equal(removedWorkspace, "workspace-child");
   assert.equal(
     store.state.herdrResources?.["agent-1"]?.cleanupOutcome,
-    "retained_worktree",
+    "worktree_removed",
   );
 });
 
@@ -221,16 +243,13 @@ test("M2 subscription stops after its finite reconnect budget", async () => {
   assert.equal(attempts, 3);
 });
 
-test("M2 production close retains a clean worktree and refuses dirty evidence", async () => {
+test("M2 production close removes a clean worktree and refuses dirty evidence", async () => {
   for (const dirty of [false, true]) {
     const root = await mkdtemp(join(tmpdir(), "m2-git-gateway-"));
     let paneCloses = 0;
     let removals = 0;
     const cli = {
-      ...baseCli({
-        ...snapshot(),
-        worktrees: [{ id: "worktree-1", path: "/fake/worktree" }],
-      }),
+      ...baseCli(managedWorktreeSnapshot()),
       closePane: async () => void paneCloses++,
       removeWorktree: async () => void removals++,
     } as never;
@@ -268,7 +287,6 @@ test("M2 production close retains a clean worktree and refuses dirty evidence", 
         agentId: "agent-1",
         state: "registered",
         paneId: "pane-1",
-        worktreeId: "worktree-1",
         worktreePath: "/fake/worktree",
         generation: 1,
       },
@@ -279,8 +297,8 @@ test("M2 production close retains a clean worktree and refuses dirty evidence", 
         /DIRTY_WORKTREE/,
       );
     else await service.close({ paneId: "pane-1", generation: 1 });
-    assert.equal(paneCloses, dirty ? 0 : 1);
-    assert.equal(removals, 0);
+    assert.equal(paneCloses, 0);
+    assert.equal(removals, dirty ? 0 : 1);
   }
 });
 

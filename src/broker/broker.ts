@@ -2488,7 +2488,6 @@ export class Broker {
             paneId: resource.paneId,
             ...(resource.terminalId ? { terminalId: resource.terminalId } : {}),
             ...(resource.sessionId ? { sessionId: resource.sessionId } : {}),
-            ...(resource.generation ? { generation: resource.generation } : {}),
           } as never;
           if (request.method === "agent.stop") await this.#herdr.stop(guard);
           else await this.#herdr.close(guard);
