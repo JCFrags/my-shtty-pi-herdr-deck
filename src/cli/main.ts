@@ -1,10 +1,6 @@
 import { doctor } from "../broker/doctor.js";
 import { Broker } from "../broker/broker.js";
-import {
-  ensurePrivateDirectory,
-  resolveHerdrPaths,
-  resolvePaths,
-} from "../shared/paths.js";
+import { ensurePrivateDirectory, resolveHerdrPaths } from "../shared/paths.js";
 import { brokerStatus, ensureBroker, stopBroker } from "../broker/startup.js";
 import { brokerRequest } from "./client.js";
 import { readPrivateRegular } from "../shared/private-fs.js";
@@ -103,13 +99,18 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     console.log(JSON.stringify(await brokerStatus()));
     return;
   }
-  const paths =
+  const offlineOperation =
     command === "ops" &&
-    (subcommand === "plan" || subcommand === "verify" || subcommand === "apply")
-      ? resolvePaths()
-      : (await resolveHerdrPaths()).paths;
-  await ensurePrivateDirectory(paths.root);
-  await ensurePrivateDirectory(paths.runtime);
+    (subcommand === "plan" ||
+      subcommand === "verify" ||
+      subcommand === "apply");
+  const paths = offlineOperation
+    ? undefined
+    : (await resolveHerdrPaths()).paths;
+  if (paths) {
+    await ensurePrivateDirectory(paths.root);
+    await ensurePrivateDirectory(paths.runtime);
+  }
   if (command === "config" && subcommand === "validate") {
     const file = argv[2] ?? process.env.PI_HERDR_ORCH_CONFIG_PATH;
     if (!file) throw new Error("Usage: config validate PATH.");
@@ -132,6 +133,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     (subcommand === "plan" || subcommand === "policy-plan")
   ) {
     if (subcommand === "plan") {
+      if (!paths) throw new Error("Session path resolution did not complete.");
       console.log(JSON.stringify(await planRetention(paths.root)));
       return;
     }
@@ -223,6 +225,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     if (!verification.ok) process.exitCode = 1;
     return;
   }
+  if (!paths) throw new Error("Offline operation dispatch did not complete.");
   if (command === "export") {
     const outputFlag = argv.indexOf("--output");
     const output = outputFlag >= 0 ? argv[outputFlag + 1] : undefined;
