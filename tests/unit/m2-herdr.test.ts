@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { projectCapabilities } from "../../src/herdr/capabilities.js";
 import { HerdrCli } from "../../src/herdr/cli.js";
+import { schemaSupportsMethod } from "../../src/herdr/api.js";
 import { herdrName, branchSlug, tokenDigest } from "../../src/herdr/names.js";
 import { normalizeSnapshot } from "../../src/herdr/normalizers.js";
 import { parsePorcelainV2 } from "../../src/git/porcelain.js";
@@ -86,6 +87,19 @@ test("M2 projects methods from the official Herdr 0.8 schema envelope", () => {
   });
   assert.equal(caps.supports("session.snapshot"), true);
   assert.equal(caps.supports("workspace.list"), true);
+  assert.equal(
+    schemaSupportsMethod(
+      {
+        schemas: {
+          request: {
+            oneOf: [{ properties: { method: { const: "session.snapshot" } } }],
+          },
+        },
+      },
+      "session.snapshot",
+    ),
+    true,
+  );
 });
 test("M2 names are bounded, deterministic, and collision safe", () => {
   const first = herdrName("Code Review", "agt-test", []);

@@ -72,6 +72,9 @@ export function schemaSupportsMethod(schema: unknown, method: string): boolean {
       value.methods.every((item) => typeof item === "string")
     )
       return value.methods.includes(method);
+    if (isRecord(value.schemas))
+      for (const schema of Object.values(value.schemas))
+        if (visit(schema, depth + 1)) return true;
     const methodProperty = isRecord(value.properties)
       ? value.properties.method
       : undefined;

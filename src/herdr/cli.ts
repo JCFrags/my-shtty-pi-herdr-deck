@@ -2,6 +2,18 @@ import type { HerdrCapabilities } from "./capabilities.js";
 import { HerdrProcessRunner } from "./runner.js";
 import { normalizeSnapshot } from "./normalizers.js";
 import type { HerdrSnapshot } from "./types.js";
+
+function commandResult(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const response = value as Record<string, unknown>;
+  return typeof response.id === "string" &&
+    response.result &&
+    typeof response.result === "object" &&
+    !Array.isArray(response.result)
+    ? response.result
+    : value;
+}
+
 export class HerdrCli {
   constructor(
     readonly runner: HerdrProcessRunner,
@@ -9,9 +21,7 @@ export class HerdrCli {
   ) {}
   async snapshot(): Promise<HerdrSnapshot> {
     this.capabilities.require(["session.snapshot"]);
-    return normalizeSnapshot(
-      await this.runner.json(["session", "snapshot", "--json"]),
-    );
+    return normalizeSnapshot(await this.runner.json(["api", "snapshot"]));
   }
   requireMutationCapabilities(methods: readonly string[]): void {
     this.capabilities.require(methods);
@@ -23,19 +33,23 @@ export class HerdrCli {
     env: Record<string, string>;
   }) {
     this.capabilities.require(["tab.create"]);
-    return await this.runner.json([
-      "tab",
-      "create",
-      "--workspace",
-      input.workspaceId,
-      "--cwd",
-      input.cwd,
-      "--label",
-      input.label,
-      ...Object.entries(input.env).flatMap(([k, v]) => ["--env", `${k}=${v}`]),
-      "--no-focus",
-      "--json",
-    ]);
+    return commandResult(
+      await this.runner.json([
+        "tab",
+        "create",
+        "--workspace",
+        input.workspaceId,
+        "--cwd",
+        input.cwd,
+        "--label",
+        input.label,
+        ...Object.entries(input.env).flatMap(([k, v]) => [
+          "--env",
+          `${k}=${v}`,
+        ]),
+        "--no-focus",
+      ]),
+    );
   }
   async closeTab(id: string) {
     this.capabilities.require(["tab.close"]);
@@ -64,19 +78,21 @@ export class HerdrCli {
     timeoutMs?: number;
   }) {
     this.capabilities.require(["agent.start"]);
-    return await this.runner.json([
-      "agent",
-      "start",
-      input.name,
-      "--kind",
-      "pi",
-      "--pane",
-      input.paneId,
-      "--timeout",
-      String(input.timeoutMs ?? 30_000),
-      "--",
-      ...input.args,
-    ]);
+    return commandResult(
+      await this.runner.json([
+        "agent",
+        "start",
+        input.name,
+        "--kind",
+        "pi",
+        "--pane",
+        input.paneId,
+        "--timeout",
+        String(input.timeoutMs ?? 30_000),
+        "--",
+        ...input.args,
+      ]),
+    );
   }
   async createWorktree(input: {
     workspaceId: string;
@@ -85,23 +101,24 @@ export class HerdrCli {
     label: string;
   }) {
     this.capabilities.require(["worktree.create"]);
-    return await this.runner.json([
-      "worktree",
-      "create",
-      "--workspace",
-      input.workspaceId,
-      "--branch",
-      input.branch,
-      "--base",
-      input.base,
-      "--label",
-      input.label,
-      "--no-focus",
-      "--json",
-    ]);
+    return commandResult(
+      await this.runner.json([
+        "worktree",
+        "create",
+        "--workspace",
+        input.workspaceId,
+        "--branch",
+        input.branch,
+        "--base",
+        input.base,
+        "--label",
+        input.label,
+        "--no-focus",
+      ]),
+    );
   }
-  async removeWorktree(id: string) {
+  async removeWorktree(workspaceId: string) {
     this.capabilities.require(["worktree.remove"]);
-    await this.runner.run(["worktree", "remove", id]);
+    await this.runner.run(["worktree", "remove", "--workspace", workspaceId]);
   }
 }

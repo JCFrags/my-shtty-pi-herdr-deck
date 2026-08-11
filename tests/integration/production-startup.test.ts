@@ -45,7 +45,7 @@ state.calls.push(args);
 const command = args.slice(0, 2).join(" ");
 const option = (name) => args[args.indexOf(name) + 1];
 if (command === "api schema") console.log(JSON.stringify(state.schema));
-else if (command === "session snapshot") console.log(JSON.stringify(state.snapshot));
+else if (command === "api snapshot") console.log(JSON.stringify(state.snapshot));
 else if (command === "tab create") {
   const index = state.provisions.length + 1;
   const paneId = "pane-managed-" + index;
@@ -63,7 +63,7 @@ else if (command === "tab create") {
   state.provisions.push({ env, agentId, paneId, terminalId, sessionId, tabArgs: args });
   state.snapshot.tabs.push({ id: tabId, workspaceId: option("--workspace"), cwd: option("--cwd") });
   state.snapshot.panes.push({ id: paneId, terminalId, workspaceId: option("--workspace"), tabId, cwd: option("--cwd") });
-  console.log(JSON.stringify({ tab_id: tabId, root_pane_id: paneId }));
+  console.log(JSON.stringify({ id: "cli:tab:create", result: { type: "tab_created", tab: { tab_id: tabId }, root_pane: { pane_id: paneId } } }));
 } else if (command === "agent start") {
   const paneId = option("--pane");
   const provision = state.provisions.find((item) => item.paneId === paneId);
@@ -85,7 +85,7 @@ else if (command === "tab create") {
       value: provision.sessionId,
     },
   });
-  console.log(JSON.stringify({ pane_id: paneId }));
+  console.log(JSON.stringify({ id: "cli:agent:start", result: { type: "agent_started", agent: { pane_id: paneId } } }));
 } else { console.error("unsupported fake Herdr command"); process.exitCode = 31; }
 writeFileSync(path, JSON.stringify(state));
 `;
@@ -687,9 +687,7 @@ test("built separate processes start, reuse, adopt, expose tools, and stop the p
     calls: string[][];
   };
   assert.ok(state.calls.some((argv) => argv.join(" ") === "api schema --json"));
-  assert.ok(
-    state.calls.some((argv) => argv.join(" ") === "session snapshot --json"),
-  );
+  assert.ok(state.calls.some((argv) => argv.join(" ") === "api snapshot"));
 });
 
 test("held live broker readiness failure proves exact exit and preserves a replacement path", async (t) => {
@@ -1108,7 +1106,7 @@ const command = process.argv.slice(2).join(" ");
 appendFileSync(${JSON.stringify(calls)}, command + "\\n");
 if (command === "api schema --json")
   process.stdout.write(readFileSync(${JSON.stringify(schemaPath)}, "utf8"));
-else if (command === "session snapshot --json")
+else if (command === "api snapshot")
   process.stdout.write(JSON.stringify({ result: { snapshot: { version: "0.8.0", protocol: 19, workspaces: [], tabs: [], panes: [], layouts: [], agents: [] } } }));
 else {
   process.stderr.write("unexpected command");
