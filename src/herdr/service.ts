@@ -13,7 +13,7 @@ import { focus, interrupt, type OccupantGuard } from "./controls.js";
 import { HerdrProcessRunner } from "./runner.js";
 import { projectCapabilities } from "./capabilities.js";
 import { join } from "node:path";
-import type { ResolvedPaths } from "../shared/paths.js";
+import type { CanonicalResolvedPaths } from "../shared/paths.js";
 import { collectGitEvidence } from "../git/evidence.js";
 import type { GitEvidence } from "../git/porcelain.js";
 import { doctor } from "../broker/doctor.js";
@@ -69,7 +69,12 @@ export class HerdrService {
   get resources() {
     return this.#store.state.herdrResources ?? {};
   }
-  async verifyRoot(identity: { paneId: string; terminalId: string }): Promise<{
+  async verifyRoot(identity: {
+    paneId: string;
+    terminalId: string;
+    sessionId?: string;
+    generation?: number;
+  }): Promise<{
     paneId: string;
     terminalId: string;
     workspaceId?: string;
@@ -85,7 +90,12 @@ export class HerdrService {
     if (
       !pane ||
       !occupant ||
-      (occupant.terminalId ?? pane.terminalId) !== identity.terminalId
+      occupant.kind !== "pi" ||
+      (occupant.terminalId ?? pane.terminalId) !== identity.terminalId ||
+      (identity.sessionId !== undefined &&
+        occupant.sessionId !== identity.sessionId) ||
+      (identity.generation !== undefined &&
+        occupant.generation !== identity.generation)
     )
       throw new Error("HERDR_IDENTITY_MISMATCH");
     const workspace = snapshot.workspaces.find(
@@ -596,6 +606,11 @@ export class HerdrService {
     }
     return results;
   }
+  shutdown(): void {
+    this.#watchAbort.abort();
+    for (const timer of this.#expiryTimers.values()) clearTimeout(timer);
+    this.#expiryTimers.clear();
+  }
   async startupReconcile(): Promise<Reconciliation[]> {
     const result = await this.reconcile();
     if (this.#watcher)
@@ -693,7 +708,7 @@ export async function runProductionPreflight(
 }
 export async function createProductionHerdrService(
   store: EventStore,
-  paths: ResolvedPaths,
+  paths: CanonicalResolvedPaths,
   binary = process.env.HERDR_BIN_PATH,
 ): Promise<HerdrService> {
   if (!binary)
@@ -703,10 +718,10 @@ export async function createProductionHerdrService(
   const capabilities = projectCapabilities(schema, binary);
   capabilities.require(Object.keys(capabilities.mandatory));
   const cli = new HerdrCli(runner, capabilities);
-  const socketPath = process.env.HERDR_SOCKET_PATH;
-  if (!socketPath)
+  const socketPath = paths.herdrSocket;
+  if (!socketPath.startsWith("/"))
     throw new Error("HERDR_UNAVAILABLE: socket is not configured.");
-  const adapterIdentity = process.env.PI_HERDR_ORCH_ADAPTER_ID;
+  const adapterIdentity = "pi-herdr-orchestrator";
   const expectedSchemaHash = capabilities.schemaHash;
   return new HerdrService({
     store,
@@ -717,6 +732,7 @@ export async function createProductionHerdrService(
       () => [],
       true,
       collectGitEvidence,
+      { socketPath: paths.socket, sessionKey: paths.sessionKey },
     ),
     gitEvidence: collectGitEvidence,
     preflight: async () =>

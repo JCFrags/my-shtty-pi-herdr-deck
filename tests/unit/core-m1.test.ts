@@ -76,7 +76,7 @@ class TestClient {
         type: "hello",
         id: "hello_1",
         client: { kind, name: "test", version: "0.1.0", capabilities: [] },
-        sessionKey: sessionKey(broker.paths.socket),
+        sessionKey: broker.paths.sessionKey,
         auth: { kind: "client_secret", secret: broker.secret },
       })}\n`,
     );
@@ -268,7 +268,7 @@ test("broker fails closed and audits managed Pi registration before M3", async (
           version: "0.1.0",
           capabilities: [],
         },
-        sessionKey: sessionKey(broker.paths.socket),
+        sessionKey: broker.paths.sessionKey,
         auth: {
           kind: "agent_token",
           token: "not-accepted-before-m3",
@@ -299,9 +299,13 @@ test("broker fails closed and audits managed Pi registration before M3", async (
   }
 });
 
-test("broker rejects a mismatched session key at the authenticated boundary", async () => {
+test("broker rejects a broker-socket hash when an explicit Herdr session key exists", async () => {
   const root = await mkdtemp(join(tmpdir(), "orch-session-"));
-  const broker = new Broker(paths(root));
+  const broker = new Broker({
+    ...paths(root),
+    sessionKey: "0123456789abcdef01234567",
+    herdrSocket: join(root, "canonical-herdr.sock"),
+  });
   await broker.start();
   const socket = createConnection(broker.paths.socket);
   const result = new Promise<string>((resolve, reject) => {
@@ -332,7 +336,7 @@ test("broker rejects a mismatched session key at the authenticated boundary", as
           version: "0.1.0",
           capabilities: [],
         },
-        sessionKey: "wrong",
+        sessionKey: sessionKey(broker.paths.socket),
         auth: { kind: "client_secret", secret: broker.secret },
       })}\n`,
     );

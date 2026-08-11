@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createConnection, type Socket } from "node:net";
 import { readPrivateRegular } from "../shared/private-fs.js";
-import { sessionKey } from "../shared/paths.js";
+import { sessionKey, siblingPath } from "../shared/paths.js";
 import { encodeFrame, NdjsonDecoder } from "../shared/protocol/codec.js";
 import type { DeckEvent } from "./types.js";
 import { DeckStore, snapshotFromBroker } from "./store.js";
@@ -11,6 +11,8 @@ export type BrokerStatus =
 export interface BrokerClientOptions {
   socketPath: string;
   secret?: string;
+  secretPath?: string;
+  sessionKey?: string;
   clientName?: string;
   reconnectDelaysMs?: readonly number[];
   socketFactory?: (path: string) => Socket;
@@ -30,6 +32,8 @@ export class BrokerClient {
   readonly store: DeckStore;
   readonly socketPath: string;
   #secret: string | undefined;
+  #secretPath: string;
+  #sessionKey: string;
   #name: string;
   #delays: readonly number[];
   #factory: (path: string) => Socket;
@@ -47,6 +51,9 @@ export class BrokerClient {
   constructor(options: BrokerClientOptions, store = new DeckStore()) {
     this.socketPath = options.socketPath;
     this.#secret = options.secret;
+    this.#secretPath =
+      options.secretPath ?? siblingPath(options.socketPath, "client.secret");
+    this.#sessionKey = options.sessionKey ?? sessionKey(options.socketPath);
     this.#name = options.clientName ?? "pi-herdr-deck";
     this.#delays = options.reconnectDelaysMs ?? delays;
     this.#factory = options.socketFactory ?? ((path) => createConnection(path));
@@ -94,7 +101,7 @@ export class BrokerClient {
   }
   async start(): Promise<void> {
     if (!this.#secret)
-      this.#secret = await readPrivateRegular(`${this.socketPath}.secret`);
+      this.#secret = (await readPrivateRegular(this.#secretPath)).trimEnd();
     this.#stopped = false;
     this.#attempt = 0;
     this.#connect();
@@ -164,7 +171,7 @@ export class BrokerClient {
           version: "0.1.0",
           capabilities: ["snapshot", "replay", "actions"],
         },
-        sessionKey: sessionKey(this.socketPath),
+        sessionKey: this.#sessionKey,
         auth: { kind: "client_secret", secret: this.#secret },
       }),
     );

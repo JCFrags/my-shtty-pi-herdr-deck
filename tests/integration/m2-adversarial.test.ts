@@ -336,7 +336,7 @@ test("M2 ambiguous compensation retains resources and records a typed outcome", 
   assert.equal(store.state.herdrResources?.["agent-1"]?.unknown, true);
 });
 
-test("M2 mandatory doctor fails closed for absent socket and wrong adapter", async () => {
+test("M2 mandatory doctor fails closed for absent socket and missing public capability", async () => {
   const report = await doctor({
     herdrBinary: "/bin/true",
     herdrSocket: "/tmp/m2-no-such-herdr.sock",
@@ -348,7 +348,7 @@ test("M2 mandatory doctor fails closed for absent socket and wrong adapter", asy
     false,
   );
   assert.equal(
-    report.checks.find((x) => x.name === "pi-integration")?.available,
+    report.checks.some((x) => x.name === "pi-integration"),
     false,
   );
   assert.equal(

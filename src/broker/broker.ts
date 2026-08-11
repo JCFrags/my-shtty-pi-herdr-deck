@@ -28,8 +28,15 @@ import {
 } from "./authentication.js";
 import { BrokerLock } from "./lock.js";
 import {
+  createBrokerProcessRecord,
+  removeBrokerProcessRecord,
+  type BrokerProcessRecord,
+  type BrokerProcessRecordIdentity,
+} from "./process-record.js";
+import {
   ensurePrivateDirectory,
   sessionKey,
+  type CanonicalResolvedPaths,
   type ResolvedPaths,
 } from "../shared/paths.js";
 import { OrchestratorError } from "../shared/errors.js";
@@ -367,10 +374,10 @@ async function restoreReplacement(
   await rename(quarantine, original);
 }
 export function sessionKeyMatches(
-  expectedSocket: string,
+  expectedSessionKey: string,
   received: string,
 ): boolean {
-  return sessionKey(expectedSocket) === received;
+  return expectedSessionKey === received;
 }
 export interface BrokerOptions {
   herdr?: HerdrService;
@@ -379,13 +386,13 @@ export interface BrokerOptions {
   clearTimeout?: (timer: NodeJS.Timeout) => void;
   herdrFactory?: (
     store: EventStore,
-    paths: ResolvedPaths,
+    paths: CanonicalResolvedPaths,
   ) => Promise<HerdrService>;
 }
 export class Broker {
   readonly store: EventStore;
   readonly snapshotStore: SnapshotStore;
-  readonly paths: ResolvedPaths;
+  readonly paths: CanonicalResolvedPaths;
   #server: Server | undefined;
   #socketIdentity: SocketIdentity | undefined;
   #mutationTail: Promise<void> = Promise.resolve();
@@ -396,6 +403,9 @@ export class Broker {
   #backgroundFailure: unknown;
   #advanceTail: Promise<void> = Promise.resolve();
   #lock: BrokerLock;
+  #processRecord:
+    | { record: BrokerProcessRecord; identity: BrokerProcessRecordIdentity }
+    | undefined;
   #secret: string;
   #clients = new Set<Client>();
   #questionTimers = new Map<string, NodeJS.Timeout>();
@@ -405,18 +415,28 @@ export class Broker {
   #clearTimeout: (timer: NodeJS.Timeout) => void;
   #herdr?: HerdrService;
   readonly #herdrFactory:
-    | ((store: EventStore, paths: ResolvedPaths) => Promise<HerdrService>)
+    | ((
+        store: EventStore,
+        paths: CanonicalResolvedPaths,
+      ) => Promise<HerdrService>)
     | undefined;
   constructor(paths: ResolvedPaths, options: BrokerOptions = {}) {
-    this.paths = paths;
-    this.#lock = new BrokerLock(paths.lock, paths.socket);
+    this.paths = {
+      ...paths,
+      startup: paths.startup ?? `${paths.lock}.startup`,
+      pid: paths.pid ?? `${paths.lock}.pid`,
+      log: paths.log ?? `${paths.socket}.log`,
+      herdrSocket: paths.herdrSocket ?? paths.socket,
+      sessionKey: paths.sessionKey ?? sessionKey(paths.socket),
+    };
+    this.#lock = new BrokerLock(this.paths.lock, this.paths.socket);
     this.#secret = "";
     this.#now = options.now ?? Date.now;
     this.#setTimeout =
       options.setTimeout ??
       ((callback, delayMs) => setTimeout(callback, delayMs));
     this.#clearTimeout = options.clearTimeout ?? clearTimeout;
-    this.store = new EventStore(paths.events);
+    this.store = new EventStore(this.paths.events);
     this.store.onAppend((event) => {
       if (
         event.entityRefs?.taskId &&
@@ -465,7 +485,7 @@ export class Broker {
         }
       }
     });
-    this.snapshotStore = new SnapshotStore(paths.snapshot);
+    this.snapshotStore = new SnapshotStore(this.paths.snapshot);
     if (options.herdr) {
       if (options.herdr.store !== this.store)
         throw new Error("Herdr service must use the broker-owned event store.");
@@ -490,6 +510,11 @@ export class Broker {
       await ensurePrivateDirectory(this.paths.root);
       await ensurePrivateDirectory(this.paths.runtime);
       await this.#lock.acquire();
+      this.#processRecord = await createBrokerProcessRecord(
+        this.paths.pid,
+        this.paths.sessionKey,
+        this.paths.socket,
+      );
       await safeStaleSocket(this.paths.socket);
       this.#secret = await this.#loadSecret();
       const snapshot = await this.snapshotStore
@@ -588,7 +613,16 @@ export class Broker {
     } catch (error) {
       try {
         if (this.#server) await this.stop();
-        else await this.#lock.release();
+        else {
+          if (this.#processRecord) {
+            await removeBrokerProcessRecord(
+              this.paths.pid,
+              this.#processRecord,
+            );
+            this.#processRecord = undefined;
+          }
+          await this.#lock.release();
+        }
       } catch (cleanupError) {
         throw new AggregateError(
           [error, cleanupError],
@@ -618,7 +652,14 @@ export class Broker {
     return this.#stopPromise;
   }
   async #stopUnlocked(): Promise<void> {
-    let failure: unknown;
+    const failures: unknown[] = [];
+    let backgroundRecorded = false;
+    const recordBackgroundFailure = (): void => {
+      if (!backgroundRecorded && this.#backgroundFailure !== undefined) {
+        failures.push(this.#backgroundFailure);
+        backgroundRecorded = true;
+      }
+    };
     let quarantined: CloseQuarantine | undefined;
     const identity = this.#socketIdentity;
     try {
@@ -633,9 +674,9 @@ export class Broker {
       for (const timer of this.#deadlineTimers.values())
         this.#clearTimeout(timer);
       this.#deadlineTimers.clear();
+      if (typeof this.#herdr?.shutdown === "function") this.#herdr.shutdown();
       await this.#drainAdmittedWork();
-      if (failure === undefined && this.#backgroundFailure !== undefined)
-        failure = this.#backgroundFailure;
+      recordBackgroundFailure();
       if (this.#server && identity)
         quarantined = await quarantineForClose(this.paths.socket, identity);
       await new Promise<void>(
@@ -650,13 +691,13 @@ export class Broker {
         throw new Error("Broker socket identity changed before shutdown.");
       }
     } catch (error) {
-      if (failure === undefined) failure = error;
+      failures.push(error);
       if (quarantined && !quarantined.owned)
-        await restoreReplacement(this.paths.socket, quarantined.path).catch(
-          (restoreError) => {
-            if (failure === undefined) failure = restoreError;
-          },
-        );
+        try {
+          await restoreReplacement(this.paths.socket, quarantined.path);
+        } catch (restoreError) {
+          failures.push(restoreError);
+        }
     } finally {
       for (const timer of this.#questionTimers.values())
         this.#clearTimeout(timer);
@@ -665,16 +706,26 @@ export class Broker {
         this.#clearTimeout(timer);
       this.#deadlineTimers.clear();
       try {
+        if (this.#processRecord)
+          await removeBrokerProcessRecord(this.paths.pid, this.#processRecord);
+      } catch (error) {
+        failures.push(error);
+      }
+      this.#processRecord = undefined;
+      try {
         await this.#lock.release();
       } catch (error) {
-        if (failure === undefined) failure = error;
+        failures.push(error);
       }
       this.#socketIdentity = undefined;
     }
-    if (failure === undefined && this.#backgroundFailure !== undefined)
-      failure = this.#backgroundFailure;
-    if (failure && (failure as NodeJS.ErrnoException).code !== "ENOENT")
-      throw failure;
+    recordBackgroundFailure();
+    const retained = failures.filter(
+      (failure) => (failure as NodeJS.ErrnoException).code !== "ENOENT",
+    );
+    if (retained.length === 1) throw retained[0];
+    if (retained.length > 1)
+      throw new AggregateError(retained, "Broker shutdown and cleanup failed.");
   }
   get secret(): string {
     return this.#secret;
@@ -765,11 +816,14 @@ export class Broker {
               }
               try {
                 if (
-                  !sessionKeyMatches(this.paths.socket, item.value.sessionKey)
+                  !sessionKeyMatches(
+                    this.paths.sessionKey,
+                    item.value.sessionKey,
+                  )
                 )
                   throw new OrchestratorError(
                     "AUTH_FAILED",
-                    "Session key does not match the broker socket.",
+                    "Session key does not match the orchestration session.",
                   );
                 if (item.value.client.kind === "pi_child") {
                   if (
@@ -984,6 +1038,7 @@ export class Broker {
       let replayEvents: import("../state/types.js").StoredEvent[] = [];
       let committedEvent: import("../state/types.js").StoredEvent | undefined;
       const deferred: Array<() => Promise<void>> = [];
+      let shutdownAfterResponse = false;
       if (
         request.method === "system.ping" ||
         request.method === "system.status"
@@ -1001,6 +1056,22 @@ export class Broker {
           lastEventSeq: this.store.state.lastEventSeq,
           corruption: this.store.corruption,
         };
+      } else if (request.method === "system.shutdown") {
+        if (
+          !exactKeys(request.params, []) ||
+          Object.keys(request.params).length
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "System shutdown parameters must be empty.",
+          );
+        if (principal.kind !== "cli" && principal.kind !== "human")
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "Only an authenticated local operator can stop the broker.",
+          );
+        result = { stopping: true };
+        shutdownAfterResponse = true;
       } else if (request.method === "herdr.status") {
         requirePermission(principal, "read:state");
         if (Object.keys(request.params).length || !this.#herdr)
@@ -1467,6 +1538,7 @@ export class Broker {
             adoptedContext = await this.#herdr.verifyRoot({
               paneId: herdr.paneId as string,
               terminalId: herdr.terminalId as string,
+              sessionId: pi.sessionId as string,
             });
           } catch {
             throw new OrchestratorError(
@@ -1510,6 +1582,7 @@ export class Broker {
             adoptedContext = await this.#herdr!.verifyRoot({
               paneId: herdr.paneId as string,
               terminalId: herdr.terminalId as string,
+              sessionId: pi.sessionId as string,
             });
           } catch {
             await this.store
@@ -3700,6 +3773,12 @@ export class Broker {
         result,
       };
       this.#writeFrame(client, response);
+      if (shutdownAfterResponse)
+        setImmediate(() => {
+          void this.stop().catch((error: unknown) =>
+            this.#observeBackgroundFailure(error),
+          );
+        });
       for (const action of deferred) this.#trackDeferred(action);
       for (const event of replayEvents) this.#sendEvent(client, event);
       if (client.initializing) {

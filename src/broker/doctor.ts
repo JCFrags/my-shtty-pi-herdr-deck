@@ -1,9 +1,13 @@
-import { access, constants, lstat } from "node:fs/promises";
-import { createConnection } from "node:net";
-import { resolvePaths } from "../shared/paths.js";
+import { access, constants, lstat, realpath } from "node:fs/promises";
+import { isAbsolute, join } from "node:path";
+import {
+  canonicalHerdrSocket,
+  ensurePrivateDirectory,
+  resolvePaths,
+} from "../shared/paths.js";
 import { HerdrApi } from "../herdr/api.js";
 import { HerdrProvisioner } from "../herdr/provisioner.js";
-import { join } from "node:path";
+
 export interface CapabilityReport {
   name: string;
   available: boolean;
@@ -25,6 +29,26 @@ function check(
 ): CapabilityReport {
   return { name, available, mandatory, detail };
 }
+
+async function safeExecutable(path: string | undefined): Promise<boolean> {
+  if (!path || !isAbsolute(path)) return false;
+  try {
+    const [canonical, stat] = await Promise.all([realpath(path), lstat(path)]);
+    return (
+      canonical === path &&
+      stat.isFile() &&
+      !stat.isSymbolicLink() &&
+      (stat.mode & 0o111) !== 0 &&
+      (await access(path, constants.X_OK).then(
+        () => true,
+        () => false,
+      ))
+    );
+  } catch {
+    return false;
+  }
+}
+
 export async function doctor(
   options: {
     herdrBinary?: string;
@@ -32,44 +56,93 @@ export async function doctor(
     schema?: unknown;
   } = {},
 ): Promise<DoctorReport> {
-  const paths = resolvePaths();
   const checks: CapabilityReport[] = [];
   checks.push(
     check("linux", process.platform === "linux", true, process.platform),
   );
+  const nodeOk = Number(process.versions.node.split(".")[0]) >= 22;
   checks.push(
     check(
       "node",
-      Number(process.versions.node.split(".")[0]) >= 22,
+      nodeOk,
       true,
-      process.versions.node,
+      nodeOk
+        ? process.versions.node
+        : `Found ${process.versions.node}; install Node.js 22.19.0 or newer.`,
     ),
   );
-  const git = await commandAvailable("git");
-  checks.push(check("git", git, true, git ? "executable" : "not found"));
-  const herdrBinary = options.herdrBinary ?? process.env.HERDR_BIN_PATH;
-  const herdr = !!herdrBinary && (await commandAvailablePath(herdrBinary));
+  const git = await safeExecutable("/usr/bin/git");
   checks.push(
-    check("herdr-binary", herdr, true, herdrBinary ?? "not configured"),
+    check(
+      "git",
+      git,
+      true,
+      git ? "/usr/bin/git" : "Install Git and make /usr/bin/git executable.",
+    ),
   );
-  if (options.schema) {
+
+  const binary = options.herdrBinary ?? process.env.HERDR_BIN_PATH;
+  const binaryOk = await safeExecutable(binary);
+  checks.push(
+    check(
+      "herdr-binary",
+      binaryOk,
+      true,
+      binaryOk
+        ? binary!
+        : "HERDR_BIN_PATH is missing or unsafe. Upgrade to Herdr 0.8.0 or newer and run this command inside its managed pane.",
+    ),
+  );
+
+  let identity: Awaited<ReturnType<typeof canonicalHerdrSocket>> | undefined;
+  try {
+    identity = await canonicalHerdrSocket(
+      options.herdrSocket ?? process.env.HERDR_SOCKET_PATH,
+    );
+    checks.push(
+      check("herdr-socket", true, true, "canonical owner-only socket"),
+    );
+  } catch (error) {
+    checks.push(
+      check(
+        "herdr-socket",
+        false,
+        true,
+        error instanceof Error
+          ? error.message
+          : "Start this command inside a supported Herdr pane.",
+      ),
+    );
+  }
+
+  let schema = options.schema;
+  if (schema === undefined && binaryOk) {
+    try {
+      schema = await new HerdrApi({ binaryPath: binary! }).readSchema();
+    } catch {
+      schema = undefined;
+    }
+  }
+  if (schema !== undefined) {
     const api = new HerdrApi({
       runner: async () => ({
-        stdout: JSON.stringify(options.schema),
+        stdout: JSON.stringify(schema),
         stderr: "",
         exitCode: 0,
       }),
     });
-    const schemaValid = await api
-      .readSchema()
-      .then(() => true)
-      .catch(() => false);
+    const schemaValid = await api.readSchema().then(
+      () => true,
+      () => false,
+    );
     checks.push(
       check(
         "herdr-schema",
         schemaValid,
         true,
-        schemaValid ? "valid" : "schema drift",
+        schemaValid
+          ? "Herdr API schema is valid."
+          : "Herdr API schema is incompatible. Upgrade to the documented Herdr minimum.",
       ),
     );
     for (const method of [
@@ -80,88 +153,74 @@ export async function doctor(
       "agent.start",
       "worktree.create",
       "worktree.remove",
-    ])
+    ]) {
+      const available = api.supports(method);
       checks.push(
         check(
           `herdr-capability:${method}`,
-          api.supports(method),
+          available,
           true,
-          api.supports(method) ? "supported" : "missing",
+          available
+            ? "supported"
+            : `Herdr does not provide required method ${method}.`,
         ),
       );
-    for (const method of ["agent.interrupt", "agent.wait", "agent.read"])
-      checks.push(
-        check(
-          `herdr-optional:${method}`,
-          api.supports(method),
-          false,
-          api.supports(method) ? "supported" : "degraded",
-        ),
-      );
-  }
-  if (options.herdrSocket) {
-    const socketPath = options.herdrSocket;
-    const exists = await pathExists(socketPath);
-    const live = exists && (await socketLive(socketPath));
+    }
+  } else {
     checks.push(
-      check("herdr-socket", live, true, live ? "connected" : socketPath),
+      check(
+        "herdr-schema",
+        false,
+        true,
+        "Run inside Herdr 0.8.0 or newer with an injected absolute HERDR_BIN_PATH.",
+      ),
     );
   }
-  checks.push(
-    check("state-path", await safeDirectory(paths.root), true, paths.root),
-  );
-  const retention = await new HerdrProvisioner(
-    {} as never,
-    join(paths.root, "prompts"),
-  ).registrationRetentionStatus();
-  const retentionCurrent =
-    retention.unsafeFiles === 0 &&
-    retention.files <= retention.maxFiles &&
-    retention.bytes <= retention.maxBytes &&
-    (retention.oldestMtimeMs === undefined ||
-      Date.now() - retention.oldestMtimeMs <= retention.maxAgeMs);
-  checks.push(
-    check(
-      "registration-retention",
-      retentionCurrent,
-      false,
-      `${retention.files}/${retention.maxFiles} files; ${retention.bytes}/${retention.maxBytes} bytes; ${retention.unsafeFiles} unsafe`,
-    ),
-  );
-  checks.push(
-    check(
-      "runtime-path",
-      await safeDirectory(paths.runtime),
-      true,
-      paths.runtime,
-    ),
-  );
-  const adapter = process.env.PI_HERDR_ORCH_ADAPTER_ID;
-  checks.push(
-    check(
-      "pi-integration",
-      adapter === "pi-herdr-orchestrator",
-      !!herdrBinary,
-      adapter ?? "official adapter identity is not configured",
-    ),
-  );
-  const lock = process.env.PI_HERDR_ORCH_BROKER_LOCK;
-  const config = process.env.PI_HERDR_ORCH_CONFIG_PATH;
-  const profile = process.env.PI_HERDR_ORCH_PROFILE_ID;
-  checks.push(
-    check(
-      "broker-lock-config",
-      !!lock,
-      !!herdrBinary,
-      lock ?? "not configured",
-    ),
-  );
-  checks.push(
-    check("broker-config", !!config, !!herdrBinary, config ?? "not configured"),
-  );
-  checks.push(
-    check("profile", !!profile, !!herdrBinary, profile ?? "not configured"),
-  );
+
+  if (identity) {
+    const paths = resolvePaths(identity.path);
+    for (const [name, path] of [
+      ["state-path", paths.root],
+      ["runtime-path", paths.runtime],
+    ] as const) {
+      let safe = false;
+      try {
+        await ensurePrivateDirectory(path);
+        safe = true;
+      } catch {
+        safe = false;
+      }
+      checks.push(
+        check(
+          name,
+          safe,
+          true,
+          safe
+            ? "owner-only directory"
+            : `Make ${name} an owner-only real directory and retry.`,
+        ),
+      );
+    }
+    const retention = await new HerdrProvisioner(
+      {} as never,
+      join(paths.root, "prompts"),
+    ).registrationRetentionStatus();
+    const retentionCurrent =
+      retention.unsafeFiles === 0 &&
+      retention.files <= retention.maxFiles &&
+      retention.bytes <= retention.maxBytes &&
+      (retention.oldestMtimeMs === undefined ||
+        Date.now() - retention.oldestMtimeMs <= retention.maxAgeMs);
+    checks.push(
+      check(
+        "registration-retention",
+        retentionCurrent,
+        false,
+        `${retention.files}/${retention.maxFiles} files; ${retention.bytes}/${retention.maxBytes} bytes; ${retention.unsafeFiles} unsafe`,
+      ),
+    );
+  }
+
   return {
     version: "0.1.0",
     platform: process.platform,
@@ -172,50 +231,4 @@ export async function doctor(
 }
 export function doctorJson(report: DoctorReport): string {
   return JSON.stringify(report);
-}
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await lstat(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
-async function socketLive(path: string): Promise<boolean> {
-  return await new Promise((resolve) => {
-    const socket = createConnection(path);
-    const timer = setTimeout(() => {
-      socket.destroy();
-      resolve(false);
-    }, 300);
-    socket.once("connect", () => {
-      clearTimeout(timer);
-      socket.destroy();
-      resolve(true);
-    });
-    socket.once("error", () => {
-      clearTimeout(timer);
-      socket.destroy();
-      resolve(false);
-    });
-  });
-}
-async function safeDirectory(path: string): Promise<boolean> {
-  try {
-    const s = await lstat(path);
-    return s.isDirectory() && !s.isSymbolicLink();
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "ENOENT";
-  }
-}
-async function commandAvailable(name: string): Promise<boolean> {
-  return commandAvailablePath(`/usr/bin/${name}`);
-}
-async function commandAvailablePath(path: string): Promise<boolean> {
-  try {
-    await access(path, constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
 }

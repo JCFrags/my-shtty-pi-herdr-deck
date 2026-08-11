@@ -7,7 +7,7 @@ import test from "node:test";
 import { Broker } from "../../src/broker/broker.js";
 import { EventStore } from "../../src/state/event-store.js";
 import { encodeFrame, NdjsonDecoder } from "../../src/shared/protocol/codec.js";
-import { resolvePaths, sessionKey } from "../../src/shared/paths.js";
+import { sessionKey } from "../../src/shared/paths.js";
 import { createId } from "../../src/shared/ids.js";
 
 const actor = {
@@ -49,7 +49,7 @@ function nextImmediate(): Promise<void> {
 
 function pathsFor(root: string, runtime: string) {
   return {
-    ...resolvePaths(join(runtime, "herdr.sock")),
+    sessionKey: sessionKey(join(runtime, "broker.sock")),
     root,
     runtime,
     events: join(root, "events.jsonl"),

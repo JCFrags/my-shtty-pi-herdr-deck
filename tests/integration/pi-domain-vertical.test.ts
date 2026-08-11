@@ -9,7 +9,7 @@ import { PiAdapter } from "../../src/pi/adapter.js";
 import { PiBrokerClient } from "../../src/pi/broker-client.js";
 import { validateAssignment } from "../../extensions/pi-herdr-orchestrator.js";
 import type { PiApiLike, PiContextLike } from "../../src/pi/types.js";
-import { resolvePaths, sessionKey } from "../../src/shared/paths.js";
+import { sessionKey } from "../../src/shared/paths.js";
 import type { EventStore } from "../../src/state/event-store.js";
 
 const actor = {
@@ -156,7 +156,7 @@ function piBoundary(
 
 function paths(root: string, runtime: string) {
   return {
-    ...resolvePaths(join(runtime, "herdr.sock")),
+    sessionKey: sessionKey(join(runtime, "broker.sock")),
     root,
     runtime,
     events: join(root, "events.jsonl"),
@@ -285,7 +285,7 @@ async function runCase(kind: "cancel" | "deadline"): Promise<void> {
     );
     parent = new PiBrokerClient({
       socketPath: pathsForCase.socket,
-      sessionKey: sessionKey(pathsForCase.socket),
+      sessionKey: pathsForCase.sessionKey!,
       piSessionId: "parent-session",
       secret,
     });
@@ -349,7 +349,7 @@ async function runCase(kind: "cancel" | "deadline"): Promise<void> {
     );
     child = new PiBrokerClient({
       socketPath: pathsForCase.socket,
-      sessionKey: sessionKey(pathsForCase.socket),
+      sessionKey: pathsForCase.sessionKey!,
       piSessionId: "child-session",
       agentId,
       generation: 1,

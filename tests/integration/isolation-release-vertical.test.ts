@@ -7,7 +7,7 @@ import { Broker } from "../../src/broker/broker.js";
 import { digest } from "../../src/broker/authentication.js";
 import { PiAdapter } from "../../src/pi/adapter.js";
 import { PiBrokerClient } from "../../src/pi/broker-client.js";
-import { resolvePaths, sessionKey } from "../../src/shared/paths.js";
+import { sessionKey } from "../../src/shared/paths.js";
 import type { PiApiLike, PiContextLike } from "../../src/pi/types.js";
 import { EventStore } from "../../src/state/event-store.js";
 import { HerdrProvisioner } from "../../src/herdr/provisioner.js";
@@ -80,7 +80,7 @@ async function productionParent(
   const root = await mkdtemp(join(tmpdir(), "isolation-release-"));
   const runtime = await mkdtemp(join(tmpdir(), "isolation-release-runtime-"));
   const paths = {
-    ...resolvePaths(join(runtime, "herdr.sock")),
+    sessionKey: sessionKey(join(runtime, "broker.sock")),
     root,
     runtime,
     events: join(root, "events.jsonl"),
@@ -288,7 +288,7 @@ async function productionParent(
   const adapter = new PiAdapter(api, context, "pending-parent", 1);
   let client = new PiBrokerClient({
     socketPath: paths.socket,
-    sessionKey: sessionKey(paths.socket),
+    sessionKey: paths.sessionKey!,
     piSessionId: "parent-session",
     secret,
   });
@@ -310,7 +310,7 @@ async function productionParent(
     const nextSecret = (await readFile(paths.secret, "utf8")).trim();
     client = new PiBrokerClient({
       socketPath: paths.socket,
-      sessionKey: sessionKey(paths.socket),
+      sessionKey: paths.sessionKey!,
       piSessionId: "parent-session-restarted",
       secret: nextSecret,
     });
@@ -374,7 +374,7 @@ async function connectManagedChild(
 ): Promise<void> {
   const child = new PiBrokerClient({
     socketPath: h.paths.socket,
-    sessionKey: sessionKey(h.paths.socket),
+    sessionKey: h.paths.sessionKey!,
     agentId,
     generation: 1,
     piSessionId: `session-${agentId}`,
@@ -1047,7 +1047,7 @@ test("restart rejects a persisted binding that no longer matches its resource", 
       "task.project_bound",
     );
     const replayPaths = {
-      ...resolvePaths(join(replayRuntime, "herdr.sock")),
+      sessionKey: sessionKey(join(replayRuntime, "broker.sock")),
       root: replayRoot,
       runtime: replayRuntime,
       events: join(replayRoot, "events.jsonl"),

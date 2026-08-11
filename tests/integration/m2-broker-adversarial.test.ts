@@ -7,7 +7,6 @@ import test from "node:test";
 import { Broker } from "../../src/broker/broker.js";
 import { HerdrProvisioner } from "../../src/herdr/provisioner.js";
 import { HerdrService } from "../../src/herdr/service.js";
-import { sessionKey } from "../../src/shared/paths.js";
 import { brokerRequest } from "../../src/cli/client.js";
 
 const actor = { principalId: "prn_00000000000000000000000000", kind: "system" };
@@ -287,7 +286,7 @@ async function request(
         version: "0.1.0",
         capabilities: [],
       },
-      sessionKey: sessionKey(broker.paths.socket),
+      sessionKey: broker.paths.sessionKey,
       auth: { kind: "client_secret", secret: broker.secret },
     }) + "\n",
   );

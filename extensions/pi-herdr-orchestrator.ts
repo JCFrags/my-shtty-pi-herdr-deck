@@ -22,6 +22,7 @@ import {
   readManagedTokenFile,
   siblingSecretPath,
 } from "../src/pi/token-file.js";
+import { ensureBroker } from "../src/broker/startup.js";
 const ORCHESTRATION_TOOLS = new Set([
   "orchestrator_result",
   "orchestrator_ask",
@@ -334,14 +335,19 @@ export default async function piHerdrOrchestrator(
   }> = [];
   let lifecycleInFlight = false;
   const managed = process.env.PI_HERDR_ORCH_MANAGED === "1";
-  const socketPath =
-    process.env.PI_HERDR_ORCH_BROKER_SOCKET ?? process.env.HERDR_SOCKET_PATH;
-  const active =
-    process.env.HERDR_ENV === "1" &&
-    !!process.env.HERDR_PANE_ID &&
+  const herdrPaneActive =
+    process.env.HERDR_ENV === "1" && !!process.env.HERDR_PANE_ID;
+  const herdrActive = herdrPaneActive && !!process.env.HERDR_SOCKET_PATH;
+  const managedContext =
+    herdrPaneActive &&
     !!process.env.HERDR_BIN_PATH &&
-    !!socketPath &&
+    !!process.env.PI_HERDR_ORCH_BROKER_SOCKET &&
     !!process.env.PI_HERDR_ORCH_SESSION_KEY;
+  const adoptedContext =
+    herdrActive &&
+    !!process.env.HERDR_TERMINAL_ID &&
+    !!process.env.HERDR_BIN_PATH &&
+    process.env.HERDR_BIN_PATH.startsWith("/");
   const runtime: Runtime = {
     cleanup(reason) {
       const preserveCredential = ["reload", "new", "resume", "fork"].includes(
@@ -395,10 +401,36 @@ export default async function piHerdrOrchestrator(
     binding.adapter = undefined;
     binding.client = undefined;
     lifecycleInFlight = false;
-    if (!active || !socketPath || !process.env.PI_HERDR_ORCH_SESSION_KEY) {
-      inactive(next);
+    if (managed ? !managedContext : !adoptedContext) {
+      if (herdrActive && !process.env.HERDR_BIN_PATH)
+        next.ui.setStatus?.(
+          "pi-herdr-orchestrator",
+          "Orchestrator inactive: this Herdr version did not inject HERDR_BIN_PATH. Upgrade to Herdr 0.8.0 or newer, then reopen Pi.",
+        );
+      else inactive(next);
       return;
     }
+    let socketPath: string;
+    let orchestrationSessionKey: string;
+    if (managed) {
+      socketPath = process.env.PI_HERDR_ORCH_BROKER_SOCKET!;
+      orchestrationSessionKey = process.env.PI_HERDR_ORCH_SESSION_KEY!;
+    } else {
+      try {
+        const paths = await ensureBroker();
+        socketPath = paths.socket;
+        orchestrationSessionKey = paths.sessionKey;
+      } catch (error) {
+        next.ui.setStatus?.(
+          "pi-herdr-orchestrator",
+          error instanceof Error
+            ? `Orchestrator inactive: ${error.message}`
+            : "Orchestrator startup failed.",
+        );
+        return;
+      }
+    }
+    if (epoch !== startEpoch) return;
     const agentId = process.env.PI_HERDR_ORCH_AGENT_ID ?? "";
     const generation = Number(process.env.PI_HERDR_ORCH_GENERATION ?? "1");
     const candidateAdapter = new PiAdapter(pi, next, agentId, generation);
@@ -603,7 +635,7 @@ export default async function piHerdrOrchestrator(
       managed && token
         ? new PiBrokerClient({
             socketPath,
-            sessionKey: process.env.PI_HERDR_ORCH_SESSION_KEY,
+            sessionKey: orchestrationSessionKey,
             piSessionId: piSessionId(next),
             agentId,
             generation,
@@ -613,7 +645,7 @@ export default async function piHerdrOrchestrator(
           })
         : new PiBrokerClient({
             socketPath,
-            sessionKey: process.env.PI_HERDR_ORCH_SESSION_KEY,
+            sessionKey: orchestrationSessionKey,
             piSessionId: piSessionId(next),
             secret: secret!,
             onServerRequest: handleServerRequest,

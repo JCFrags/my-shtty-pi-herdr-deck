@@ -1,4 +1,5 @@
 import { readPrivateRegular } from "../shared/private-fs.js";
+import { dirname, join } from "node:path";
 
 const MAX_TOKEN_FILE_BYTES = 4096;
 const MAX_TOKEN_BYTES = 2048;
@@ -11,7 +12,7 @@ export function siblingSecretPath(socketPath: string): string {
     !socketPath.endsWith(".sock")
   )
     throw new Error("PI_SOCKET_PATH_INVALID");
-  return `${socketPath.slice(0, -5)}.secret`;
+  return join(dirname(socketPath), "client.secret");
 }
 
 export async function readBrokerSecretFile(path: string): Promise<string> {

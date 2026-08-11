@@ -9,7 +9,7 @@ import {
 } from "../bridge/capabilities.js";
 import { BrokerClient } from "./broker-client.js";
 import { BrokerDeckApp } from "./broker-app.js";
-import { resolveBrokerSocketPath } from "./socket.js";
+import { resolveBrokerContext } from "./socket.js";
 
 interface TuiRuntimeModule {
   TUI: new (
@@ -63,8 +63,8 @@ export async function main(): Promise<void> {
   const close = (): void => finish?.();
 
   try {
-    const socketPath = resolveBrokerSocketPath();
-    client = new BrokerClient({ socketPath });
+    const broker = await resolveBrokerContext();
+    client = new BrokerClient(broker);
     app = new BrokerDeckApp({
       client,
       requestRender,

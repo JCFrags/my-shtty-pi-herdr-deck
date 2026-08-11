@@ -60,7 +60,9 @@ PACKAGE_ROOT=$(pwd)
 pi install -l "$PACKAGE_ROOT"
 ```
 
-Start Pi after installation. Pi loads `./dist/extensions/pi-herdr-orchestrator.js` from the package manifest.
+Open a new Pi session inside Herdr after installation. Pi loads `./dist/extensions/pi-herdr-orchestrator.js` from the package manifest. The extension uses only the session context that Herdr injects. It resolves the canonical Herdr socket, starts one broker for that Herdr session when needed, and registers the current Pi pane as the adopted root. A reload reuses the same adopted root.
+
+Do not set a broker socket, client secret, session key, or token for normal installed use. Herdr 0.8.0 or newer must inject an absolute `HERDR_BIN_PATH`. If `/orchestrator-status` reports that this value is missing, upgrade Herdr and reopen the Pi session. Do not search `PATH` or add an internal environment workaround.
 
 ## Link the Herdr plugin
 
@@ -94,7 +96,7 @@ herdr plugin pane open \
   --focus
 ```
 
-Herdr supplies the plugin context. Pi Herd checks the selected pane against live agent data. It does not silently attach to an arbitrary pane when identity is missing or ambiguous.
+Herdr supplies the plugin context. Pi Herd checks the selected pane against live agent data. It does not silently attach to an arbitrary pane when identity is missing or ambiguous. The deck uses the same canonical session resolver and starts or reuses the same broker. You do not need to start a service before you open it.
 
 ## Verify
 
@@ -106,13 +108,24 @@ In the target Pi pane, run:
 
 The command reports the orchestrator extension and broker state. The managed pane title is `Pi Herd`.
 
-For command-line checks, use:
+For command-line checks, run these commands in a Herdr pane:
 
 ```bash
 ./bin/pi-herdr-orchestrator doctor --json
 ./bin/pi-herdr-orchestrator broker status
 ./bin/pi-herdr-orchestrator events verify --json
 ```
+
+The broker lifecycle commands are authenticated and scoped to the canonical Herdr session:
+
+```bash
+./bin/pi-herdr-orchestrator broker start
+./bin/pi-herdr-orchestrator broker status
+./bin/pi-herdr-orchestrator broker restart
+./bin/pi-herdr-orchestrator broker stop
+```
+
+`start` is idempotent. Concurrent callers reuse one broker. `status` reports only an authenticated broker. `stop` and `restart` verify the recorded process start identity before they request shutdown. They do not signal an unverified process.
 
 A dry-run release rehearsal is also available:
 
@@ -124,7 +137,7 @@ The rehearsal does not deploy, restart, or roll back a live process.
 
 ## Operator safety and runtime limits
 
-The broker uses an owner-only Unix-domain socket and bounded newline-delimited JSON frames. It has no TCP listener and no arbitrary shell broker method. External commands use argument arrays without shell interpolation.
+The broker uses one owner-only Unix-domain socket for each canonical Herdr session and bounded newline-delimited JSON frames. Runtime records and the client secret use owner-only paths. State and logs use a separate per-session state directory. The broker has no TCP listener and no arbitrary shell broker method. External commands use argument arrays without shell interpolation.
 
 Canonical state uses a verified event chain and authenticated snapshots. Recovery fails closed on corrupt or ambiguous state. Resource operations revalidate identity and preserve dirty, replaced, missing, or ambiguous worktrees instead of deleting them.
 
@@ -161,7 +174,7 @@ herdr plugin unlink pi.herdr.orchestrator
 herdr plugin link "$PRIOR_PACKAGE_ROOT"
 ```
 
-A live rollback also requires an approved restart, health checks, reconciliation, and recorded proof. The dry-run harness is plan-only and is not live rollback proof.
+Before a live package rollback, run `./bin/pi-herdr-orchestrator broker stop` from the affected Herdr session. After you install and link the prior reviewed package, reopen Pi and run `/orchestrator-status`. The extension starts the compatible broker on demand. A live rollback also requires approved health checks, reconciliation, and recorded proof. The dry-run harness is plan-only and is not live rollback proof.
 
 ## Unlink and remove
 

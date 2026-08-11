@@ -9,6 +9,7 @@ export async function brokerRequest(
   secretPath: string,
   method: string,
   params: Record<string, unknown>,
+  expectedSessionKey?: string,
 ): Promise<unknown> {
   const secret = (await readPrivateRegular(secretPath)).trimEnd();
   const socket = connect(socketPath);
@@ -53,7 +54,7 @@ export async function brokerRequest(
               version: "0.1.0",
               capabilities: [],
             },
-            sessionKey: sessionKey(socketPath),
+            sessionKey: expectedSessionKey ?? sessionKey(socketPath),
             auth: { kind: "client_secret", secret },
           }),
         );

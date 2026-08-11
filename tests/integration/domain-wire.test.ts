@@ -7,7 +7,7 @@ import test from "node:test";
 import { Broker } from "../../src/broker/broker.js";
 import { digest } from "../../src/broker/authentication.js";
 import type { EventStore } from "../../src/state/event-store.js";
-import { resolvePaths, sessionKey } from "../../src/shared/paths.js";
+import { sessionKey, type ResolvedPaths } from "../../src/shared/paths.js";
 import { createId } from "../../src/shared/ids.js";
 import { encodeFrame, NdjsonDecoder } from "../../src/shared/protocol/codec.js";
 
@@ -207,7 +207,7 @@ function request(
   });
 }
 async function connect(
-  paths: ReturnType<typeof resolvePaths>,
+  paths: ResolvedPaths & { sessionKey: string },
   secret: string,
   kind = "pi_parent",
 ): Promise<Socket> {
@@ -227,7 +227,7 @@ async function connect(
         version: "0.1.0",
         capabilities: ["events.replay"],
       },
-      sessionKey: sessionKey(paths.socket),
+      sessionKey: paths.sessionKey!,
       auth: { kind: "client_secret", secret },
     }),
   );
@@ -255,7 +255,7 @@ async function connect(
   return socket;
 }
 async function connectManaged(
-  paths: ReturnType<typeof resolvePaths>,
+  paths: ResolvedPaths & { sessionKey: string },
   token: string,
   agentId: string,
   session: string,
@@ -294,7 +294,7 @@ async function connectManaged(
         version: "0.1.0",
         capabilities: ["pi.lifecycle"],
       },
-      sessionKey: sessionKey(paths.socket),
+      sessionKey: paths.sessionKey!,
       auth: {
         kind: "agent_token",
         token,
@@ -309,7 +309,7 @@ async function connectManaged(
 }
 
 async function connectManagedHello(
-  paths: ReturnType<typeof resolvePaths>,
+  paths: ResolvedPaths & { sessionKey: string },
   token: string,
   agentId: string,
   session: string,
@@ -357,7 +357,7 @@ async function connectManagedHello(
         version: "0.1.0",
         capabilities: ["pi.lifecycle"],
       },
-      sessionKey: sessionKey(paths.socket),
+      sessionKey: paths.sessionKey!,
       auth: {
         kind: "agent_token",
         token,
@@ -396,7 +396,7 @@ test("broker domain wire persists correlated result, question, workflow, and rep
   const root = await mkdtemp(join(tmpdir(), "domain-wire-"));
   const runtime = await mkdtemp(join(tmpdir(), "domain-wire-runtime-"));
   const paths = {
-    ...resolvePaths(join(runtime, "herdr.sock")),
+    sessionKey: sessionKey(join(runtime, "broker.sock")),
     root,
     runtime,
     events: join(root, "events.jsonl"),
@@ -611,7 +611,7 @@ test("production broker restarts an open question from its durable absolute dead
     join(tmpdir(), "domain-question-timeout-runtime-"),
   );
   const paths = {
-    ...resolvePaths(join(runtime, "herdr.sock")),
+    sessionKey: sessionKey(join(runtime, "broker.sock")),
     root,
     runtime,
     events: join(root, "events.jsonl"),
@@ -858,7 +858,7 @@ test("production broker immediately terminalizes an already expired durable ques
     join(tmpdir(), "domain-question-timeout-runtime-"),
   );
   const paths = {
-    ...resolvePaths(join(runtime, "herdr.sock")),
+    sessionKey: sessionKey(join(runtime, "broker.sock")),
     root,
     runtime,
     events: join(root, "events.jsonl"),
@@ -998,7 +998,7 @@ test("production broker task cancellation terminalizes an open question durably"
     join(tmpdir(), "domain-question-timeout-runtime-"),
   );
   const paths = {
-    ...resolvePaths(join(runtime, "herdr.sock")),
+    sessionKey: sessionKey(join(runtime, "broker.sock")),
     root,
     runtime,
     events: join(root, "events.jsonl"),
@@ -1144,7 +1144,7 @@ test("production A to B queue races do not resurrect or provision cancelled work
       join(tmpdir(), `domain-ab-${order}-runtime-`),
     );
     const paths = {
-      ...resolvePaths(join(runtime, "herdr.sock")),
+      sessionKey: sessionKey(join(runtime, "broker.sock")),
       root,
       runtime,
       events: join(root, "events.jsonl"),
@@ -1584,7 +1584,7 @@ test("production mutation queue orders cancel and run creation without resurrect
       join(tmpdir(), `domain-queue-${order}-runtime-`),
     );
     const paths = {
-      ...resolvePaths(join(runtime, "herdr.sock")),
+      sessionKey: sessionKey(join(runtime, "broker.sock")),
       root,
       runtime,
       events: join(root, "events.jsonl"),
@@ -1827,7 +1827,7 @@ test("production managed identity rejects duplicate hello and reconnects exactly
     join(tmpdir(), "domain-managed-identity-runtime-"),
   );
   const paths = {
-    ...resolvePaths(join(runtime, "herdr.sock")),
+    sessionKey: sessionKey(join(runtime, "broker.sock")),
     root,
     runtime,
     events: join(root, "events.jsonl"),
@@ -2042,7 +2042,7 @@ test("production strict managed child task.cancel-versus-timeout race", async ()
     join(tmpdir(), "domain-cancel-delivery-runtime-"),
   );
   const paths = {
-    ...resolvePaths(join(runtime, "herdr.sock")),
+    sessionKey: sessionKey(join(runtime, "broker.sock")),
     root,
     runtime,
     events: join(root, "events.jsonl"),
@@ -2339,7 +2339,7 @@ test("production settled managed run times out without adapter abort", async () 
     join(tmpdir(), "domain-settled-timeout-runtime-"),
   );
   const paths = {
-    ...resolvePaths(join(runtime, "herdr.sock")),
+    sessionKey: sessionKey(join(runtime, "broker.sock")),
     root,
     runtime,
     events: join(root, "events.jsonl"),
@@ -2546,7 +2546,7 @@ test("production strict child receives durable task wall-deadline delivery", asy
     join(tmpdir(), "domain-cancel-delivery-runtime-"),
   );
   const paths = {
-    ...resolvePaths(join(runtime, "herdr.sock")),
+    sessionKey: sessionKey(join(runtime, "broker.sock")),
     root,
     runtime,
     events: join(root, "events.jsonl"),
@@ -2859,7 +2859,7 @@ test("production managed socket accepts abort without a current Herdr resource",
       join(tmpdir(), `domain-abort-${resourceCase}-runtime-`),
     );
     const paths = {
-      ...resolvePaths(join(runtime, "herdr.sock")),
+      sessionKey: sessionKey(join(runtime, "broker.sock")),
       root,
       runtime,
       events: join(root, "events.jsonl"),
@@ -3070,7 +3070,7 @@ test("production managed cancellation falls back to one exact Herdr stop", async
       join(tmpdir(), `domain-abort-fallback-${failureMode}-runtime-`),
     );
     const paths = {
-      ...resolvePaths(join(runtime, "herdr.sock")),
+      sessionKey: sessionKey(join(runtime, "broker.sock")),
       root,
       runtime,
       events: join(root, "events.jsonl"),
@@ -3305,7 +3305,7 @@ test("held adapter abort skips stop after replacement or resource-byte mutation"
       join(tmpdir(), `domain-held-abort-${heldCase}-runtime-`),
     );
     const paths = {
-      ...resolvePaths(join(runtime, "herdr.sock")),
+      sessionKey: sessionKey(join(runtime, "broker.sock")),
       root,
       runtime,
       events: join(root, "events.jsonl"),
@@ -3676,7 +3676,7 @@ async function runHeldGuardCase(guardCase: HeldGuardCase): Promise<void> {
     ),
   );
   const paths = {
-    ...resolvePaths(join(runtime, "herdr.sock")),
+    sessionKey: sessionKey(join(runtime, "broker.sock")),
     root,
     runtime,
     events: join(root, "events.jsonl"),

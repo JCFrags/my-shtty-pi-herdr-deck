@@ -1,4 +1,5 @@
 import { isAbsolute } from "node:path";
+import { ensureBroker } from "../broker/startup.js";
 
 const MAX_SOCKET_PATH_BYTES = 103;
 
@@ -33,6 +34,20 @@ function contextSocket(contextJson: string | undefined): string | undefined {
   return undefined;
 }
 
+export async function resolveBrokerContext(): Promise<{
+  socketPath: string;
+  secretPath: string;
+  sessionKey: string;
+}> {
+  const paths = await ensureBroker();
+  return {
+    socketPath: paths.socket,
+    secretPath: paths.secret,
+    sessionKey: paths.sessionKey,
+  };
+}
+
+/** Compatibility parser for explicit managed contexts. Public deck startup uses resolveBrokerContext. */
 export function resolveBrokerSocketPath(
   environment: NodeJS.ProcessEnv = process.env,
   contextJson = environment.HERDR_PLUGIN_CONTEXT_JSON,
@@ -43,7 +58,5 @@ export function resolveBrokerSocketPath(
   if (validPath(explicit)) return explicit;
   const fromContext = contextSocket(contextJson);
   if (fromContext) return fromContext;
-  throw new Error(
-    "Broker socket is not configured. Set PI_HERDR_ORCH_BROKER_SOCKET or provide an approved Herdr orchestrator context.",
-  );
+  throw new Error("The managed broker context is missing or invalid.");
 }

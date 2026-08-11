@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { Broker } from "../../src/broker/broker.js";
-import { resolvePaths } from "../../src/shared/paths.js";
+import { sessionKey } from "../../src/shared/paths.js";
 import { createId } from "../../src/shared/ids.js";
 const actor = {
   principalId: "prn_00000000000000000000000000",
@@ -25,7 +25,7 @@ async function bounded<T>(promise: Promise<T>, message: string): Promise<T> {
 }
 function makePaths(root: string, runtime: string) {
   return {
-    ...resolvePaths(join(runtime, "herdr.sock")),
+    sessionKey: sessionKey(join(runtime, "broker.sock")),
     root,
     runtime,
     events: join(root, "events.jsonl"),

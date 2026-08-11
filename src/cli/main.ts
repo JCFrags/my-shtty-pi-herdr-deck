@@ -1,6 +1,7 @@
 import { doctor } from "../broker/doctor.js";
 import { Broker } from "../broker/broker.js";
-import { ensurePrivateDirectory, resolvePaths } from "../shared/paths.js";
+import { ensurePrivateDirectory, resolveHerdrPaths } from "../shared/paths.js";
+import { brokerStatus, ensureBroker, stopBroker } from "../broker/startup.js";
 import { brokerRequest } from "./client.js";
 import { readPrivateRegular } from "../shared/private-fs.js";
 import { createProductionHerdrService } from "../herdr/service.js";
@@ -55,6 +56,7 @@ async function runDeck(): Promise<void> {
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   const [command, subcommand] = argv;
   if (command === "deck") {
+    await ensureBroker();
     await runDeck();
     return;
   }
@@ -74,7 +76,30 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     if (!report.ok) process.exitCode = 1;
     return;
   }
-  const paths = resolvePaths();
+  if (command === "broker" && subcommand === "start") {
+    const paths = await ensureBroker();
+    console.log(
+      JSON.stringify({ status: "running", sessionKey: paths.sessionKey }),
+    );
+    return;
+  }
+  if (command === "broker" && subcommand === "stop") {
+    console.log(JSON.stringify({ status: await stopBroker() }));
+    return;
+  }
+  if (command === "broker" && subcommand === "restart") {
+    await stopBroker();
+    const paths = await ensureBroker();
+    console.log(
+      JSON.stringify({ status: "running", sessionKey: paths.sessionKey }),
+    );
+    return;
+  }
+  if (command === "broker" && subcommand === "status") {
+    console.log(JSON.stringify(await brokerStatus()));
+    return;
+  }
+  const { paths } = await resolveHerdrPaths();
   await ensurePrivateDirectory(paths.root);
   await ensurePrivateDirectory(paths.runtime);
   if (command === "config" && subcommand === "validate") {
@@ -250,20 +275,21 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     }
     console.log(
       JSON.stringify(
-        await brokerRequest(paths.socket, paths.secret, method, params),
+        await brokerRequest(
+          paths.socket,
+          paths.secret,
+          method,
+          params,
+          paths.sessionKey,
+        ),
       ),
     );
     return;
   }
-  const broker = new Broker(
-    paths,
-    process.env.HERDR_BIN_PATH
-      ? {
-          herdrFactory: (store, resolved) =>
-            createProductionHerdrService(store, resolved),
-        }
-      : {},
-  );
+  const broker = new Broker(paths, {
+    herdrFactory: (store, resolved) =>
+      createProductionHerdrService(store, resolved),
+  });
   if (
     command === "recovery" &&
     (subcommand === "plan" || subcommand === "export")
@@ -282,22 +308,21 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     );
     return;
   }
-  if (command === "broker" && subcommand === "start") {
+  if (command === "broker" && subcommand === "serve") {
+    let stopping = false;
+    const shutdown = () => {
+      if (stopping) return;
+      stopping = true;
+      void broker.stop().catch((error: unknown) => {
+        console.error(
+          error instanceof Error ? error.message : "Broker shutdown failed.",
+        );
+        process.exitCode = 1;
+      });
+    };
+    process.once("SIGTERM", shutdown);
+    process.once("SIGINT", shutdown);
     await broker.start();
-    console.log(JSON.stringify({ status: "started", socket: paths.socket }));
-    return;
-  }
-  if (command === "broker" && subcommand === "status") {
-    await openStore(broker);
-    console.log(
-      JSON.stringify({
-        status: broker.store.readOnly ? "read_only_recovery" : "healthy",
-        eventSeq: broker.store.state.lastEventSeq,
-        ...(broker.store.corruption
-          ? { corruption: broker.store.corruption }
-          : {}),
-      }),
-    );
     return;
   }
   if (command === "events" && subcommand === "verify") {
@@ -306,7 +331,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     return;
   }
   console.error(
-    "Usage: deck | doctor [--json] | broker start|status | events verify | config validate PATH | recovery plan|export | retention plan|policy-plan | ops plan|verify|apply | export --output DIR | version",
+    "Usage: deck | doctor [--json] | broker start|stop|restart|status | events verify | config validate PATH | recovery plan|export | retention plan|policy-plan | ops plan|verify|apply | export --output DIR | version",
   );
   process.exitCode = 2;
 }
