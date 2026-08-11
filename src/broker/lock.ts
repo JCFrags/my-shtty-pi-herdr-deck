@@ -35,6 +35,7 @@ export interface LockPathIdentity {
 }
 const noFollow =
   (constants as typeof constants & { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
+const MAX_LOCK_RECORD_BYTES = 4096;
 function processStart(pid: number): string | undefined {
   try {
     const text = readFileSync(`/proc/${pid}/stat`, "utf8");
@@ -109,7 +110,9 @@ function exactRecordSync(
     stat.isSymbolicLink() ||
     stat.nlink !== links ||
     stat.uid !== process.getuid?.() ||
-    (stat.mode & 0o077) !== 0 ||
+    (stat.mode & 0o777) !== 0o600 ||
+    stat.size < 2 ||
+    stat.size > MAX_LOCK_RECORD_BYTES ||
     !sameIdentity(identityOf(stat), identity)
   )
     throw new Error("Lock path identity changed before removal.");
@@ -222,20 +225,22 @@ async function readRecord(
   const handle = await open(path, constants.O_RDONLY | noFollow);
   try {
     const stat = await handle.stat();
+    if (
+      !stat.isFile() ||
+      (stat.nlink !== 1 && stat.nlink !== 2) ||
+      stat.uid !== process.getuid?.() ||
+      (stat.mode & 0o777) !== 0o600 ||
+      stat.size < 2 ||
+      stat.size > MAX_LOCK_RECORD_BYTES
+    )
+      throw new Error("Broker lock record is unsafe.");
     let record: unknown;
     try {
       record = JSON.parse(await handle.readFile("utf8")) as unknown;
     } catch {
       throw new Error("Broker lock record is unsafe.");
     }
-    if (
-      !stat.isFile() ||
-      (stat.nlink !== 1 && stat.nlink !== 2) ||
-      stat.uid !== process.getuid?.() ||
-      (stat.mode & 0o077) !== 0 ||
-      !validRecord(record)
-    )
-      throw new Error("Broker lock record is unsafe.");
+    if (!validRecord(record)) throw new Error("Broker lock record is unsafe.");
     const identity = identityOf(stat);
     if (stat.nlink === 2) {
       const companion = companionOverride ?? lockCompanionPath(path, record);
@@ -243,7 +248,9 @@ async function readRecord(
       if (
         !companionStat.isFile() ||
         companionStat.nlink !== 2 ||
-        (companionStat.mode & 0o077) !== 0 ||
+        (companionStat.mode & 0o777) !== 0o600 ||
+        companionStat.size < 2 ||
+        companionStat.size > MAX_LOCK_RECORD_BYTES ||
         !sameIdentity(identityOf(companionStat), identity)
       )
         throw new Error("Broker lock companion is unsafe.");
@@ -351,7 +358,7 @@ async function publishRecord(
       !stat.isFile() ||
       stat.nlink !== 1 ||
       stat.uid !== process.getuid?.() ||
-      (stat.mode & 0o077) !== 0
+      (stat.mode & 0o777) !== 0o600
     )
       throw new Error("Unsafe broker lock.");
     identity = identityOf(stat);
@@ -483,6 +490,8 @@ export class BrokerLock {
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
         const old = await readRecord(this.path);
+        if (old.record.expectedSocket !== this.expectedSocket)
+          throw new Error("Broker lock belongs to another configured socket.");
         if (!ownerDead(old.record))
           throw new Error("Broker lock is held by a live process.");
         const guardRecord: LockRecord = {

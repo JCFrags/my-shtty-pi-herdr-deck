@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import {
+  chmod,
   lstat,
   mkdtemp,
   readFile,
@@ -137,4 +138,61 @@ test("separate lifetime-lock crashes converge and leave zero receipt-owned remna
   const refused = new BrokerLock(path, socket);
   await assert.rejects(refused.acquire(), /unsafe/u);
   assert.equal(await readFile(path, "utf8"), replacement);
+});
+
+test("stale lifetime-lock recovery preserves another configured socket record", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "orch-lock-socket-mismatch-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, "broker.lock");
+  const firstSocket = join(root, "first.sock");
+  const secondSocket = join(root, "second.sock");
+
+  await runCrash("lock-owned", path, "c".repeat(24), firstSocket);
+  const before = await readFile(path, "utf8");
+  await assert.rejects(
+    new BrokerLock(path, secondSocket).acquire(),
+    /another configured socket/u,
+  );
+  assert.equal(await readFile(path, "utf8"), before);
+  assert.deepEqual(await readdir(root), ["broker.lock"]);
+
+  const cleanup = new BrokerLock(path, firstSocket);
+  await cleanup.acquire();
+  await cleanup.release();
+  assert.deepEqual(await readdir(root), []);
+});
+
+test("stale lifetime-lock recovery preserves a wrong-mode public record", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "orch-lock-wrong-mode-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, "broker.lock");
+  const socket = join(root, "broker.sock");
+
+  await runCrash("lock-owned", path, "d".repeat(24), socket);
+  await chmod(path, 0o700);
+  const before = await readFile(path, "utf8");
+  await assert.rejects(new BrokerLock(path, socket).acquire(), /unsafe/u);
+  assert.equal(await readFile(path, "utf8"), before);
+  assert.equal((await lstat(path)).mode & 0o777, 0o700);
+
+  await chmod(path, 0o600);
+  const cleanup = new BrokerLock(path, socket);
+  await cleanup.acquire();
+  await cleanup.release();
+  assert.deepEqual(await readdir(root), []);
+});
+
+test("lifetime-lock admission bounds a public record before whole-file parsing", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "orch-lock-oversized-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, "broker.lock");
+  const socket = join(root, "broker.sock");
+  const oversized = "x".repeat(4097);
+
+  await writeFile(path, oversized, { mode: 0o600 });
+  await assert.rejects(new BrokerLock(path, socket).acquire(), /unsafe/u);
+  assert.equal(await readFile(path, "utf8"), oversized);
+  assert.deepEqual(await readdir(root), ["broker.lock"]);
+  await rm(path);
+  assert.deepEqual(await readdir(root), []);
 });
