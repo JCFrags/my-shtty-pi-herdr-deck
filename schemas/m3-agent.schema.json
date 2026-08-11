@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jcfrags.local/pi-herdr-orchestrator/schemas/m3-agent-v1.json",
+  "title": "M3 Pi Agent Registration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "agentId",
+    "generation",
+    "kind",
+    "role",
+    "projectId",
+    "workspaceId",
+    "lifecycle",
+    "capabilities",
+    "liveness"
+  ],
+  "properties": {
+    "version": { "const": 1 },
+    "agentId": { "type": "string", "pattern": "^agt_[0-9A-HJKMNP-TV-Z]{26}$" },
+    "generation": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+    "kind": { "enum": ["adopted", "managed"] },
+    "role": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    },
+    "projectId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "workspaceId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "parentAgentId": {
+      "type": ["string", "null"],
+      "pattern": "^agt_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "piSessionId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "processId": { "type": ["integer", "null"], "minimum": 1 },
+    "paneId": { "type": ["string", "null"], "minLength": 1, "maxLength": 256 },
+    "lifecycle": {
+      "enum": [
+        "starting",
+        "ready",
+        "busy",
+        "idle",
+        "stopping",
+        "stopped",
+        "orphaned"
+      ]
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "prompt",
+        "steer",
+        "followUp",
+        "abort",
+        "compact",
+        "model",
+        "thinking",
+        "tools"
+      ],
+      "properties": {
+        "prompt": { "type": "boolean" },
+        "steer": { "type": "boolean" },
+        "followUp": { "type": "boolean" },
+        "abort": { "type": "boolean" },
+        "compact": { "type": "boolean" },
+        "model": { "type": "boolean" },
+        "thinking": { "type": "boolean" },
+        "tools": { "type": "boolean" },
+        "toolExpansion": { "type": "boolean", "default": false }
+      }
+    },
+    "liveness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lastHeartbeatAt", "heartbeatIntervalMs", "connected"],
+      "properties": {
+        "lastHeartbeatAt": { "type": "string", "format": "date-time" },
+        "heartbeatIntervalMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 300000
+        },
+        "connected": { "type": "boolean" }
+      }
+    },
+    "occupant": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["sessionId", "generation"],
+      "properties": {
+        "sessionId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "generation": { "type": "integer", "minimum": 1, "maximum": 2147483647 }
+      }
+    }
+  }
+}

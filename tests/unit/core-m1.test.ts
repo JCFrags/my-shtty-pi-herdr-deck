@@ -185,10 +185,65 @@ test("broker restart preserves the owner-only secret", async () => {
   await second.stop();
 });
 
-test("declared Pi parent authentication fails closed before M3", () => {
+test("M3 Pi parent authentication accepts the operator secret and rejects wrong secrets", () => {
+  const principal = authenticate(
+    "operator-secret",
+    "operator-secret",
+    "pi_parent",
+  );
+  assert.equal(principal.kind, "pi_parent");
+  assert.ok(principal.permissions.includes("delegate"));
   assert.throws(
-    () => authenticate("operator-secret", "operator-secret", "pi_parent"),
-    /deferred/,
+    () => authenticate("operator-secret", "wrong-secret", "pi_parent"),
+    /Client authentication failed/,
+  );
+});
+
+test("M3 managed Pi authentication fails closed for wrong token, generation, or session", () => {
+  const credential = {
+    agentId: "agt_01J00000000000000000000000",
+    generation: 2,
+    tokenHash: "token-hash",
+    piSessionId: "pi-session-2",
+  };
+  assert.throws(
+    () =>
+      authenticate(
+        "unused",
+        "wrong-token",
+        "pi_child",
+        credential,
+        "wrong-token",
+        2,
+        "pi-session-2",
+      ),
+    /Managed agent identity is not valid/,
+  );
+  assert.throws(
+    () =>
+      authenticate(
+        "unused",
+        "unused",
+        "pi_child",
+        credential,
+        "token",
+        1,
+        "pi-session-2",
+      ),
+    /Managed agent identity is not valid/,
+  );
+  assert.throws(
+    () =>
+      authenticate(
+        "unused",
+        "unused",
+        "pi_child",
+        credential,
+        "token",
+        2,
+        "other-session",
+      ),
+    /Managed agent identity is not valid/,
   );
 });
 

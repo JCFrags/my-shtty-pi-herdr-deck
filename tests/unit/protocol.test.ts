@@ -19,12 +19,42 @@ import { baseState } from "../helpers.js";
 const commands: CommandFrame[] = [
   { type: "command", id: "1", name: "abort", args: {} },
   { type: "command", id: "2", name: "compact", args: {} },
-  { type: "command", id: "3", name: "sendUserMessage", args: { message: "hello", delivery: "normal" } },
-  { type: "command", id: "4", name: "setThinkingLevel", args: { level: "high" } },
-  { type: "command", id: "5", name: "setModel", args: { provider: "p", modelId: "m" } },
-  { type: "command", id: "6", name: "setActiveTools", args: { tools: ["read"] } },
-  { type: "command", id: "7", name: "setToolExpanded", args: { toolCallId: "call", expanded: true } },
-  { type: "command", id: "8", name: "setToolGroupExpanded", args: { scope: "currentTurn", expanded: false } },
+  {
+    type: "command",
+    id: "3",
+    name: "sendUserMessage",
+    args: { message: "hello", delivery: "normal" },
+  },
+  {
+    type: "command",
+    id: "4",
+    name: "setThinkingLevel",
+    args: { level: "high" },
+  },
+  {
+    type: "command",
+    id: "5",
+    name: "setModel",
+    args: { provider: "p", modelId: "m" },
+  },
+  {
+    type: "command",
+    id: "6",
+    name: "setActiveTools",
+    args: { tools: ["read"] },
+  },
+  {
+    type: "command",
+    id: "7",
+    name: "setToolExpanded",
+    args: { toolCallId: "call", expanded: true },
+  },
+  {
+    type: "command",
+    id: "8",
+    name: "setToolGroupExpanded",
+    args: { scope: "currentTurn", expanded: false },
+  },
   { type: "command", id: "9", name: "refreshState", args: {} },
 ];
 
@@ -35,63 +65,140 @@ test("protocol encodes and validates every command envelope", () => {
   }
 });
 
-
 test("encoder runtime-validates outbound frames and rejects non-JSON result values", () => {
   assert.throws(
-    () => encodeFrame({ type: "command", id: "x", name: "sendUserMessage", args: { message: "   ", delivery: "normal" } } as CommandFrame),
+    () =>
+      encodeFrame({
+        type: "command",
+        id: "x",
+        name: "sendUserMessage",
+        args: { message: "   ", delivery: "normal" },
+      } as CommandFrame),
     /must not be empty/,
   );
   assert.throws(
-    () => encodeFrame({ type: "result", id: "x", ok: true, value: undefined } as never),
+    () =>
+      encodeFrame({
+        type: "result",
+        id: "x",
+        ok: true,
+        value: undefined,
+      } as never),
     /JSON-compatible/,
   );
   assert.throws(
-    () => encodeFrame({ type: "result", id: "x", ok: true, value: Number.NaN } as never),
+    () =>
+      encodeFrame({
+        type: "result",
+        id: "x",
+        ok: true,
+        value: Number.NaN,
+      } as never),
     /finite numbers/,
   );
-  assert.equal(encodeFrame({ type: "result", id: "x", ok: true, value: null }).toString("utf8"), '{"type":"result","id":"x","ok":true,"value":null}\n');
+  assert.equal(
+    encodeFrame({ type: "result", id: "x", ok: true, value: null }).toString(
+      "utf8",
+    ),
+    '{"type":"result","id":"x","ok":true,"value":null}\n',
+  );
 });
 
 test("protocol rejects malformed JSON, unknown commands, extra fields, and empty messages", () => {
   const decoder = new NdjsonDecoder(validateCommandFrame);
   const malformed = decoder.push("{not-json}\n");
   assert.equal(malformed[0]?.ok, false);
-  if (!malformed[0]?.ok) assert.equal(malformed[0].error.code, "malformed_json");
+  if (!malformed[0]?.ok)
+    assert.equal(malformed[0].error.code, "malformed_json");
   assert.throws(
-    () => validateCommandFrame({ type: "command", id: "x", name: "shell", args: {} }),
-    (error: unknown) => error instanceof ProtocolValidationError && error.code === "unknown_command",
+    () =>
+      validateCommandFrame({
+        type: "command",
+        id: "x",
+        name: "shell",
+        args: {},
+      }),
+    (error: unknown) =>
+      error instanceof ProtocolValidationError &&
+      error.code === "unknown_command",
   );
   assert.throws(
-    () => validateCommandFrame({ type: "command", id: "x", name: "abort", args: {}, shell: "rm -rf /" }),
+    () =>
+      validateCommandFrame({
+        type: "command",
+        id: "x",
+        name: "abort",
+        args: {},
+        shell: "rm -rf /",
+      }),
     /unknown fields/,
   );
   assert.throws(
-    () => validateCommandFrame({ type: "command", id: "x", name: "sendUserMessage", args: { message: "   ", delivery: "normal" } }),
+    () =>
+      validateCommandFrame({
+        type: "command",
+        id: "x",
+        name: "sendUserMessage",
+        args: { message: "   ", delivery: "normal" },
+      }),
     /must not be empty/,
   );
 });
 
 test("command tool names reject control characters before execution", () => {
-  for (const value of [`unknown${String.fromCharCode(0x01)}tool`, `unknown${String.fromCharCode(0x1b)}[31mtool`]) {
+  for (const value of [
+    `unknown${String.fromCharCode(0x01)}tool`,
+    `unknown${String.fromCharCode(0x1b)}[31mtool`,
+  ]) {
     assert.throws(
-      () => validateCommandFrame({ type: "command", id: "tools", name: "setActiveTools", args: { tools: [value] } }),
+      () =>
+        validateCommandFrame({
+          type: "command",
+          id: "tools",
+          name: "setActiveTools",
+          args: { tools: [value] },
+        }),
       /control characters/,
     );
   }
   assert.deepEqual(
-    validateCommandFrame({ type: "command", id: "tools-safe", name: "setActiveTools", args: { tools: ["unknown-tool"] } }),
-    { type: "command", id: "tools-safe", name: "setActiveTools", args: { tools: ["unknown-tool"] } },
+    validateCommandFrame({
+      type: "command",
+      id: "tools-safe",
+      name: "setActiveTools",
+      args: { tools: ["unknown-tool"] },
+    }),
+    {
+      type: "command",
+      id: "tools-safe",
+      name: "setActiveTools",
+      args: { tools: ["unknown-tool"] },
+    },
   );
 });
 
 test("protocol result errors reject controls and preserve ordinary safe errors", () => {
-  for (const message of [`bad${String.fromCharCode(0x01)}error`, `bad${String.fromCharCode(0x1b)}[31merror`]) {
+  for (const message of [
+    `bad${String.fromCharCode(0x01)}error`,
+    `bad${String.fromCharCode(0x1b)}[31merror`,
+  ]) {
     assert.throws(
-      () => validateServerFrame({ type: "result", id: "error", ok: false, error: { code: "unknown_tool", message } }),
+      () =>
+        validateServerFrame({
+          type: "result",
+          id: "error",
+          ok: false,
+          error: { code: "unknown_tool", message },
+        }),
       /control characters/,
     );
   }
-  const safe = { type: "result", id: "safe", ok: false, error: { code: "unknown_tool", message: "Unknown tools: unknown-tool." } } as const;
+  const safe = {
+    type: "result",
+    id: "safe",
+    ok: false,
+    error: { code: "unknown_tool", message: "Unknown tools: unknown-tool." },
+  } as const;
   assert.deepEqual(validateServerFrame(safe), safe);
 });
 
@@ -117,25 +224,52 @@ test("hello and state frames use protocol version 1 and validated sequence numbe
       controller: true,
       readOnly: false,
       paneId: "1:1/2",
-      capabilities: { mouse: true, perToolExpansion: true, bulkToolExpansion: true, expansionSubscription: true },
+      capabilities: {
+        mouse: true,
+        perToolExpansion: true,
+        bulkToolExpansion: true,
+        expansionSubscription: true,
+      },
     },
   };
-  const state: StateFrame = { v: PROTOCOL_VERSION, type: "state", seq: 2, payload: baseState() };
+  const state: StateFrame = {
+    v: PROTOCOL_VERSION,
+    type: "state",
+    seq: 2,
+    payload: baseState(),
+  };
   assert.deepEqual(validateServerFrame(hello), hello);
   assert.deepEqual(validateServerFrame(state), state);
-  assert.throws(() => validateServerFrame({ ...state, seq: 0 }), /integer >= 1/);
-  assert.throws(() => validateServerFrame({ ...hello, v: 2 }), /protocol version 1/);
+  assert.throws(
+    () => validateServerFrame({ ...state, seq: 0 }),
+    /integer >= 1/,
+  );
+  assert.throws(
+    () => validateServerFrame({ ...hello, v: 2 }),
+    /protocol version 1/,
+  );
 });
 
 test("context percentage may exceed 100 after an overflow", () => {
-  const state = validateDeckState({ ...baseState(), context: { tokens: 1200, window: 1000, percent: 120 } });
+  const state = validateDeckState({
+    ...baseState(),
+    context: { tokens: 1200, window: 1000, percent: 120 },
+  });
   assert.equal(state.context?.percent, 120);
 });
 
 test("state display strings reject ASCII controls and terminal escape sequences", () => {
-  const fields = ["thinkingLevel", "allowedThinkingLevels", "activeTools", "availableTools"] as const;
+  const fields = [
+    "thinkingLevel",
+    "allowedThinkingLevels",
+    "activeTools",
+    "availableTools",
+  ] as const;
   for (const field of fields) {
-    for (const value of [`bad${String.fromCharCode(0x01)}value`, `bad${String.fromCharCode(0x1b)}[31mvalue`]) {
+    for (const value of [
+      `bad${String.fromCharCode(0x01)}value`,
+      `bad${String.fromCharCode(0x1b)}[31mvalue`,
+    ]) {
       const state = baseState() as unknown as Record<string, unknown>;
       state[field] = field === "thinkingLevel" ? value : [value];
       assert.throws(() => validateDeckState(state), /control characters/);
@@ -149,14 +283,44 @@ test("state display strings reject ASCII controls and terminal escape sequences"
 test("serialized state is a whitelist and contains no secret-bearing fields", () => {
   const state = validateDeckState(baseState());
   const encoded = JSON.stringify(state);
-  for (const forbidden of ["credential", "apiKey", "environment", "prompt", "toolOutput", "fileContents", "OPENAI_API_KEY"]) {
+  for (const forbidden of [
+    "credential",
+    "apiKey",
+    "environment",
+    "prompt",
+    "toolOutput",
+    "fileContents",
+    "OPENAI_API_KEY",
+  ]) {
     assert.equal(encoded.includes(forbidden), false);
   }
   assert.throws(
-    () => validateDeckState({ ...baseState(), environment: { OPENAI_API_KEY: "secret" } }),
+    () =>
+      validateDeckState({
+        ...baseState(),
+        environment: { OPENAI_API_KEY: "secret" },
+      }),
     /unknown fields/,
   );
-  assert.throws(() => validateDeckState({ ...baseState(), sessionFile: "/private/session" }), /unknown fields/);
-  assert.throws(() => validateDeckState({ ...baseState(), cwd: "/private/project" }), /unknown fields/);
-  assert.throws(() => validateDeckState({ ...baseState(), model: { provider: "test", id: "model", name: `bad${String.fromCharCode(0x1b)}[31m` } }), /control characters/);
+  assert.throws(
+    () =>
+      validateDeckState({ ...baseState(), sessionFile: "/private/session" }),
+    /unknown fields/,
+  );
+  assert.throws(
+    () => validateDeckState({ ...baseState(), cwd: "/private/project" }),
+    /unknown fields/,
+  );
+  assert.throws(
+    () =>
+      validateDeckState({
+        ...baseState(),
+        model: {
+          provider: "test",
+          id: "model",
+          name: `bad${String.fromCharCode(0x1b)}[31m`,
+        },
+      }),
+    /control characters/,
+  );
 });

@@ -25,7 +25,9 @@
     "herdr-plugin.toml",
     "README.md",
     "SECURITY.md",
-    "LICENSE"
+    "LICENSE",
+    "docs",
+    "scripts"
   ],
   "scripts": {
     "clean": "rm -rf dist",
@@ -38,8 +40,14 @@
     "validate": "npm run check && npm run build && npm run test:unit && npm run test:integration && npm run smoke:package",
     "test:schemas": "node scripts/schema-check.mjs",
     "schemas:check": "node scripts/schema-check.mjs",
-    "check": "npm run typecheck && npm run schemas:check",
-    "lint": "prettier --check \"src/shared/**/*.ts\" \"src/state/**/*.ts\" \"src/broker/**/*.ts\" \"src/cli/**/*.ts\" tests/unit/core-m1.test.ts tests/unit/m1-recovery-performance.test.ts"
+    "ops:plan": "node scripts/m7-ops.mjs plan",
+    "ops:deploy": "node scripts/m7-ops.mjs deploy",
+    "ops:canary": "node scripts/m7-ops.mjs canary",
+    "ops:soak": "node scripts/m7-ops.mjs soak",
+    "ops:rollback": "node scripts/m7-ops.mjs rollback",
+    "check": "npm run typecheck && npm run schemas:check && npm run docs:check",
+    "docs:check": "node scripts/check-release-docs.mjs",
+    "lint": "prettier --check \".github/**/*.{yml,yaml}\" \"bin/*\" \"extensions/**/*.ts\" \"src/**/*.ts\" \"tests/**/*.{ts,json}\" \"types/**/*.ts\" \"scripts/**/*.mjs\" \"schemas/**/*.json\" \"profiles/**/*.json\" \"examples/**/*.json\" \"workflows/{parallel-scout,single}.json\" package.json package-lock.json tsconfig.json"
   },
   "dependencies": {
     "@pi-herdr-deck/tui": "npm:@earendil-works/pi-tui@0.83.0"

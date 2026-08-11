@@ -14,11 +14,7 @@
       "objectiveTemplate": "{{input.objective}}",
       "constraints": [],
       "dependsOn": [],
-      "resultProjection": [
-        "/summary",
-        "/findings",
-        "/unresolved"
-      ],
+      "resultProjection": ["/summary", "/findings", "/unresolved"],
       "isolationMode": "profile-default"
     }
   ]

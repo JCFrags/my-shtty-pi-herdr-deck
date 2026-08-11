@@ -62,11 +62,6 @@ export function authenticate(
       ],
     };
   }
-  if (kind === "pi_parent")
-    throw new OrchestratorError(
-      "AUTH_FAILED",
-      "Pi parent registration is deferred until managed identity support.",
-    );
   if (!verifySecret(secret, received))
     throw new OrchestratorError("AUTH_FAILED", "Client authentication failed.");
   const permissions =

@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jcfrags.local/pi-herdr-orchestrator/schemas/m3-assignment-v1.json",
+  "title": "M3 Pi Assignment Envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "assignmentId",
+    "taskId",
+    "runId",
+    "agentId",
+    "generation",
+    "assignmentGeneration",
+    "piSessionId",
+    "objective",
+    "constraints",
+    "deadline"
+  ],
+  "properties": {
+    "version": { "const": 1 },
+    "assignmentId": {
+      "type": "string",
+      "pattern": "^asg_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "taskId": { "type": "string", "pattern": "^tsk_[0-9A-HJKMNP-TV-Z]{26}$" },
+    "runId": { "type": "string", "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$" },
+    "agentId": { "type": "string", "pattern": "^agt_[0-9A-HJKMNP-TV-Z]{26}$" },
+    "generation": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+    "assignmentGeneration": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647
+    },
+    "piSessionId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "objective": { "type": "string", "minLength": 1, "maxLength": 65536 },
+    "constraints": {
+      "type": "array",
+      "maxItems": 64,
+      "items": { "type": "string", "minLength": 1, "maxLength": 8192 }
+    },
+    "deadline": { "type": "string", "format": "date-time" },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "dependencyTaskIds": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^tsk_[0-9A-HJKMNP-TV-Z]{26}$" }
+    }
+  }
+}

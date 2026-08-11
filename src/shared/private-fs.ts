@@ -1,4 +1,5 @@
-import { createReadStream, constants } from "node:fs";
+import { constants } from "node:fs";
+import { finished } from "node:stream/promises";
 import type { Stats } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { LIMITS } from "./limits.js";
@@ -38,7 +39,13 @@ export async function* readPrivateLines(
 ): AsyncGenerator<string> {
   const handle = await openPrivateRegular(path);
   observe?.(await handle.stat());
-  const stream = createReadStream("", { fd: handle.fd, autoClose: false });
+  let stream: ReturnType<FileHandle["createReadStream"]>;
+  try {
+    stream = handle.createReadStream({ autoClose: true });
+  } catch (error) {
+    await handle.close();
+    throw error;
+  }
   let buffer = Buffer.alloc(0);
   try {
     for await (const chunk of stream) {
@@ -67,9 +74,14 @@ export async function* readPrivateLines(
     if (buffer.length)
       throw new Error("Private file ends with an incomplete line.");
   } finally {
+    const streamCompletion = finished(stream, { cleanup: true });
     stream.destroy();
-    await handle.close().catch((error: NodeJS.ErrnoException) => {
-      if (error.code !== "EBADF") throw error;
+    await streamCompletion.catch((error: NodeJS.ErrnoException) => {
+      if (
+        error.code !== "ERR_STREAM_PREMATURE_CLOSE" &&
+        error.code !== "ABORT_ERR"
+      )
+        throw error;
     });
   }
 }

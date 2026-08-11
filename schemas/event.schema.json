@@ -40,10 +40,7 @@
     "actor": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "principalId",
-        "kind"
-      ],
+      "required": ["principalId", "kind"],
       "properties": {
         "principalId": {
           "type": "string",
@@ -51,21 +48,12 @@
           "maxLength": 64
         },
         "kind": {
-          "enum": [
-            "human",
-            "pi_parent",
-            "pi_child",
-            "observer",
-            "system"
-          ]
+          "enum": ["human", "pi_parent", "pi_child", "observer", "system"]
         }
       }
     },
     "correlationId": {
-      "type": [
-        "string",
-        "null"
-      ],
+      "type": ["string", "null"],
       "maxLength": 128
     },
     "entityRefs": {

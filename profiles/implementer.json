@@ -15,15 +15,7 @@
   },
   "tools": {
     "mode": "allowlist",
-    "names": [
-      "read",
-      "write",
-      "edit",
-      "bash",
-      "grep",
-      "find",
-      "ls"
-    ]
+    "names": ["read", "write", "edit", "bash", "grep", "find", "ls"]
   },
   "isolation": {
     "mode": "worktree",

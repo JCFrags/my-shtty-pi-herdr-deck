@@ -1,106 +1,92 @@
-# my-shtty-pi-herdr-deck
+# Pi Herd Orchestrator
 
-The `pi-herdr-deck` package is a combined Pi package and Herdr plugin that opens a narrow, mouse-first control deck beside a running Pi pane. Version 0.1.0 is Linux-only and exposes two functional tabs: **Overview** and **Tools**.
+`pi-herdr-orchestrator` is a Linux package for Pi and a managed-pane plugin for Herdr. It provides a local broker, Pi lifecycle integration, task and workflow control, result and question handling, a scheduler, and the Pi Herd control pane.
 
-The deck controls Pi through a private Unix-domain socket created by the Pi extension. It does not inject terminal input, mirror the transcript, expose a shell command, or listen on TCP.
+This release is for reviewed local use. It does not publish an npm package or create a public release.
 
-## Compatibility
+## Requirements
 
-| Component | Requirement |
-| --- | --- |
-| Operating system | Linux |
-| Node.js | 22.19.0 or newer |
-| Herdr | 0.7.2 or newer, with `agent.list` and `agent.focus` in the installed schema |
-| Pi | A build exposing component mouse events, per-tool expansion state, current-turn/session bulk expansion selectors, and expansion-change subscription |
+| Component | Minimum or requirement                                    |
+| --------- | --------------------------------------------------------- |
+| Linux     | Required                                                  |
+| Node.js   | 22.19.0                                                   |
+| Herdr     | 0.8.0                                                     |
+| Pi        | A compatible build of Pi with the required extension APIs |
 
-The Herdr minimum is **0.7.2**, not the version used by a developer workstation. Herdr plugin v1 and managed panes appeared in 0.7.0, but this plugin also requires the authoritative `herdr api schema --json` command added in 0.7.2. At every deck startup, the installed binary is queried and the required methods are checked before any wrapper is invoked.
+The plugin manifest requires Herdr 0.8.0. Herdr 0.7.5 and older versions cannot load this plugin metadata. Upgrade Herdr before you link or open the plugin.
 
-Pi is capability-gated rather than version-gated. The extension and standalone deck use the same compatibility text:
+The Pi control deck also requires component mouse events, per-tool expansion state, current-turn and session bulk expansion selectors, and expansion-change subscription. If these APIs are absent, the deck reports an incompatibility and does not emulate them with terminal input.
 
-> Pi Deck requires Pi with component mouse events, per-tool expansion state and bulk selectors, and expansion-change subscription. The installed Pi API is incompatible.
+## Shipped identifiers
 
-An incompatible Pi session starts a permission-restricted rejection endpoint long enough for the deck to receive that exact reason and stop reconnecting. No stack trace is shown.
+| Item                      | Shipped value                                |
+| ------------------------- | -------------------------------------------- |
+| Pi extension              | `./dist/extensions/pi-herdr-orchestrator.js` |
+| Primary Pi status command | `/orchestrator-status`                       |
+| Herdr plugin ID           | `pi.herdr.orchestrator`                      |
+| Managed pane entrypoint   | `deck`                                       |
+| Managed pane title        | `Pi Herd`                                    |
+| Managed pane command      | `./bin/pi-herdr-orchestrator deck`           |
+| Minimum Herdr             | `0.8.0`                                      |
 
-The standalone process first checks a host-provided `@earendil-works/pi-tui` peer, then falls back to the exact `@earendil-works/pi-tui@0.83.0` runtime pinned through the private npm alias `@pi-herdr-deck/tui`. The extension imports Pi's host-side `@earendil-works/pi-tui` and other Pi core packages only through peer dependencies; none are bundled.
+The package manifest and plugin manifest are the source of truth for these identifiers.
 
-The public Pi 0.83.0 API/package surface was used as the compatibility baseline. That stock surface exposes only a global tool-expansion boolean and does not export the required component mouse API, so an unmodified Pi 0.83.0 installation follows the explicit incompatibility path above. A functional deck requires a Pi build that adds all four capability-gated surfaces; the extension never substitutes raw mouse parsing or terminal keystroke control.
+## Build and validate
 
-## Build
-
-From the repository root:
+Run these commands from the package root:
 
 ```bash
 npm install
-npm run build
-```
-
-The build emits the extension and deck under `dist/`. The package manifest points Pi at `dist/extensions/pi-herdr-deck.js`, so build before installing from a local path. For a capability-complete Pi fork, resolve the peer package names in this checkout to that fork before building; the peers remain external and are not included in the npm archive.
-
-Run the full validation suite with:
-
-```bash
 npm run validate
 ```
 
-Development validation for this release used Node.js 24.11.1 and TypeScript 5.8.3. Herdr 0.8.0 was exercised through its checked schema projection and a fake argv-compatible CLI; Pi 0.83.0 was exercised through source-shaped API fixtures, the incompatibility path, and a capability-complete fake bridge. No real Herdr or Pi executable, model provider, or model API key is required by the tests.
+The build emits the Pi extension and runtime under `dist/`. Validation runs type checks, schema checks, the static release-document check, the build, unit and integration tests, and the package smoke test. Tests use local fakes and do not need a live Pi or Herdr process.
 
-## Install as a Pi package
+## Install the local Pi package
 
-Install the built local directory. Pi records local paths without copying them, so keep the checkout in place.
+Pi local paths point to the directory. Pi does not copy it. Keep the directory at the same path after installation.
 
-```bash
-pi install "$(pwd)"
-```
-
-For project-local installation, add `-l`:
+Install for the current user:
 
 ```bash
-pi install -l "$(pwd)"
+PACKAGE_ROOT=$(pwd)
+pi install "$PACKAGE_ROOT"
 ```
 
-Start or reload Pi after installation. Inside Pi, the command below reports the bridge state:
-
-```text
-/herdr-deck-status
-```
-
-When Pi is not running in a Herdr pane, the extension remains loadable and reports that `HERDR_PANE_ID` is unavailable.
-
-## Link as a Herdr plugin
+Install for the current project instead:
 
 ```bash
-herdr plugin link "$(pwd)"
+PACKAGE_ROOT=$(pwd)
+pi install -l "$PACKAGE_ROOT"
 ```
 
-The manifest declares one managed pane entrypoint:
+Start Pi after installation. Pi loads `./dist/extensions/pi-herdr-orchestrator.js` from the package manifest.
 
-| Field | Value |
-| --- | --- |
-| Stable plugin ID | `pi.herdr.deck` |
-| Entrypoint | `deck` |
-| Title | `Pi Deck` |
-| Default placement | `split` |
-| Platform | `linux` |
-| Build command | `npm run build` as argv |
-| Minimum Herdr | `0.7.2` |
-| Pane command | `./bin/pi-herdr-deck` as argv |
+## Link the Herdr plugin
 
-There are no placeholder Files, Review, Sessions, or Agents tabs.
+Confirm that Herdr is version 0.8.0 or newer. Then link the same package root:
 
-## Open the deck beside a selected Pi pane
+```bash
+PACKAGE_ROOT=$(pwd)
+herdr plugin link "$PACKAGE_ROOT"
+```
 
-First list live agents and identify the Pi pane ID:
+The manifest links plugin `pi.herdr.orchestrator`. It declares entrypoint `deck`, title `Pi Herd`, and pane command `./bin/pi-herdr-orchestrator deck`.
+
+## Open Pi Herd
+
+List live agents and select the target Pi pane:
 
 ```bash
 herdr agent list
 ```
 
-Open the managed deck as a right-hand split, targeting that pane explicitly:
+Open the managed pane as a right-hand split:
 
 ```bash
 PI_PANE='replace-with-the-pi-pane-id'
 herdr plugin pane open \
-  --plugin pi.herdr.deck \
+  --plugin pi.herdr.orchestrator \
   --entrypoint deck \
   --placement split \
   --target-pane "$PI_PANE" \
@@ -108,207 +94,115 @@ herdr plugin pane open \
   --focus
 ```
 
-Herdr supplies the invocation context through `HERDR_PLUGIN_CONTEXT_JSON`. The deck verifies context candidates against live Pi agents returned by the schema-gated `agent list` wrapper. If the context does not identify exactly one live Pi pane, the deck shows a picker—even when discovery finds only one candidate. It never silently attaches to an arbitrary agent.
+Herdr supplies the plugin context. Pi Herd checks the selected pane against live agent data. It does not silently attach to an arbitrary pane when identity is missing or ambiguous.
 
-## Verify the connection
+## Verify
 
-In the target Pi pane:
-
-```text
-/herdr-deck-status
-```
-
-A connected session reports the exact socket path. The deck header changes to `Connected to <pane-id>`, and Overview shows the current state/model/thinking/context fields.
-
-The runtime location is:
+In the target Pi pane, run:
 
 ```text
-${XDG_RUNTIME_DIR}/pi-herdr-deck-${uid}/
+/orchestrator-status
 ```
 
-or, when `XDG_RUNTIME_DIR` is unset:
+The command reports the orchestrator extension and broker state. The managed pane title is `Pi Herd`.
 
-```text
-${os.tmpdir()}/pi-herdr-deck-${uid}/
-```
-
-The directory is mode `0700`; the socket is mode `0600` where supported. The filename is the sanitized Herdr Pi pane ID plus a collision-resistant suffix and `.sock`.
-
-A shell-level verification on Linux:
+For command-line checks, use:
 
 ```bash
-BASE="${XDG_RUNTIME_DIR:-$(node -p 'require("node:os").tmpdir()')}"
-RUNTIME_DIR="$BASE/pi-herdr-deck-$(id -u)"
-stat -c '%a %U %n' "$RUNTIME_DIR" "$RUNTIME_DIR"/*.sock
+./bin/pi-herdr-orchestrator doctor --json
+./bin/pi-herdr-orchestrator broker status
+./bin/pi-herdr-orchestrator events verify --json
 ```
 
-Expected modes are `700` for the directory and `600` for the socket.
-
-## Deck controls
-
-### Overview
-
-Overview shows Pi activity, current model, thinking level, context use, queued-message presence, Stop/Compact controls, and an editable message box.
-
-Delivery rules are enforced on both sides of the socket:
-
-- **Send** uses normal delivery and is enabled only while Pi is idle.
-- **Steer** and **Follow-up** are enabled only while Pi is working.
-- Empty messages are rejected.
-- **Stop** aborts only a working run.
-- **Compact** is enabled only while Pi is idle.
-- Model changes require an exact provider/model ID pair from the advertised scoped choices.
-
-### Tools
-
-Tools shows the expanded/total count, status filter, active-tool selectors, individual tool calls, and four bulk controls:
-
-- current-turn Expand and Collapse;
-- session Expand and Collapse.
-
-Only the caret hit area changes an individual tool call. Active-tool changes reject names that Pi did not advertise.
-
-### Mouse and keyboard
-
-The deck receives first-class component-local mouse events from Pi TUI. It does not parse SGR mouse sequences itself.
-
-- One left-button press/release on the same control activates it.
-- Movement between press and release cancels activation.
-- Mouse wheel scrolls the Tools list.
-- Right-click is not consumed, leaving Herdr’s right-click behavior available.
-- `Tab` and `Shift+Tab` move focus; `Enter` or `Space` activates the focused control.
-- `1` and `2`, or Left/Right, select Overview and Tools.
-- Arrow keys move through dropdowns and scroll tool rows.
-- `Esc` closes a dropdown or leaves message editing.
-
-While disconnected, all Pi-mutating controls are visibly disabled. Commands are never retained for later delivery. Reconnection uses bounded exponential backoff; when the retry limit is reached, the deck remains disconnected until reopened.
-
-## Transport and protocol
-
-The transport is newline-delimited JSON over a same-user Unix-domain socket. Protocol version is `1`; the maximum line size is 1 MiB. Every frame is checked by a runtime validator.
-
-The server sends `hello` with sequence 1, then an initial `state` snapshot. State sequence numbers increase strictly per connection. Clients discard stale state frames.
-
-Commands:
-
-```text
-abort
-compact
-sendUserMessage
-setThinkingLevel
-setModel
-setActiveTools
-setToolExpanded
-setToolGroupExpanded
-refreshState
-```
-
-Command results use the same request ID and return either a value or a structured `{ code, message }` error. Malformed and oversized input is rejected without terminating the bridge.
-
-The state whitelist includes a session ID when available, the Herdr pane ID, idle/working state, queued-message presence, model choices/current model, thinking choices/current level, context usage, active/available tools, per-tool expansion state, turn index, and a generic last error. It does not serialize the session-file path or working directory. It never serializes credentials, environment variables, prompt text, tool output, or file contents.
-
-Only one controlling deck may attach to a Pi pane. A second client is explicitly rejected. The bridge rate-limits state pushes to avoid render storms.
-
-## Herdr interaction boundary
-
-The deck reads `HERDR_BIN_PATH` and launches Herdr with argv arrays and `shell: false`. It reads the installed schema with:
+A dry-run release rehearsal is also available:
 
 ```bash
-herdr api schema --json
+npm run ops:plan
 ```
 
-Version one uses only schema-confirmed CLI wrappers to list agents and focus the target Pi agent. It does not resize unrelated panes, switch workspaces, launch agents, or use undocumented Herdr socket methods.
+The rehearsal does not deploy, restart, or roll back a live process.
 
-## Security model
+## Operator safety and runtime limits
 
-This is a control UI, **not a sandbox or permission boundary**. The Pi extension runs with the same account and authority as Pi. The filesystem permissions restrict the local socket to its owner, but a process already running as that user may act with that user’s permissions.
+The broker uses an owner-only Unix-domain socket and bounded newline-delimited JSON frames. It has no TCP listener and no arbitrary shell broker method. External commands use argument arrays without shell interpolation.
 
-The bridge has no TCP listener, no arbitrary command name, no arbitrary shell execution, no terminal keystroke injection, and no shell interpolation. Existing socket paths are removed only after a connection probe confirms that no server is listening. Non-socket paths are never removed.
+Canonical state uses a verified event chain and authenticated snapshots. Recovery fails closed on corrupt or ambiguous state. Resource operations revalidate identity and preserve dirty, replaced, missing, or ambiguous worktrees instead of deleting them.
 
-## Uninstall
+The extension does not serialize credentials, environment variables, prompts, tool output, file contents, session-file paths, or working directories into the deck state. This package is a same-user control plane, not a sandbox. Its processes have the permissions of the account that runs Pi and Herdr.
 
-Remove the Pi package using the same local source string used for installation:
+Retained registration files have count, size, age, type, ownership, mode, symlink, replacement, and hard-link admission checks. Normal uninstall preserves state. Data deletion is a separate owner-approved operation after the broker and managed agents stop.
+
+See [docs/OPERATIONS_M7.md](docs/OPERATIONS_M7.md) for recovery, export, retention, and operation-plan details. See [docs/OPERATIONS_M7_RELEASE.md](docs/OPERATIONS_M7_RELEASE.md) for the non-live release rehearsal.
+
+## Roll back a local package change
+
+Keep the prior reviewed package directory or exact checkout available. Before a separately approved rollback, stop new work and export and verify state as described in the operations runbook. Confirm that the prior version supports the stored state generation.
+
+Remove the current Pi package with the exact source string used to install it. Then install the prior local directory:
 
 ```bash
-pi remove "$(pwd)"
+CURRENT_PACKAGE_ROOT='/absolute/path/used-for-the-current-install'
+PRIOR_PACKAGE_ROOT='/absolute/path/to-the-reviewed-prior-package'
+pi remove "$CURRENT_PACKAGE_ROOT"
+pi install "$PRIOR_PACKAGE_ROOT"
 ```
 
-For a project-local installation:
+For project-local settings, use the same `-l` scope for both commands:
 
 ```bash
-pi remove -l "$(pwd)"
+pi remove -l "$CURRENT_PACKAGE_ROOT"
+pi install -l "$PRIOR_PACKAGE_ROOT"
 ```
 
-Unlink the Herdr plugin:
+Relink Herdr to the prior package root:
 
 ```bash
-herdr plugin unlink pi.herdr.deck
+herdr plugin unlink pi.herdr.orchestrator
+herdr plugin link "$PRIOR_PACKAGE_ROOT"
 ```
 
-Close any still-visible managed deck pane before unlinking when necessary:
+A live rollback also requires an approved restart, health checks, reconciliation, and recorded proof. The dry-run harness is plan-only and is not live rollback proof.
+
+## Unlink and remove
+
+Close a visible managed pane before unlinking when needed:
 
 ```bash
-herdr plugin pane close replace-with-the-deck-pane-id
+herdr plugin pane close replace-with-the-pi-herd-pane-id
 ```
 
-Build artifacts and local dependencies can then be removed:
+Unlink the shipped plugin:
 
 ```bash
-rm -rf dist node_modules
+herdr plugin unlink pi.herdr.orchestrator
 ```
 
-## Troubleshooting
-
-### `HERDR_PANE_ID` is unavailable
-
-Pi was started outside a Herdr-owned pane. The extension intentionally stays loaded but does not create a socket. Start Pi inside a Herdr pane, then run `/herdr-deck-status` again. Opening the standalone deck does not retrofit `HERDR_PANE_ID` into an already-running external Pi process.
-
-### Incompatible Pi API
-
-The shared compatibility sentence means at least one mandatory surface is absent: component mouse events, per-tool expansion snapshot, current-turn/session bulk expansion, or expansion-change subscription. A single global “tools expanded” boolean is insufficient.
-
-The expansion adapter accepts either a `ctx.ui.toolExpansion` capability object (`getStates`/`getSnapshot`, `setToolExpanded`, `setGroupExpanded`, `subscribe`) or the corresponding flat methods exposed directly by `ctx.ui`. Upgrade to a Pi build that supplies all four capabilities; the bridge does not emulate them by injecting terminal input.
-
-### Socket permission or ownership errors
-
-Check ownership and modes with the `stat` command in **Verify the connection**. The runtime directory must be owned by the current UID and must not be a symlink. Correct an accidentally permissive directory with:
+Remove the Pi package with the exact local source string used at installation:
 
 ```bash
-chmod 700 "${XDG_RUNTIME_DIR:-/tmp}/pi-herdr-deck-$(id -u)"
+PACKAGE_ROOT='/absolute/path/used-for-installation'
+pi remove "$PACKAGE_ROOT"
 ```
 
-Do not manually delete a socket while Pi is running. On startup, the extension probes an existing socket and removes it only when no listener responds. If a regular file occupies the expected socket path, startup fails rather than deleting it.
-
-### More than one Pi pane exists
-
-Pass `--target-pane` when opening the managed pane. If context remains ambiguous, select the intended live Pi agent in the deck picker. The picker is deliberate; there is no first-agent fallback.
-
-### Installed Herdr schema is missing a method
-
-Run:
+For a project-local install:
 
 ```bash
-herdr api schema --json > /tmp/herdr-api.schema.json
+pi remove -l "$PACKAGE_ROOT"
 ```
 
-The deck requires `agent.list` and `agent.focus`. Upgrade Herdr when either method or the schema command is absent. The manifest minimum remains 0.7.2 because that is the earliest release with the required schema bootstrap, not because it happened to be installed during development.
+Normal removal does not delete orchestrator state, logs, results, or managed worktrees.
 
-## Tests
+## Compatibility: legacy Pi Deck
 
-`npm run validate` runs, in order:
+This section describes compatibility entrypoints. They are not the primary package or plugin identifiers.
 
-1. strict TypeScript typecheck;
-2. production build;
-3. unit tests;
-4. fake Pi bridge/fake Herdr CLI integration test with no model key;
-5. npm package smoke test.
+- `pi-herdr-deck` remains available for one release for the legacy Overview and Tools deck behavior. It prints a deprecation notice that directs operators to `pi-herdr-orchestrator deck` before it launches the new deck.
+- `/herdr-deck-status` belongs to the legacy deck extension.
+- The old plugin ID `pi.herdr.deck` is not the shipped plugin ID. Do not use it to open, unlink, or verify this release.
+- The primary Pi package loads only `./dist/extensions/pi-herdr-orchestrator.js`. It does not load the legacy extension as its primary extension.
 
-Coverage includes protocol encoding/decoding, malformed and oversized frames, socket paths/modes, stale recovery, hello/state sequencing, stale-state rejection, every command and invalid state, model/tool validation, reconnect/no-queue behavior, duplicate clients, target resolution, first-class mouse and keyboard activation, disabled controls, state secret whitelisting, extension reload/session-shutdown cleanup, compatibility rejection, schema drift, and package contents.
+The legacy deck uses a same-user Unix socket, explicit target selection, bounded reconnect, no offline command queue, and capability checks for Pi mouse and tool-expansion APIs. Its status command is available only when the legacy deck extension is loaded explicitly. Use `/orchestrator-status` for the shipped package.
 
-## Non-goals
+## Deferred scope
 
-Version one does not implement a file browser, change review, session switching, sub-agent spawning, arbitrary shell execution, transcript mirroring, or raw terminal keystroke control.
-
-## Orchestrator migration
-
-This release adds the `pi-herdr-orchestrator` binary and the `pi.herdr.orchestrator` plugin. The `pi-herdr-deck` binary remains as a compatibility entrypoint for the existing Overview and Tools behavior. M0/M1 core state and broker APIs are local-only and do not publish packages or use provider credentials.
+The Files UI is deferred. Version 0.1.0 does not provide a file browser, arbitrary shell execution, transcript mirroring, or raw terminal keystroke control.
