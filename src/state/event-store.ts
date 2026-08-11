@@ -50,17 +50,21 @@ function validTaskProject(value: unknown): boolean {
   const project = value as Record<string, unknown>;
   const values =
     boundedText(project.cwd, 4096) && boundedText(project.workspaceId, 256);
-  const basic = exactKeys(project, ["cwd", "workspaceId"]) && values;
-  const inherited =
-    exactKeys(project, ["cwd", "workspaceId", "worktreeId", "isolation"]) &&
-    values &&
-    boundedText(project.worktreeId, 256) &&
-    project.isolation === "shared-readonly";
-  const isolated =
+  if (!values) return false;
+  if (exactKeys(project, ["cwd", "workspaceId"])) return true;
+  if (
     exactKeys(project, ["cwd", "workspaceId", "isolation"]) &&
-    values &&
-    project.isolation === "shared-readonly";
-  return basic || inherited || isolated;
+    (project.isolation === "shared-readonly" ||
+      project.isolation === "worktree")
+  )
+    return true;
+  if (!exactKeys(project, ["cwd", "workspaceId", "worktreeId", "isolation"]))
+    return false;
+  return (
+    boundedText(project.worktreeId, 256) &&
+    (project.isolation === "shared-readonly" ||
+      project.isolation === "worktree")
+  );
 }
 const EVENT_KEYS = [
   "schemaVersion",
@@ -540,8 +544,9 @@ export class EventStore {
         "profileId",
         "dependencies",
         "project",
+        "isolationMode",
       ];
-      for (let mask = 0; mask < 32; mask++)
+      for (let mask = 0; mask < 64; mask++)
         for (const hasTimeout of [false, true]) {
           const keys = ["taskId", "title", "objective", "createdAt"];
           if (hasTimeout) keys.push("timeoutAt");
@@ -566,11 +571,26 @@ export class EventStore {
         (p.parentAgentId === undefined || isEntityId(p.parentAgentId, "agt")) &&
         (p.workflowId === undefined || isEntityId(p.workflowId, "wfl")) &&
         (p.profileId === undefined || boundedText(p.profileId, 256)) &&
+        (p.isolationMode === undefined ||
+          [
+            "profile-default",
+            "shared-readonly",
+            "worktree",
+            "shared-explicit",
+            "reuse-worktree",
+          ].includes(p.isolationMode as string)) &&
         (p.dependencies === undefined ||
           (Array.isArray(p.dependencies) &&
             p.dependencies.length <= 64 &&
             p.dependencies.every((id) => isEntityId(id, "tsk")))) &&
         (p.project === undefined || validTaskProject(p.project));
+    } else if (event.type === "task.project_bound") {
+      valid =
+        exactKeys(refs, ["taskId"]) &&
+        isEntityId(refs.taskId, "tsk") &&
+        exactKeys(p, ["taskId", "project"]) &&
+        p.taskId === refs.taskId &&
+        validTaskProject(p.project);
     } else if (event.type === "run.created") {
       const runKeyVariants = [
         [
@@ -786,6 +806,7 @@ export class EventStore {
             "tabId",
             "worktreeId",
             "worktreePath",
+            "workspaceId",
             "reason",
             "terminalId",
             "sessionId",
@@ -833,6 +854,7 @@ export class EventStore {
         "agent.state_changed",
         "agent.replaced",
         "task.created_m3",
+        "task.project_bound",
         "run.created",
         "assignment.delivered",
         "assignment.accepted",

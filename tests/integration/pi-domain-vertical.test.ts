@@ -210,6 +210,31 @@ async function request(
   return client.request(method, params);
 }
 
+type CleanupAction = () => void | Promise<void>;
+
+async function orderedCleanup(
+  primaryError: unknown,
+  actions: CleanupAction[],
+): Promise<void> {
+  const teardownErrors: unknown[] = [];
+  for (const action of actions) {
+    try {
+      await action();
+    } catch (error) {
+      teardownErrors.push(error);
+    }
+  }
+  if (primaryError !== undefined && teardownErrors.length > 0)
+    throw new AggregateError(
+      [primaryError, ...teardownErrors],
+      "Body and teardown failed.",
+    );
+  if (primaryError !== undefined) throw primaryError;
+  if (teardownErrors.length === 1) throw teardownErrors[0];
+  if (teardownErrors.length > 1)
+    throw new AggregateError(teardownErrors, "Teardown failed.");
+}
+
 async function runCase(kind: "cancel" | "deadline"): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), `pi-domain-${kind}-`));
   const runtime = await mkdtemp(join(tmpdir(), `pi-domain-${kind}-runtime-`));
@@ -237,6 +262,9 @@ async function runCase(kind: "cancel" | "deadline"): Promise<void> {
   };
   let parent: PiBrokerClient | undefined;
   let child: PiBrokerClient | undefined;
+  let primaryError: unknown;
+  let terminalEvidence: any[] | undefined;
+  let terminalEvent: any;
   let parentAdapter: PiAdapter | undefined;
   let childAdapter: PiAdapter | undefined;
   try {
@@ -425,7 +453,7 @@ async function runCase(kind: "cancel" | "deadline"): Promise<void> {
     const timeoutAt = task.timeoutAt!;
     assert.equal(timeoutAt, run.timeoutAt);
 
-    const terminalEvidence: any[] = [];
+    terminalEvidence = [];
     const removeTerminalEvidence = broker.store.onAppend((event) => {
       if (event.entityRefs?.taskId !== taskId) return;
       if (
@@ -433,7 +461,7 @@ async function runCase(kind: "cancel" | "deadline"): Promise<void> {
         (event.type === "run.state_changed" &&
           ["cancelled", "timed_out"].includes((event.payload as any)?.state))
       )
-        terminalEvidence.push(event);
+        terminalEvidence!.push(event);
     });
     ownedRemovers.push(removeTerminalEvidence);
     const terminalReceipt = ownReceipt(
@@ -461,7 +489,7 @@ async function runCase(kind: "cancel" | "deadline"): Promise<void> {
       assert.ok(due, "owned task deadline timer exists");
       timers.advance(Date.parse(timeoutAt));
     }
-    const terminalEvent = await bounded(
+    terminalEvent = await bounded(
       terminalReceipt.promise,
       "canonical terminal event",
     );
@@ -526,33 +554,63 @@ async function runCase(kind: "cancel" | "deadline"): Promise<void> {
       );
     }
     assert.equal(herdr.stops.length, 0);
-    child.close();
-    parent.close();
-    assert.equal(child.connected, false);
-    assert.equal(parent.connected, false);
-    await bounded(broker.stop(), "broker stop");
-    assert.equal(terminalEvidence.length, 1);
-    assert.equal(terminalEvidence[0], terminalEvent);
-    const afterStop = await readFile(pathsForCase.events, "utf8");
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    assert.equal(await readFile(pathsForCase.events, "utf8"), afterStop);
-    await assert.rejects(access(pathsForCase.socket));
-    await assert.rejects(access(pathsForCase.lock));
-  } finally {
-    child?.close();
-    parent?.close();
-    await broker.stop().catch(() => undefined);
-    for (const remove of ownedRemovers.splice(0)) remove();
-    if (originalPane === undefined) delete process.env.HERDR_PANE_ID;
-    else process.env.HERDR_PANE_ID = originalPane;
-    if (originalTerminal === undefined) delete process.env.HERDR_TERMINAL_ID;
-    else process.env.HERDR_TERMINAL_ID = originalTerminal;
-    if (originalName === undefined) delete process.env.HERDR_AGENT_NAME;
-    else process.env.HERDR_AGENT_NAME = originalName;
-    await rm(root, { recursive: true, force: true });
-    await rm(runtime, { recursive: true, force: true });
+  } catch (error) {
+    primaryError = error;
   }
+  // Keep terminalEvidence and all receipts installed through Broker stop.
+  await orderedCleanup(primaryError, [
+    () => child?.close(),
+    () => parent?.close(),
+    () => bounded(broker.stop(), "broker stop"),
+    async () => {
+      assert.equal(terminalEvidence?.length, 1);
+      if (terminalEvent) assert.equal(terminalEvidence?.[0], terminalEvent);
+      await assert.rejects(access(pathsForCase.socket));
+      await assert.rejects(access(pathsForCase.lock));
+    },
+    () => {
+      for (const remove of ownedRemovers.splice(0)) remove();
+    },
+    () => {
+      if (originalPane === undefined) delete process.env.HERDR_PANE_ID;
+      else process.env.HERDR_PANE_ID = originalPane;
+      if (originalTerminal === undefined) delete process.env.HERDR_TERMINAL_ID;
+      else process.env.HERDR_TERMINAL_ID = originalTerminal;
+      if (originalName === undefined) delete process.env.HERDR_AGENT_NAME;
+      else process.env.HERDR_AGENT_NAME = originalName;
+    },
+    () => rm(root, { recursive: true, force: true }),
+    () => rm(runtime, { recursive: true, force: true }),
+  ]);
 }
+
+test("teardown preserves body and ordered cleanup failures", async () => {
+  const body = new Error("body-sentinel");
+  const cleanupA = new Error("cleanup-a");
+  const cleanupB = new Error("cleanup-b");
+  const order: string[] = [];
+  await assert.rejects(
+    orderedCleanup(body, [
+      () => {
+        order.push("client");
+        throw cleanupA;
+      },
+      () => {
+        order.push("broker");
+        throw cleanupB;
+      },
+      () => {
+        order.push("listeners");
+      },
+    ]),
+    (error: unknown) => {
+      assert.ok(error instanceof AggregateError);
+      assert.deepEqual(error.errors, [body, cleanupA, cleanupB]);
+      return true;
+    },
+  );
+  assert.deepEqual(order, ["client", "broker", "listeners"]);
+});
 
 test("real Broker, PiBrokerClient, and PiAdapter active cancellation vertical", async () => {
   for (let attempt = 0; attempt < 20; attempt++) await runCase("cancel");

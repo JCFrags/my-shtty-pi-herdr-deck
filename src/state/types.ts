@@ -48,6 +48,12 @@ export interface Task {
   parentAgentId?: string;
   workflowId?: string;
   profileId?: string;
+  isolationMode?:
+    | "profile-default"
+    | "shared-readonly"
+    | "worktree"
+    | "shared-explicit"
+    | "reuse-worktree";
   constraints?: string[];
   dependencies?: string[];
   currentRunId?: string;
@@ -155,6 +161,7 @@ export interface OrchestrationState {
       tabId?: string;
       worktreeId?: string;
       worktreePath?: string;
+      workspaceId?: string;
       reason?: string;
       parentAgentId?: string;
       ownerId?: string;

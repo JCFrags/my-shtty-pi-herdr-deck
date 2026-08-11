@@ -25,6 +25,8 @@ export interface ProvisionInput {
   prompt: string;
   projectBase?: string;
   branch?: string;
+  reuseWorktreeId?: string;
+  reuseWorktreePath?: string;
   env?: Record<string, string>;
 }
 export interface ProvisionResult {
@@ -72,6 +74,23 @@ async function withRetentionAdmission<T>(
       retentionAdmissions.delete(root);
   }
 }
+function assertReuseWorktreeIdentity(input: ProvisionInput): void {
+  const hasReuseId = input.reuseWorktreeId !== undefined;
+  const hasReusePath = input.reuseWorktreePath !== undefined;
+  const valid = (value: unknown, max: number): value is string =>
+    typeof value === "string" &&
+    value.length > 0 &&
+    Buffer.byteLength(value, "utf8") <= max &&
+    !/[\u0000-\u001f\u007f]/u.test(value);
+  if (
+    hasReuseId !== hasReusePath ||
+    (hasReuseId &&
+      (!valid(input.reuseWorktreeId, 256) ||
+        !valid(input.reuseWorktreePath, 4096)))
+  )
+    throw new Error("HERDR_REUSE_WORKTREE_IDENTITY_INVALID");
+}
+
 export class HerdrProvisioner {
   constructor(
     readonly cli: HerdrCli,
@@ -148,6 +167,7 @@ export class HerdrProvisioner {
       throw new Error("HERDR_REGISTRATION_RETENTION_BUDGET_EXCEEDED");
   }
   async provision(input: ProvisionInput): Promise<ProvisionResult> {
+    assertReuseWorktreeIdentity(input);
     await mkdir(this.promptRoot, { recursive: true, mode: 0o700 });
     const canonicalRoot = await realpath(resolve(this.promptRoot));
     const rootStat = await stat(canonicalRoot);
@@ -208,7 +228,36 @@ export class HerdrProvisioner {
       promptFileIdentity = prompt
         ? await managedFileIdentity(prompt)
         : undefined;
-      if (input.isolation === "worktree") {
+      if (input.reuseWorktreeId || input.reuseWorktreePath) {
+        worktreeId = input.reuseWorktreeId!;
+        worktreePath = input.reuseWorktreePath!;
+        const current = await this.cli.snapshot();
+        const liveMatches = current.worktrees.filter(
+          (worktree) => worktree.id === worktreeId,
+        );
+        const live = liveMatches.length === 1 ? liveMatches[0] : undefined;
+        if (
+          !live ||
+          live.path !== worktreePath ||
+          live.workspaceId !== input.workspaceId
+        )
+          throw new Error("HERDR_REUSE_WORKTREE_IDENTITY_STALE");
+        const created = await this.cli.createTab({
+          workspaceId: input.workspaceId,
+          cwd: worktreePath,
+          label: label(input.role),
+          env,
+        });
+        const r = created as Record<string, unknown>;
+        tabId =
+          typeof r.tab_id === "string"
+            ? r.tab_id
+            : typeof r.id === "string"
+              ? r.id
+              : undefined;
+        paneId =
+          typeof r.root_pane_id === "string" ? r.root_pane_id : undefined;
+      } else if (input.isolation === "worktree") {
         const wt = await this.cli.createWorktree({
           workspaceId: input.workspaceId,
           branch: branchSlug(input.branch ?? input.agentId),
