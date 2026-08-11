@@ -1,17 +1,36 @@
 import type { HerdrCapabilities } from "./capabilities.js";
-import { HerdrProcessRunner } from "./runner.js";
 import { normalizeSnapshot } from "./normalizers.js";
+import { HerdrProcessError, HerdrProcessRunner } from "./runner.js";
 import type { HerdrSnapshot } from "./types.js";
 
-function commandResult(value: unknown): unknown {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
-  const response = value as Record<string, unknown>;
-  return typeof response.id === "string" &&
-    response.result &&
+function commandResult(
+  value: unknown,
+  expectedId: string,
+  expectedType: string,
+): Record<string, unknown> {
+  const response =
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : undefined;
+  const result =
+    response?.result &&
     typeof response.result === "object" &&
     !Array.isArray(response.result)
-    ? response.result
-    : value;
+      ? (response.result as Record<string, unknown>)
+      : undefined;
+  if (
+    !response ||
+    response.id !== expectedId ||
+    Object.keys(response).length !== 2 ||
+    !("result" in response) ||
+    !result ||
+    result.type !== expectedType
+  )
+    throw new HerdrProcessError(
+      "HERDR_INVALID_OUTPUT",
+      `Herdr ${expectedId} did not return the expected success envelope.`,
+    );
+  return result;
 }
 
 export class HerdrCli {
@@ -21,7 +40,13 @@ export class HerdrCli {
   ) {}
   async snapshot(): Promise<HerdrSnapshot> {
     this.capabilities.require(["session.snapshot"]);
-    return normalizeSnapshot(await this.runner.json(["api", "snapshot"]));
+    return normalizeSnapshot(
+      commandResult(
+        await this.runner.json(["api", "snapshot"]),
+        "cli:api:snapshot",
+        "session_snapshot",
+      ),
+    );
   }
   requireMutationCapabilities(methods: readonly string[]): void {
     this.capabilities.require(methods);
@@ -49,6 +74,8 @@ export class HerdrCli {
         ]),
         "--no-focus",
       ]),
+      "cli:tab:create",
+      "tab_created",
     );
   }
   async closeTab(id: string) {
@@ -92,6 +119,8 @@ export class HerdrCli {
         "--",
         ...input.args,
       ]),
+      "cli:agent:start",
+      "agent_started",
     );
   }
   async createWorktree(input: {
@@ -115,6 +144,8 @@ export class HerdrCli {
         input.label,
         "--no-focus",
       ]),
+      "cli:worktree:create",
+      "worktree_created",
     );
   }
   async removeWorktree(workspaceId: string) {

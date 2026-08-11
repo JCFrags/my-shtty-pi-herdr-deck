@@ -45,7 +45,7 @@ state.calls.push(args);
 const command = args.slice(0, 2).join(" ");
 const option = (name) => args[args.indexOf(name) + 1];
 if (command === "api schema") console.log(JSON.stringify(state.schema));
-else if (command === "api snapshot") console.log(JSON.stringify(state.snapshot));
+else if (command === "api snapshot") console.log(JSON.stringify({ id: "cli:api:snapshot", result: { type: "session_snapshot", snapshot: state.snapshot } }));
 else if (command === "tab create") {
   const index = state.provisions.length + 1;
   const paneId = "pane-managed-" + index;
@@ -1107,7 +1107,7 @@ appendFileSync(${JSON.stringify(calls)}, command + "\\n");
 if (command === "api schema --json")
   process.stdout.write(readFileSync(${JSON.stringify(schemaPath)}, "utf8"));
 else if (command === "api snapshot")
-  process.stdout.write(JSON.stringify({ result: { snapshot: { version: "0.8.0", protocol: 19, workspaces: [], tabs: [], panes: [], layouts: [], agents: [] } } }));
+  process.stdout.write(JSON.stringify({ id: "cli:api:snapshot", result: { type: "session_snapshot", snapshot: { version: "0.8.0", protocol: 19, workspaces: [], tabs: [], panes: [], layouts: [], agents: [] } } }));
 else {
   process.stderr.write("unexpected command");
   process.exitCode = 31;

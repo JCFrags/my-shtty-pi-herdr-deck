@@ -161,6 +161,116 @@ test("official Herdr 0.8 snapshot preserves the exact nested Pi session referenc
   });
   assert.equal(snapshot.panes[0]?.terminalId, "term1");
 });
+
+test("official Herdr 0.8 CLI success envelopes require exact command correlation", async () => {
+  let output: unknown;
+  const runner = {
+    async json() {
+      return output;
+    },
+    async run() {
+      return { exitCode: 0, stdout: "" };
+    },
+  } as unknown as HerdrProcessRunner;
+  const cli = new HerdrCli(
+    runner,
+    projectCapabilities({
+      methods: [
+        "session.snapshot",
+        "tab.create",
+        "worktree.create",
+        "agent.start",
+      ],
+    }),
+  );
+  const cases: Array<{
+    id: string;
+    type: string;
+    result: Record<string, unknown>;
+    invoke: () => Promise<unknown>;
+  }> = [
+    {
+      id: "cli:api:snapshot",
+      type: "session_snapshot",
+      result: {
+        type: "session_snapshot",
+        snapshot: { workspaces: [], tabs: [], panes: [], agents: [] },
+      },
+      invoke: async () => await cli.snapshot(),
+    },
+    {
+      id: "cli:tab:create",
+      type: "tab_created",
+      result: {
+        type: "tab_created",
+        tab: { tab_id: "tab-1" },
+        root_pane: { pane_id: "pane-1" },
+      },
+      invoke: async () =>
+        await cli.createTab({
+          workspaceId: "workspace-1",
+          cwd: "/tmp",
+          label: "managed",
+          env: {},
+        }),
+    },
+    {
+      id: "cli:worktree:create",
+      type: "worktree_created",
+      result: {
+        type: "worktree_created",
+        worktree: { path: "/tmp/worktree" },
+        workspace: { workspace_id: "workspace-2" },
+        tab: { tab_id: "tab-2" },
+      },
+      invoke: async () =>
+        await cli.createWorktree({
+          workspaceId: "workspace-1",
+          branch: "managed/test",
+          base: "main",
+          label: "managed",
+        }),
+    },
+    {
+      id: "cli:agent:start",
+      type: "agent_started",
+      result: {
+        type: "agent_started",
+        agent: { pane_id: "pane-1" },
+      },
+      invoke: async () =>
+        await cli.startPi({ name: "managed_test", paneId: "pane-1", args: [] }),
+    },
+  ];
+
+  for (const current of cases) {
+    output = { id: current.id, result: current.result };
+    await assert.doesNotReject(current.invoke);
+    const invalid: unknown[] = [
+      null,
+      {},
+      { result: current.result },
+      { id: 7, result: current.result },
+      { id: "cli:wrong", result: current.result },
+      { id: current.id, error: { code: "denied" }, result: current.result },
+      { id: current.id, result: current.result, direct: true },
+      {
+        id: current.id,
+        result: { ...current.result, type: `${current.type}_wrong` },
+      },
+      { id: current.id, result: [] },
+    ];
+    for (const value of invalid) {
+      output = value;
+      await assert.rejects(current.invoke, (error: unknown) => {
+        assert.ok(error instanceof HerdrProcessError);
+        assert.equal(error.code, "HERDR_INVALID_OUTPUT");
+        return true;
+      });
+    }
+  }
+});
+
 test("M2 parses NUL-delimited porcelain records without shell parsing", () => {
   const entries = parsePorcelainV2(
     "1 .M N... 100644 100644 100644 a b c file with spaces.txt\0",
