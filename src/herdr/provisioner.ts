@@ -53,6 +53,18 @@ export interface RegistrationRetentionStatus {
 }
 const RETENTION_MAX_FILES = 128;
 const RETENTION_MAX_BYTES = 32 * 1024 * 1024;
+
+function nestedString(
+  value: Record<string, unknown>,
+  objectKey: string,
+  field: string,
+): string | undefined {
+  const nested = value[objectKey];
+  if (!nested || typeof nested !== "object" || Array.isArray(nested))
+    return undefined;
+  const result = (nested as Record<string, unknown>)[field];
+  return typeof result === "string" ? result : undefined;
+}
 const RETENTION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const retentionAdmissions = new Map<string, Promise<void>>();
 async function withRetentionAdmission<T>(
@@ -283,11 +295,12 @@ export class HerdrProvisioner {
         tabId =
           typeof r.tab_id === "string"
             ? r.tab_id
-            : typeof r.id === "string"
-              ? r.id
-              : undefined;
+            : (nestedString(r, "tab", "tab_id") ??
+              (typeof r.id === "string" ? r.id : undefined));
         paneId =
-          typeof r.root_pane_id === "string" ? r.root_pane_id : undefined;
+          typeof r.root_pane_id === "string"
+            ? r.root_pane_id
+            : nestedString(r, "root_pane", "pane_id");
       } else if (input.isolation === "worktree") {
         const wt = await this.cli.createWorktree({
           workspaceId: input.workspaceId,
@@ -296,12 +309,16 @@ export class HerdrProvisioner {
           label: label(input.role),
         });
         const r = wt as Record<string, unknown>;
-        worktreePath = typeof r.path === "string" ? r.path : undefined;
+        worktreePath =
+          typeof r.path === "string"
+            ? r.path
+            : nestedString(r, "worktree", "path");
         worktreeId = typeof r.id === "string" ? r.id : undefined;
         const workspace =
           typeof r.workspace_id === "string"
             ? r.workspace_id
-            : input.workspaceId;
+            : (nestedString(r, "workspace", "workspace_id") ??
+              input.workspaceId);
         const created = await this.cli.createTab({
           workspaceId: workspace,
           cwd: worktreePath ?? input.cwd,
@@ -312,9 +329,8 @@ export class HerdrProvisioner {
         tabId =
           typeof cr.tab_id === "string"
             ? cr.tab_id
-            : typeof cr.id === "string"
-              ? cr.id
-              : undefined;
+            : (nestedString(cr, "tab", "tab_id") ??
+              (typeof cr.id === "string" ? cr.id : undefined));
         paneId =
           typeof cr.root_pane_id === "string"
             ? cr.root_pane_id
@@ -322,7 +338,10 @@ export class HerdrProvisioner {
                   ?.pane_id === "string"
               ? ((cr.root_pane as Record<string, unknown>).pane_id as string)
               : undefined;
-        unusedTabId = typeof r.tab_id === "string" ? r.tab_id : undefined;
+        unusedTabId =
+          typeof r.tab_id === "string"
+            ? r.tab_id
+            : nestedString(r, "tab", "tab_id");
       } else {
         const created = await this.cli.createTab({
           workspaceId: input.workspaceId,
@@ -334,9 +353,8 @@ export class HerdrProvisioner {
         tabId =
           typeof r.tab_id === "string"
             ? r.tab_id
-            : typeof r.id === "string"
-              ? r.id
-              : undefined;
+            : (nestedString(r, "tab", "tab_id") ??
+              (typeof r.id === "string" ? r.id : undefined));
         paneId =
           typeof r.root_pane_id === "string"
             ? r.root_pane_id

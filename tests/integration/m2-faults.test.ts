@@ -37,13 +37,13 @@ if (failNow) { writeFileSync(path, JSON.stringify(state)); console.error("fake b
 const next = () => state.next++;
 if (command === "worktree create") {
   const id = "worktree-" + next(); state.worktrees.push(id); writeFileSync(path, JSON.stringify(state));
-  console.log(JSON.stringify({ id, path: "/fake/worktree", tab_id: "tab-1" }));
+  console.log(JSON.stringify({ id: "cli:worktree:create", result: { type: "worktree_created", worktree: { path: "/fake/worktree" }, workspace: { workspace_id: "workspace-created" }, tab: { tab_id: "tab-1" }, root_pane: { pane_id: "pane-1" } } }));
 } else if (command === "worktree remove") {
   state.worktrees = state.worktrees.filter((id) => id !== args[2]); writeFileSync(path, JSON.stringify(state));
 } else if (command === "tab create") {
   const n = next(); const tab = "tab-" + n; const pane = "pane-" + n;
   state.tabs.push(tab); state.panes.push(pane); writeFileSync(path, JSON.stringify(state));
-  console.log(JSON.stringify({ tab_id: tab, root_pane_id: pane }));
+  console.log(JSON.stringify({ id: "cli:tab:create", result: { type: "tab_created", tab: { tab_id: tab }, root_pane: { pane_id: pane } } }));
 } else if (command === "tab close") {
   const tab = args[2]; const n = tab.slice(4);
   state.tabs = state.tabs.filter((id) => id !== tab);
@@ -52,10 +52,10 @@ if (command === "worktree create") {
 } else if (command === "pane close") {
   state.panes = state.panes.filter((id) => id !== args[2]); writeFileSync(path, JSON.stringify(state));
 } else if (command === "agent start") {
-  writeFileSync(path, JSON.stringify(state)); console.log(JSON.stringify({ pane_id: args[6] }));
-} else if (command === "session snapshot") {
+  writeFileSync(path, JSON.stringify(state)); console.log(JSON.stringify({ id: "cli:agent:start", result: { type: "agent_started", agent: { pane_id: args[6] } } }));
+} else if (command === "api snapshot") {
   writeFileSync(path, JSON.stringify(state));
-  console.log(JSON.stringify({ panes: [], tabs: [], workspaces: [], agents: [], worktrees: [] }));
+  console.log(JSON.stringify({ id: "cli:api:snapshot", result: { type: "session_snapshot", snapshot: { protocol: 19, panes: [], tabs: [], workspaces: [], agents: [] } } }));
 } else { writeFileSync(path, JSON.stringify(state)); console.log(JSON.stringify({})); }
 `;
 }
@@ -115,12 +115,10 @@ test("M2 fake stack persists provisioning and compensates the unused initial tab
       agentId,
       ...(await provisionOptions()),
     });
-    assert.equal(result.worktreeId, "worktree-1");
+    assert.equal(result.worktreeId, undefined);
+    assert.equal(result.worktreePath, "/fake/worktree");
     assert.equal(result.paneId, "pane-2");
-    assert.equal(
-      store.state.herdrResources?.[agentId]?.worktreeId,
-      "worktree-1",
-    );
+    assert.equal(store.state.herdrResources?.[agentId]?.worktreeId, undefined);
     assert.equal(store.state.herdrResources?.[agentId]?.state, "registered");
     assert.equal((await readdir(promptRoot)).length, 2);
     const state = JSON.parse(await readFile(statePath, "utf8")) as {
@@ -133,6 +131,13 @@ test("M2 fake stack persists provisioning and compensates the unused initial tab
     assert.deepEqual(state.panes, ["pane-2"]);
     assert.deepEqual(state.worktrees, ["worktree-1"]);
     assert.ok(state.calls.some((args) => args.join(" ") === "tab close tab-1"));
+    for (const command of ["worktree create", "tab create"])
+      assert.ok(
+        state.calls.some(
+          (args) =>
+            args.slice(0, 2).join(" ") === command && !args.includes("--json"),
+        ),
+      );
     const events = await readFile(eventPath, "utf8");
     assert.doesNotMatch(events, /Use only a fake|PI_HERDR_ORCH_AGENT_TOKEN/);
   } finally {
@@ -224,8 +229,13 @@ test("M2 authenticated broker routing drives production Herdr service and startu
     const state = JSON.parse(await readFile(statePath, "utf8")) as {
       calls: string[][];
     };
+    assert.ok(state.calls.some((args) => args.join(" ") === "api snapshot"));
     assert.ok(
-      state.calls.some((args) => args.join(" ").startsWith("session snapshot")),
+      state.calls.some(
+        (args) =>
+          args.slice(0, 2).join(" ") === "tab create" &&
+          !args.includes("--json"),
+      ),
     );
   } finally {
     await broker.stop().catch(() => undefined);
