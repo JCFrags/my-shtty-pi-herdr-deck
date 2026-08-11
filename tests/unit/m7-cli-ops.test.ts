@@ -12,10 +12,15 @@ const rollback = "1e43cc217756909482abb5cf722060c38d33d3aa";
 const digest = "a".repeat(64);
 
 function run(stateRoot: string, args: string[]) {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    PI_HERDR_ORCH_STATE_ROOT: stateRoot,
+  };
+  delete env.HERDR_SOCKET_PATH;
   return spawnSync(bin, args, {
     cwd: root,
     encoding: "utf8",
-    env: { ...process.env, PI_HERDR_ORCH_STATE_ROOT: stateRoot },
+    env,
   });
 }
 

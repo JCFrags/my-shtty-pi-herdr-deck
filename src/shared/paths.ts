@@ -5,9 +5,11 @@ import { dirname, isAbsolute, join, parse, resolve, sep } from "node:path";
 
 export interface HerdrSocketIdentity {
   path: string;
-  dev: number;
-  ino: number;
-  uid: number;
+  dev: bigint;
+  ino: bigint;
+  uid: bigint;
+  ctimeNs: bigint;
+  birthtimeNs: bigint;
 }
 
 export interface ResolvedPaths {
@@ -69,19 +71,26 @@ export async function canonicalHerdrSocket(
     throw new Error(
       "HERDR_SOCKET_PATH contains a symlink or noncanonical component.",
     );
-  const stat = await lstat(path);
+  const stat = await lstat(path, { bigint: true });
   const uid = process.getuid?.();
   if (
     !stat.isSocket() ||
     stat.isSymbolicLink() ||
-    stat.nlink !== 1 ||
-    (uid !== undefined && stat.uid !== uid) ||
-    (stat.mode & 0o077) !== 0
+    stat.nlink !== 1n ||
+    (uid !== undefined && stat.uid !== BigInt(uid)) ||
+    (stat.mode & 0o077n) !== 0n
   )
     throw new Error(
       "HERDR_SOCKET_PATH must be an owner-only Unix socket owned by the current user.",
     );
-  return { path, dev: stat.dev, ino: stat.ino, uid: stat.uid };
+  return {
+    path,
+    dev: stat.dev,
+    ino: stat.ino,
+    uid: stat.uid,
+    ctimeNs: stat.ctimeNs,
+    birthtimeNs: stat.birthtimeNs,
+  };
 }
 
 export async function revalidateHerdrSocket(
@@ -91,7 +100,9 @@ export async function revalidateHerdrSocket(
   if (
     current.dev !== expected.dev ||
     current.ino !== expected.ino ||
-    current.uid !== expected.uid
+    current.uid !== expected.uid ||
+    current.ctimeNs !== expected.ctimeNs ||
+    current.birthtimeNs !== expected.birthtimeNs
   )
     throw new Error("HERDR_SOCKET_PATH changed after session resolution.");
 }

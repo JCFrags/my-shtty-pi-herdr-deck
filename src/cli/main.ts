@@ -1,6 +1,10 @@
 import { doctor } from "../broker/doctor.js";
 import { Broker } from "../broker/broker.js";
-import { ensurePrivateDirectory, resolveHerdrPaths } from "../shared/paths.js";
+import {
+  ensurePrivateDirectory,
+  resolveHerdrPaths,
+  resolvePaths,
+} from "../shared/paths.js";
 import { brokerStatus, ensureBroker, stopBroker } from "../broker/startup.js";
 import { brokerRequest } from "./client.js";
 import { readPrivateRegular } from "../shared/private-fs.js";
@@ -99,7 +103,11 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     console.log(JSON.stringify(await brokerStatus()));
     return;
   }
-  const { paths } = await resolveHerdrPaths();
+  const paths =
+    command === "ops" &&
+    (subcommand === "plan" || subcommand === "verify" || subcommand === "apply")
+      ? resolvePaths()
+      : (await resolveHerdrPaths()).paths;
   await ensurePrivateDirectory(paths.root);
   await ensurePrivateDirectory(paths.runtime);
   if (command === "config" && subcommand === "validate") {
