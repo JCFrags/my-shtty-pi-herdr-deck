@@ -17,6 +17,20 @@ import type { ResolvedPaths } from "../shared/paths.js";
 import { collectGitEvidence } from "../git/evidence.js";
 import type { GitEvidence } from "../git/porcelain.js";
 import { doctor } from "../broker/doctor.js";
+export class ProvisionOutcomeRecordingError extends AggregateError {
+  readonly provisionError: unknown;
+  readonly outcomeError: unknown;
+  constructor(provisionError: unknown, outcomeError: unknown) {
+    super(
+      [provisionError, outcomeError],
+      "Provisioning failed and its durable outcome could not be recorded.",
+      { cause: provisionError },
+    );
+    this.name = "ProvisionOutcomeRecordingError";
+    this.provisionError = provisionError;
+    this.outcomeError = outcomeError;
+  }
+}
 export interface HerdrServiceOptions {
   store: EventStore;
   cli: HerdrCli;
@@ -242,8 +256,8 @@ export class HerdrService {
       } catch (error) {
         const dirty =
           error instanceof Error && error.message === "HERDR_DIRTY_WORKTREE";
-        await this.#store
-          .append({
+        try {
+          await this.#store.append({
             type: "herdr.provision.outcome",
             actor: this.#actor,
             entityRefs: { agentId: input.agentId },
@@ -256,8 +270,10 @@ export class HerdrService {
               unknown: true,
               ...(dirty ? { dirty: true } : {}),
             },
-          })
-          .catch(() => undefined);
+          });
+        } catch (outcomeError) {
+          throw new ProvisionOutcomeRecordingError(error, outcomeError);
+        }
         throw error;
       }
     });

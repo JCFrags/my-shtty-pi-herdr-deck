@@ -35,7 +35,10 @@ import {
 import { OrchestratorError } from "../shared/errors.js";
 import { assertInvariants } from "../state/invariants.js";
 import { SnapshotStore } from "../state/snapshot-store.js";
-import type { HerdrService } from "../herdr/service.js";
+import {
+  ProvisionOutcomeRecordingError,
+  type HerdrService,
+} from "../herdr/service.js";
 import {
   validateQuestion,
   validateResult,
@@ -173,6 +176,16 @@ function isTerminal(value: unknown): boolean {
 }
 function isRunClosedForAdapterProgress(value: unknown): boolean {
   return isTerminal(value) || value === "settled";
+}
+function isAbortFallbackError(error: unknown): boolean {
+  if (!(error instanceof OrchestratorError)) return false;
+  return new Set([
+    "AGENT_DISCONNECTED",
+    "AGENT_REPLACED",
+    "PI_COMMAND_REJECTED",
+    "TIMEOUT",
+    "RUN_MISMATCH",
+  ]).has(error.code);
 }
 const DEFAULT_TASK_WALL_MS = 15 * 60_000;
 const MAX_TASK_WALL_MS = 24 * 60 * 60_000;
@@ -3823,6 +3836,7 @@ export class Broker {
       ...(agent.piSessionId ? { piSessionId: agent.piSessionId } : {}),
       runId: run.id,
     };
+    let adapterError: unknown;
     try {
       const result = await this.#sendAdapterRequest(
         run.agentId,
@@ -3839,9 +3853,16 @@ export class Broker {
         (result as Record<string, unknown>).ok === true
       )
         return;
-    } catch {
-      // The exact Herdr fallback below is the required bounded failure path.
+      adapterError = new OrchestratorError(
+        "PI_COMMAND_REJECTED",
+        "The managed adapter returned an invalid abort response.",
+      );
+    } catch (error) {
+      adapterError = error;
     }
+    const unexpectedAdapterError = !isAbortFallbackError(adapterError)
+      ? adapterError
+      : undefined;
     const current = this.store.state.agents[run.agentId];
     const resource = this.store.state.herdrResources?.[run.agentId];
     const agentUnchanged =
@@ -3864,23 +3885,35 @@ export class Broker {
       resource.orphaned === resourceTupleBefore.orphaned &&
       resourceBytesBefore !== undefined &&
       canonicalJson(resource) === resourceBytesBefore;
-    if (
-      !this.#herdr ||
-      !agentUnchanged ||
-      !resourceValidBefore ||
-      !resourceUnchanged ||
-      resourceTupleBefore?.replaced ||
-      resourceTupleBefore?.orphaned
-    )
+    const fallbackSafe =
+      !!this.#herdr &&
+      agentUnchanged &&
+      resourceValidBefore &&
+      resourceUnchanged &&
+      !resourceTupleBefore?.replaced &&
+      !resourceTupleBefore?.orphaned;
+    if (!fallbackSafe) {
+      if (unexpectedAdapterError !== undefined) throw unexpectedAdapterError;
       return;
-    await this.#herdr.stop({
-      paneId: resource.paneId,
-      ...(resource.terminalId ? { terminalId: resource.terminalId } : {}),
-      ...(resource.sessionId ? { sessionId: resource.sessionId } : {}),
-      ...(resource.generation !== undefined
-        ? { generation: resource.generation }
-        : {}),
-    } as never);
+    }
+    try {
+      await this.#herdr!.stop({
+        paneId: resource!.paneId,
+        ...(resource!.terminalId ? { terminalId: resource!.terminalId } : {}),
+        ...(resource!.sessionId ? { sessionId: resource!.sessionId } : {}),
+        ...(resource!.generation !== undefined
+          ? { generation: resource!.generation }
+          : {}),
+      } as never);
+    } catch (fallbackError) {
+      if (unexpectedAdapterError !== undefined)
+        throw new AggregateError(
+          [unexpectedAdapterError, fallbackError],
+          "Adapter abort and Herdr fallback failed.",
+        );
+      throw fallbackError;
+    }
+    if (unexpectedAdapterError !== undefined) throw unexpectedAdapterError;
   }
   async #terminalizeTaskDeadline(taskId: string): Promise<void> {
     const task = this.store.state.tasks[taskId];
@@ -4198,8 +4231,10 @@ export class Broker {
                   },
           },
     };
+    let pendingEntry!: PendingServerRequest;
     const pending = new Promise<unknown>((resolve, reject) => {
       const timer = this.#setTimeout(() => {
+        if (client.serverRequests.get(id) !== pendingEntry) return;
         client.serverRequests.delete(id);
         reject(
           new OrchestratorError(
@@ -4210,9 +4245,20 @@ export class Broker {
         );
       }, timeoutMs);
       timer.unref();
-      client.serverRequests.set(id, { method, resolve, reject, timer });
+      pendingEntry = { method, resolve, reject, timer };
+      client.serverRequests.set(id, pendingEntry);
     });
-    client.socket.write(encodeFrame(frame));
+    try {
+      client.socket.write(encodeFrame(frame));
+    } catch (error) {
+      if (client.serverRequests.get(id) === pendingEntry) {
+        client.serverRequests.delete(id);
+        this.#clearTimeout(pendingEntry.timer);
+      }
+      // The private promise has no observer on this synchronous path. Throwing
+      // the write/encode error keeps the public request rejection exact.
+      throw error;
+    }
     return await pending;
   }
   #matchesFilter(
@@ -4496,19 +4542,46 @@ export class Broker {
             ...(provisioned.paneId ? { paneId: provisioned.paneId } : {}),
           },
         });
-      } catch {
-        await this.store.append({
-          type: "run.state_changed",
-          actor,
-          entityRefs: { runId, taskId },
-          payload: { runId, state: "failed" },
-        });
-        await this.store.append({
-          type: "agent.state_changed",
-          actor,
-          entityRefs: { agentId },
-          payload: { agentId, state: "replaced", reason: "PROVISION_FAILED" },
-        });
+      } catch (error) {
+        const compensationErrors: unknown[] = [];
+        try {
+          await this.store.append({
+            type: "run.state_changed",
+            actor,
+            entityRefs: { runId, taskId },
+            payload: { runId, state: "failed" },
+          });
+        } catch (compensationError) {
+          compensationErrors.push(compensationError);
+        }
+        try {
+          await this.store.append({
+            type: "agent.state_changed",
+            actor,
+            entityRefs: { agentId },
+            payload: {
+              agentId,
+              state: "replaced",
+              reason: "PROVISION_FAILED",
+            },
+          });
+        } catch (compensationError) {
+          compensationErrors.push(compensationError);
+        }
+        if (
+          error instanceof ProvisionOutcomeRecordingError ||
+          compensationErrors.length > 0
+        ) {
+          const failures = [error, ...compensationErrors];
+          this.#observeBackgroundFailure(
+            failures.length === 1
+              ? failures[0]
+              : new AggregateError(
+                  failures,
+                  "Provisioning failure compensation failed.",
+                ),
+          );
+        }
       } finally {
         scheduler.setProvisioning(-1);
       }
