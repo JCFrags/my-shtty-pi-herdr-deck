@@ -711,8 +711,20 @@ export class Broker {
   stop(): Promise<void> {
     if (this.#stopPromise) return this.#stopPromise;
     this.#stopping = true;
-    this.#stopPromise = this.#stopUnlocked();
-    return this.#stopPromise;
+    const attempt = this.#stopUnlocked();
+    this.#stopPromise = attempt;
+    void attempt.then(
+      () => undefined,
+      () => {
+        if (
+          this.#stopPromise === attempt &&
+          (this.#processRecord !== undefined ||
+            this.#lock.identity !== undefined)
+        )
+          this.#stopPromise = undefined;
+      },
+    );
+    return attempt;
   }
   async #stopUnlocked(): Promise<void> {
     const failures: unknown[] = [];

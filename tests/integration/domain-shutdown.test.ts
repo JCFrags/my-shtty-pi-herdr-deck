@@ -9,7 +9,12 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { createConnection, type Socket } from "node:net";
+import {
+  createConnection,
+  createServer,
+  type Server,
+  type Socket,
+} from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -416,6 +421,100 @@ test("failed start attempts lock release after process-record cleanup rejects", 
   } finally {
     await rm(root, { recursive: true, force: true });
     await rm(runtime, { recursive: true, force: true });
+  }
+});
+
+test("server-created failed start retries retained exact lifecycle cleanup", async () => {
+  const root = await mkdtemp(join(tmpdir(), "shutdown-stop-retry-"));
+  const runtime = await mkdtemp(join(tmpdir(), "shutdown-stop-retry-runtime-"));
+  const paths = pathsFor(root, runtime);
+  const pid = `${paths.lock}.pid`;
+  const pidRetained = `${pid}.owned-retained`;
+  const lockRetained = `${paths.lock}.owned-retained`;
+  const pidReplacement = `${pid}.replacement-preserved`;
+  const lockReplacement = `${paths.lock}.replacement-preserved`;
+  let competitor: Server | undefined;
+  const herdr = {
+    startupReconcile: async () => {
+      await rename(pid, pidRetained);
+      await writeFile(pid, "pid replacement\n", { mode: 0o600 });
+      await rename(paths.lock, lockRetained);
+      await writeFile(paths.lock, "lock replacement\n", { mode: 0o600 });
+      competitor = createServer();
+      await new Promise<void>((resolve, reject) =>
+        competitor!.once("error", reject).listen(paths.socket, resolve),
+      );
+      return [];
+    },
+    shutdown: () => undefined,
+  };
+  const broker = new Broker(paths, {
+    herdrFactory: async () => herdr as any,
+  });
+  try {
+    await assert.rejects(broker.start(), (error: unknown) => {
+      assert.ok(error instanceof AggregateError);
+      assert.equal(error.errors.length, 2);
+      assert.match(String(error.errors[0]), /EADDRINUSE/u);
+      assert.ok(error.errors[1] instanceof AggregateError);
+      assert.equal(error.errors[1].errors.length, 2);
+      assert.match(
+        String(error.errors[1].errors[0]),
+        /process record identity changed/u,
+      );
+      assert.match(
+        String(error.errors[1].errors[1]),
+        /Lock path identity changed/u,
+      );
+      return true;
+    });
+    assert.equal(await readFile(pid, "utf8"), "pid replacement\n");
+    assert.equal(await readFile(paths.lock, "utf8"), "lock replacement\n");
+    await rename(pid, pidReplacement);
+    await rename(pidRetained, pid);
+    await rename(paths.lock, lockReplacement);
+    await rename(lockRetained, paths.lock);
+    await new Promise<void>((resolve, reject) =>
+      competitor!.close((error) => (error ? reject(error) : resolve())),
+    );
+    competitor = undefined;
+
+    await broker.stop();
+    await assert.rejects(lstat(pid), { code: "ENOENT" });
+    await assert.rejects(lstat(paths.lock), { code: "ENOENT" });
+    assert.equal(await readFile(pidReplacement, "utf8"), "pid replacement\n");
+    assert.equal(await readFile(lockReplacement, "utf8"), "lock replacement\n");
+    assert.equal(
+      (await readdir(runtime)).filter(
+        (name) =>
+          name === "lock" ||
+          name === "lock.pid" ||
+          name.startsWith("lock.create.") ||
+          name.startsWith("lock.release.") ||
+          name.startsWith("lock.pid.create.") ||
+          name.startsWith("lock.pid.remove."),
+      ).length,
+      0,
+    );
+  } finally {
+    const failures: unknown[] = [];
+    if (competitor?.listening)
+      try {
+        await new Promise<void>((resolve, reject) =>
+          competitor!.close((error) => (error ? reject(error) : resolve())),
+        );
+      } catch (error) {
+        failures.push(error);
+      }
+    try {
+      await rm(root, { recursive: true, force: true });
+      await rm(runtime, { recursive: true, force: true });
+    } catch (error) {
+      failures.push(error);
+    }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1)
+      throw new AggregateError(failures, "Stop retry test cleanup failed.");
   }
 });
 
