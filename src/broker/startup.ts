@@ -264,49 +264,22 @@ export function finalizeStartupRemovalSync(
   const suffix = `${process.pid}.${randomBytes(8).toString("hex")}`;
   const quarantine = `${path}.remove.${suffix}`;
   const companionPath = companion?.path ?? `${path}.create.${expected.nonce}`;
-  const companionQuarantine = companion
-    ? `${companion.path}.remove.${suffix}`
-    : undefined;
   let publicRenamed = false;
-  let companionRenamed = false;
   let companionRemoved = false;
   try {
     startupRecordSync(path, expected, identity, companion);
+    if (companion) {
+      privateIdentitySync(path, identity, 2);
+      privateIdentitySync(companion.path, companion.identity, 2);
+      unlinkSync(companion.path);
+      companionRemoved = true;
+      startupRecordSync(path, expected, identity);
+    }
     renameSync(path, quarantine);
     publicRenamed = true;
-    startupRecordSync(
-      quarantine,
-      expected,
-      identity,
-      companion ? { ...companion, path: companion.path } : undefined,
-    );
-    if (companion && companionQuarantine) {
-      privateIdentitySync(companion.path, companion.identity, 2);
-      renameSync(companion.path, companionQuarantine);
-      companionRenamed = true;
-      startupRecordSync(quarantine, expected, identity, {
-        path: companionQuarantine,
-        identity: companion.identity,
-      });
-    }
+    startupRecordSync(quarantine, expected, identity);
     absentSync(path);
     absentSync(companionPath);
-    if (companion && companionQuarantine) {
-      privateIdentitySync(companionQuarantine, companion.identity, 2);
-      privateIdentitySync(quarantine, identity, 2);
-      absentSync(path);
-      absentSync(companion.path);
-      unlinkSync(companionQuarantine);
-      companionRenamed = false;
-      companionRemoved = true;
-      startupRecordSync(quarantine, expected, identity);
-      absentSync(path);
-      absentSync(companion.path);
-    } else {
-      startupRecordSync(quarantine, expected, identity);
-      absentSync(path);
-      absentSync(companionPath);
-    }
     unlinkSync(quarantine);
     publicRenamed = false;
   } catch (error) {
@@ -317,16 +290,6 @@ export function finalizeStartupRemovalSync(
           "Exact startup companion removal completed before cleanup failed.",
         ),
       );
-    if (companionRenamed && companionQuarantine && companion)
-      try {
-        restoreQuarantineSync(
-          companionQuarantine,
-          companion.path,
-          companion.identity,
-        );
-      } catch (restoreError) {
-        failures.push(restoreError);
-      }
     if (publicRenamed)
       try {
         restoreQuarantineSync(quarantine, path, identity);
