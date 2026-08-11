@@ -1,6 +1,11 @@
 import type { Component, TuiMouseEvent } from "@pi-herdr-deck/tui";
 import type { HerdrAgentInfo } from "../../herdr/context.js";
-import { type HitBox, PressReleaseTracker, renderButton, truncatePlain } from "./controls.js";
+import {
+  type HitBox,
+  PressReleaseTracker,
+  renderButton,
+  truncatePlain,
+} from "./controls.js";
 
 export class PanePicker implements Component {
   readonly #agents: HerdrAgentInfo[];
@@ -49,16 +54,39 @@ export class PanePicker implements Component {
     }
     const openButton = renderButton("Open", { focused: true });
     const cancelButton = renderButton("Cancel");
-    lines.push("", `${openButton} ${cancelButton}`, "", "↑/↓ select · Enter open · Esc cancel");
+    lines.push(
+      "",
+      `${openButton} ${cancelButton}`,
+      "",
+      "↑/↓ select · Enter open · Esc cancel",
+    );
     const buttonY = lines.length - 3;
-    this.#boxes.push({ id: "open", x: 0, y: buttonY, width: openButton.length, height: 1, disabled: false, activate: () => this.#activate() });
-    this.#boxes.push({ id: "cancel", x: openButton.length + 1, y: buttonY, width: cancelButton.length, height: 1, disabled: false, activate: this.#onCancel });
+    this.#boxes.push({
+      id: "open",
+      x: 0,
+      y: buttonY,
+      width: openButton.length,
+      height: 1,
+      disabled: false,
+      activate: () => this.#activate(),
+    });
+    this.#boxes.push({
+      id: "cancel",
+      x: openButton.length + 1,
+      y: buttonY,
+      width: cancelButton.length,
+      height: 1,
+      disabled: false,
+      activate: this.#onCancel,
+    });
     return lines;
   }
 
   handleInput(data: string): void {
-    if (data === "\x1b[A" || data === "k") this.#selected = Math.max(0, this.#selected - 1);
-    else if (data === "\x1b[B" || data === "j") this.#selected = Math.min(this.#agents.length - 1, this.#selected + 1);
+    if (data === "\x1b[A" || data === "k")
+      this.#selected = Math.max(0, this.#selected - 1);
+    else if (data === "\x1b[B" || data === "j")
+      this.#selected = Math.min(this.#agents.length - 1, this.#selected + 1);
     else if (data === "\r" || data === "\n") this.#activate();
     else if (data === "\x1b" || data === "q") this.#onCancel();
     this.#requestRender();

@@ -23,10 +23,7 @@
       "maxLength": 16384
     },
     "context": {
-      "type": [
-        "string",
-        "null"
-      ],
+      "type": ["string", "null"],
       "maxLength": 16384
     },
     "options": {
@@ -36,11 +33,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "id",
-          "label",
-          "description"
-        ],
+        "required": ["id", "label", "description"],
         "properties": {
           "id": {
             "type": "string",
@@ -52,10 +45,7 @@
             "maxLength": 1024
           },
           "description": {
-            "type": [
-              "string",
-              "null"
-            ],
+            "type": ["string", "null"],
             "maxLength": 4096
           }
         }
@@ -65,10 +55,7 @@
       "type": "boolean"
     },
     "defaultOptionId": {
-      "type": [
-        "string",
-        "null"
-      ],
+      "type": ["string", "null"],
       "pattern": "^[A-Za-z0-9_-]{1,32}$"
     },
     "timeoutMs": {

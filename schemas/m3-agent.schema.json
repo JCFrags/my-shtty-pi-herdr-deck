@@ -21,18 +21,45 @@
     "agentId": { "type": "string", "pattern": "^agt_[0-9A-HJKMNP-TV-Z]{26}$" },
     "generation": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
     "kind": { "enum": ["adopted", "managed"] },
-    "role": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9_-]{0,63}$" },
+    "role": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    },
     "projectId": { "type": "string", "minLength": 1, "maxLength": 256 },
     "workspaceId": { "type": "string", "minLength": 1, "maxLength": 256 },
-    "parentAgentId": { "type": ["string", "null"], "pattern": "^agt_[0-9A-HJKMNP-TV-Z]{26}$" },
+    "parentAgentId": {
+      "type": ["string", "null"],
+      "pattern": "^agt_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
     "piSessionId": { "type": "string", "minLength": 1, "maxLength": 256 },
     "processId": { "type": ["integer", "null"], "minimum": 1 },
     "paneId": { "type": ["string", "null"], "minLength": 1, "maxLength": 256 },
-    "lifecycle": { "enum": ["starting", "ready", "busy", "idle", "stopping", "stopped", "orphaned"] },
+    "lifecycle": {
+      "enum": [
+        "starting",
+        "ready",
+        "busy",
+        "idle",
+        "stopping",
+        "stopped",
+        "orphaned"
+      ]
+    },
     "capabilities": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["prompt", "steer", "followUp", "abort", "compact", "model", "thinking", "tools"],
+      "required": [
+        "prompt",
+        "steer",
+        "followUp",
+        "abort",
+        "compact",
+        "model",
+        "thinking",
+        "tools"
+      ],
       "properties": {
         "prompt": { "type": "boolean" },
         "steer": { "type": "boolean" },
@@ -51,7 +78,11 @@
       "required": ["lastHeartbeatAt", "heartbeatIntervalMs", "connected"],
       "properties": {
         "lastHeartbeatAt": { "type": "string", "format": "date-time" },
-        "heartbeatIntervalMs": { "type": "integer", "minimum": 1000, "maximum": 300000 },
+        "heartbeatIntervalMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 300000
+        },
         "connected": { "type": "boolean" }
       }
     },

@@ -70,13 +70,7 @@ time or live reliability.
 
 ## Evidence and rollback record
 
-Store the JSON output in the private evidence path:
-
-```text
-evidence/implementation/orch_m7_release/REPORT.md
-```
-
-Do not store secrets, prompts, sessions, cookies, tokens, or private keys.
+Store the JSON output in an owner-only directory outside the package source. Do not store secrets, prompts, sessions, cookies, tokens, or private keys.
 A live release, if separately approved, must record its own UTC start and end,
 exact candidate and rollback pair, iteration count, failure count, broker
 restart count, and retained resources. That live activity is outside this

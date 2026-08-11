@@ -114,7 +114,12 @@ export class FakeDeckBroker {
           );
         else
           queueMicrotask(() =>
-            socket.send({ type: "response", id: frame.id, ok: true, result: { ok: true } }),
+            socket.send({
+              type: "response",
+              id: frame.id,
+              ok: true,
+              result: { ok: true },
+            }),
           );
       }
     };
@@ -133,7 +138,9 @@ export class FakeDeckBroker {
   }
 }
 
-export const agentTarget = (agent: Agent = m6Snapshot.agents[0]!): {
+export const agentTarget = (
+  agent: Agent = m6Snapshot.agents[0]!,
+): {
   agent: Agent;
   paneId: string;
   terminalId: string;
@@ -155,7 +162,8 @@ export async function waitForM6(
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error("Timed out waiting for M6 fixture state.");
+    if (Date.now() >= deadline)
+      throw new Error("Timed out waiting for M6 fixture state.");
     await new Promise((resolve) => setTimeout(resolve, 1));
   }
 }

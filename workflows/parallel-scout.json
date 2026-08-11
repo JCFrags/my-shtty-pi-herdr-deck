@@ -12,15 +12,9 @@
       "profileId": "scout",
       "title": "Inspect source",
       "objectiveTemplate": "Inspect source for: {{input.objective}}",
-      "constraints": [
-        "Remain read-only."
-      ],
+      "constraints": ["Remain read-only."],
       "dependsOn": [],
-      "resultProjection": [
-        "/summary",
-        "/findings",
-        "/unresolved"
-      ],
+      "resultProjection": ["/summary", "/findings", "/unresolved"],
       "isolationMode": "shared-readonly"
     },
     {
@@ -28,15 +22,9 @@
       "profileId": "scout",
       "title": "Inspect tests",
       "objectiveTemplate": "Inspect tests and gaps for: {{input.objective}}",
-      "constraints": [
-        "Remain read-only."
-      ],
+      "constraints": ["Remain read-only."],
       "dependsOn": [],
-      "resultProjection": [
-        "/summary",
-        "/findings",
-        "/unresolved"
-      ],
+      "resultProjection": ["/summary", "/findings", "/unresolved"],
       "isolationMode": "shared-readonly"
     }
   ]

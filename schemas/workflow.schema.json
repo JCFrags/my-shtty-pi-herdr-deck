@@ -33,19 +33,10 @@
       "maxLength": 1024
     },
     "mode": {
-      "enum": [
-        "single",
-        "parallel",
-        "chain",
-        "dag",
-        "implement_review_fix"
-      ]
+      "enum": ["single", "parallel", "chain", "dag", "implement_review_fix"]
     },
     "failureMode": {
-      "enum": [
-        "fail_fast",
-        "collect_all"
-      ]
+      "enum": ["fail_fast", "collect_all"]
     },
     "maxCorrectionLoops": {
       "type": "integer",

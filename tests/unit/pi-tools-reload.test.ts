@@ -1,8 +1,112 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { registerManagedChildTools, type PiToolBinding } from "../../src/pi/tools.js";
-const assignment = { id: "asg", taskId: "task", runId: "run", agentId: "agent", generation: 1, assignmentGeneration: 1, piSessionId: "session", objective: "x", constraints: [], deadline: "2030-01-01T00:00:00Z" };
-const adapter = { safeState: () => ({ agentId: "agent", generation: 1, sessionId: "session", idle: false, pendingMessages: 0, activity: "working" as const, activeTools: [], capabilities: { core: true, prompt: true, steer: true, followUp: true, abort: true, compact: true, model: true, thinking: true, tools: true, toolExpansion: false } }), assignmentForTools: () => assignment };
-const result = { schemaVersion: 1, status: "succeeded", summary: "x", findings: [], changedFiles: [], commandsRun: [], tests: [], commits: [], artifacts: [], unresolved: [], questions: [], recommendedNextAction: null };
+import {
+  registerManagedChildTools,
+  type PiToolBinding,
+} from "../../src/pi/tools.js";
+const assignment = {
+  id: "asg",
+  taskId: "task",
+  runId: "run",
+  agentId: "agent",
+  generation: 1,
+  assignmentGeneration: 1,
+  piSessionId: "session",
+  objective: "x",
+  constraints: [],
+  deadline: "2030-01-01T00:00:00Z",
+};
+const adapter = {
+  safeState: () => ({
+    agentId: "agent",
+    generation: 1,
+    sessionId: "session",
+    idle: false,
+    pendingMessages: 0,
+    activity: "working" as const,
+    activeTools: [],
+    capabilities: {
+      core: true,
+      prompt: true,
+      steer: true,
+      followUp: true,
+      abort: true,
+      compact: true,
+      model: true,
+      thinking: true,
+      tools: true,
+      toolExpansion: false,
+    },
+  }),
+  assignmentForTools: () => assignment,
+};
+const result = {
+  schemaVersion: 1,
+  status: "succeeded",
+  summary: "x",
+  findings: [],
+  changedFiles: [],
+  commandsRun: [],
+  tests: [],
+  commits: [],
+  artifacts: [],
+  unresolved: [],
+  questions: [],
+  recommendedNextAction: null,
+};
 
-test("registered managed tool dispatch follows the replacement binding and fails closed on shutdown", async () => { const definitions: Array<{ name: string; execute: (...args: never[]) => Promise<unknown> }> = []; const api = { registerTool: (definition: typeof definitions[number]) => definitions.push(definition) }; const calls1: string[] = []; const calls2: string[] = []; const client1 = { connected: true, request: async (method: string) => { calls1.push(method); return {}; } }; const client2 = { connected: true, request: async (method: string) => { calls2.push(method); return {}; } }; const binding: PiToolBinding = { adapter: adapter as never, client: client1 as never }; registerManagedChildTools(api as never, binding); const tool = definitions.find((item) => item.name === "orchestrator_result")!; binding.client = client2 as never; await (tool.execute as unknown as (...args: unknown[]) => Promise<unknown>)("id", result, new AbortController().signal, undefined, {}); assert.deepEqual(calls1, []); assert.deepEqual(calls2, ["result.publish"]); binding.adapter = undefined; binding.client = undefined; await assert.rejects(() => (tool.execute as unknown as (...args: unknown[]) => Promise<unknown>)("id", result, new AbortController().signal, undefined, {}), /AGENT_DISCONNECTED/); });
+test("registered managed tool dispatch follows the replacement binding and fails closed on shutdown", async () => {
+  const definitions: Array<{
+    name: string;
+    execute: (...args: never[]) => Promise<unknown>;
+  }> = [];
+  const api = {
+    registerTool: (definition: (typeof definitions)[number]) =>
+      definitions.push(definition),
+  };
+  const calls1: string[] = [];
+  const calls2: string[] = [];
+  const client1 = {
+    connected: true,
+    request: async (method: string) => {
+      calls1.push(method);
+      return {};
+    },
+  };
+  const client2 = {
+    connected: true,
+    request: async (method: string) => {
+      calls2.push(method);
+      return {};
+    },
+  };
+  const binding: PiToolBinding = {
+    adapter: adapter as never,
+    client: client1 as never,
+  };
+  registerManagedChildTools(api as never, binding);
+  const tool = definitions.find((item) => item.name === "orchestrator_result")!;
+  binding.client = client2 as never;
+  await (tool.execute as unknown as (...args: unknown[]) => Promise<unknown>)(
+    "id",
+    result,
+    new AbortController().signal,
+    undefined,
+    {},
+  );
+  assert.deepEqual(calls1, []);
+  assert.deepEqual(calls2, ["result.publish"]);
+  binding.adapter = undefined;
+  binding.client = undefined;
+  await assert.rejects(
+    () =>
+      (tool.execute as unknown as (...args: unknown[]) => Promise<unknown>)(
+        "id",
+        result,
+        new AbortController().signal,
+        undefined,
+        {},
+      ),
+    /AGENT_DISCONNECTED/,
+  );
+});

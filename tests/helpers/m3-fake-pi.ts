@@ -150,11 +150,47 @@ export class FakePiBroker {
         const frame = JSON.parse(line) as Record<string, unknown>;
         if (frame.type === "hello") this.#helloCount += 1;
         if (frame.type === "hello") {
-          socket.write(encodeFrame({ v: 1, type: "hello_result", id: frame.id, ok: true, broker: { version: "test", status: "healthy", lastEventSeq: 0 }, principal: { id: "prn_test", kind: "pi_child", permissions: ["read:state", "manage:self"] }, limits: { maxLineBytes: 1_048_576 } }));
+          socket.write(
+            encodeFrame({
+              v: 1,
+              type: "hello_result",
+              id: frame.id,
+              ok: true,
+              broker: { version: "test", status: "healthy", lastEventSeq: 0 },
+              principal: {
+                id: "prn_test",
+                kind: "pi_child",
+                permissions: ["read:state", "manage:self"],
+              },
+              limits: { maxLineBytes: 1_048_576 },
+            }),
+          );
         } else if (frame.type === "request") {
           this.requests.push(frame);
           const method = frame.method as string;
-          socket.write(encodeFrame({ v: 1, type: "response", id: frame.id, method, ok: true, result: method.startsWith("agent.register_") ? { agentId: typeof (frame.params as Record<string, unknown> | undefined)?.agentId === "string" ? (frame.params as Record<string, unknown>).agentId : "agt_registered", generation: 1, connectionGeneration: 1, heartbeatMs: 5000, permissions: ["read:state"] } : { accepted: true } }));
+          socket.write(
+            encodeFrame({
+              v: 1,
+              type: "response",
+              id: frame.id,
+              method,
+              ok: true,
+              result: method.startsWith("agent.register_")
+                ? {
+                    agentId:
+                      typeof (
+                        frame.params as Record<string, unknown> | undefined
+                      )?.agentId === "string"
+                        ? (frame.params as Record<string, unknown>).agentId
+                        : "agt_registered",
+                    generation: 1,
+                    connectionGeneration: 1,
+                    heartbeatMs: 5000,
+                    permissions: ["read:state"],
+                  }
+                : { accepted: true },
+            }),
+          );
         }
       }
     });

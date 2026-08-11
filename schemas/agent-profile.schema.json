@@ -54,10 +54,7 @@
     "sourcePolicy": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "requiresTrustedProject",
-        "allowProjectPromptFragments"
-      ],
+      "required": ["requiresTrustedProject", "allowProjectPromptFragments"],
       "properties": {
         "requiresTrustedProject": {
           "type": "boolean"
@@ -70,33 +67,20 @@
     "model": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "provider",
-        "modelId",
-        "thinkingLevel"
-      ],
+      "required": ["provider", "modelId", "thinkingLevel"],
       "properties": {
         "provider": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "minLength": 1,
           "maxLength": 128
         },
         "modelId": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "minLength": 1,
           "maxLength": 256
         },
         "thinkingLevel": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "enum": [
             null,
             "off",
@@ -117,9 +101,7 @@
                 "type": "string"
               }
             },
-            "required": [
-              "provider"
-            ]
+            "required": ["provider"]
           },
           "then": {
             "properties": {
@@ -136,9 +118,7 @@
                 "type": "string"
               }
             },
-            "required": [
-              "modelId"
-            ]
+            "required": ["modelId"]
           },
           "then": {
             "properties": {
@@ -153,17 +133,10 @@
     "tools": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "mode",
-        "names"
-      ],
+      "required": ["mode", "names"],
       "properties": {
         "mode": {
-          "enum": [
-            "allowlist",
-            "inherit",
-            "denylist"
-          ]
+          "enum": ["allowlist", "inherit", "denylist"]
         },
         "names": {
           "type": "array",
@@ -180,18 +153,10 @@
     "isolation": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "mode",
-        "requireGit",
-        "allowSharedOverride"
-      ],
+      "required": ["mode", "requireGit", "allowSharedOverride"],
       "properties": {
         "mode": {
-          "enum": [
-            "shared-readonly",
-            "worktree",
-            "shared-explicit"
-          ]
+          "enum": ["shared-readonly", "worktree", "shared-explicit"]
         },
         "requireGit": {
           "type": "boolean"
@@ -204,11 +169,7 @@
     "delegation": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "allowed",
-        "maxDepth",
-        "maxActiveChildren"
-      ],
+      "required": ["allowed", "maxDepth", "maxActiveChildren"],
       "properties": {
         "allowed": {
           "type": "boolean"
@@ -231,11 +192,7 @@
     "questionPolicy": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "timeoutMs",
-        "onTimeout",
-        "maxOpen"
-      ],
+      "required": ["timeoutMs", "onTimeout", "maxOpen"],
       "properties": {
         "timeoutMs": {
           "type": "integer",
@@ -243,11 +200,7 @@
           "maximum": 86400000
         },
         "onTimeout": {
-          "enum": [
-            "fail",
-            "continue_default",
-            "escalate"
-          ]
+          "enum": ["fail", "continue_default", "escalate"]
         },
         "maxOpen": {
           "const": 1
@@ -281,11 +234,7 @@
     "retention": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "agent",
-        "worktree",
-        "allowReuse"
-      ],
+      "required": ["agent", "worktree", "allowReuse"],
       "properties": {
         "agent": {
           "enum": [
@@ -295,10 +244,7 @@
           ]
         },
         "worktree": {
-          "enum": [
-            "retain",
-            "gc_when_clean"
-          ]
+          "enum": ["retain", "gc_when_clean"]
         },
         "allowReuse": {
           "type": "boolean"
@@ -336,40 +282,25 @@
           "maximum": 86400000
         },
         "maxTurns": {
-          "type": [
-            "integer",
-            "null"
-          ],
+          "type": ["integer", "null"],
           "minimum": 1,
           "maximum": 1000
         },
         "maxContextPercent": {
-          "type": [
-            "number",
-            "null"
-          ],
+          "type": ["number", "null"],
           "exclusiveMinimum": 0,
           "maximum": 100
         },
         "maxInputTokens": {
-          "type": [
-            "integer",
-            "null"
-          ],
+          "type": ["integer", "null"],
           "minimum": 1
         },
         "maxOutputTokens": {
-          "type": [
-            "integer",
-            "null"
-          ],
+          "type": ["integer", "null"],
           "minimum": 1
         },
         "maxCostUsd": {
-          "type": [
-            "number",
-            "null"
-          ],
+          "type": ["number", "null"],
           "exclusiveMinimum": 0,
           "maximum": 1000000
         },

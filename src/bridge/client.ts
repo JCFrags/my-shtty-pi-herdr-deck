@@ -15,7 +15,9 @@ import {
   validateServerFrame,
 } from "./protocol.js";
 
-const DEFAULT_RECONNECT_DELAYS_MS = [100, 200, 400, 800, 1600, 3200, 5000, 5000] as const;
+const DEFAULT_RECONNECT_DELAYS_MS = [
+  100, 200, 400, 800, 1600, 3200, 5000, 5000,
+] as const;
 const COMMAND_TIMEOUT_MS = 10_000;
 const HANDSHAKE_TIMEOUT_MS = 3_000;
 
@@ -65,15 +67,21 @@ export class BridgeClient {
   #manualStop = true;
   #helloReceived = false;
   #lastStateSeq = 0;
-  #status: ClientConnectionStatus = { kind: "disconnected", reason: "Not connected." };
+  #status: ClientConnectionStatus = {
+    kind: "disconnected",
+    reason: "Not connected.",
+  };
   #state: DeckState | undefined;
 
   constructor(options: BridgeClientOptions) {
     this.socketPath = options.socketPath;
-    this.#reconnectDelaysMs = options.reconnectDelaysMs ?? DEFAULT_RECONNECT_DELAYS_MS;
+    this.#reconnectDelaysMs =
+      options.reconnectDelaysMs ?? DEFAULT_RECONNECT_DELAYS_MS;
     this.#commandTimeoutMs = options.commandTimeoutMs ?? COMMAND_TIMEOUT_MS;
-    this.#handshakeTimeoutMs = options.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
-    this.#socketFactory = options.socketFactory ?? ((path) => createConnection(path));
+    this.#handshakeTimeoutMs =
+      options.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
+    this.#socketFactory =
+      options.socketFactory ?? ((path) => createConnection(path));
     this.#log = options.log ?? (() => undefined);
   }
 
@@ -86,7 +94,11 @@ export class BridgeClient {
   }
 
   get connected(): boolean {
-    return this.#status.kind === "connected" && this.#helloReceived && Boolean(this.#socket && !this.#socket.destroyed);
+    return (
+      this.#status.kind === "connected" &&
+      this.#helloReceived &&
+      Boolean(this.#socket && !this.#socket.destroyed)
+    );
   }
 
   start(): void {
@@ -126,9 +138,16 @@ export class BridgeClient {
     return () => this.#helloListeners.delete(listener);
   }
 
-  send<N extends CommandName>(name: N, args: CommandArgsMap[N]): Promise<unknown> {
+  send<N extends CommandName>(
+    name: N,
+    args: CommandArgsMap[N],
+  ): Promise<unknown> {
     if (!this.connected || !this.#socket) {
-      return Promise.reject(new BridgeDisconnectedError("Pi Deck is disconnected; the command was not queued."));
+      return Promise.reject(
+        new BridgeDisconnectedError(
+          "Pi Deck is disconnected; the command was not queued.",
+        ),
+      );
     }
     const id = randomUUID();
     const frame = { type: "command", id, name, args } as CommandFrame<N>;
@@ -136,7 +155,9 @@ export class BridgeClient {
     try {
       encoded = encodeFrame(frame);
     } catch (error) {
-      return Promise.reject(error instanceof Error ? error : new Error("Command encoding failed."));
+      return Promise.reject(
+        error instanceof Error ? error : new Error("Command encoding failed."),
+      );
     }
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -159,7 +180,10 @@ export class BridgeClient {
   #connectNow(): void {
     if (this.#manualStop) return;
     if (this.#attempt >= this.#reconnectDelaysMs.length + 1) {
-      this.#setStatus({ kind: "disconnected", reason: "Reconnect limit reached." });
+      this.#setStatus({
+        kind: "disconnected",
+        reason: "Reconnect limit reached.",
+      });
       return;
     }
     this.#attempt += 1;
@@ -172,11 +196,19 @@ export class BridgeClient {
     socket.setNoDelay?.(true);
     this.#handshakeTimer = setTimeout(() => {
       this.#handshakeTimer = undefined;
-      if (!this.#helloReceived) socket.destroy(new Error("Bridge hello timed out."));
+      if (!this.#helloReceived)
+        socket.destroy(new Error("Bridge hello timed out."));
     }, this.#handshakeTimeoutMs);
     this.#handshakeTimer.unref?.();
-    socket.on("data", (chunk) => this.#handleData(socket, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-    socket.once("error", (error) => this.#log(`bridge connection error: ${error.message}`));
+    socket.on("data", (chunk) =>
+      this.#handleData(
+        socket,
+        Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk),
+      ),
+    );
+    socket.once("error", (error) =>
+      this.#log(`bridge connection error: ${error.message}`),
+    );
     socket.once("close", () => this.#handleClose(socket));
   }
 
@@ -214,14 +246,28 @@ export class BridgeClient {
     this.#lastStateSeq = frame.seq;
     for (const listener of this.#helloListeners) listener(frame);
     const capabilities = frame.payload.capabilities;
-    if (frame.payload.accepted && (!capabilities.mouse || !capabilities.perToolExpansion || !capabilities.bulkToolExpansion || !capabilities.expansionSubscription)) {
+    if (
+      frame.payload.accepted &&
+      (!capabilities.mouse ||
+        !capabilities.perToolExpansion ||
+        !capabilities.bulkToolExpansion ||
+        !capabilities.expansionSubscription)
+    ) {
       this.#manualStop = true;
-      this.#setStatus({ kind: "disconnected", reason: PI_COMPATIBILITY_MESSAGE });
+      this.#setStatus({
+        kind: "disconnected",
+        reason: PI_COMPATIBILITY_MESSAGE,
+      });
       this.#socket?.end();
       return;
     }
-    if (!frame.payload.accepted || frame.payload.readOnly || !frame.payload.controller) {
-      const reason = frame.payload.reason ?? "Bridge rejected the controller connection.";
+    if (
+      !frame.payload.accepted ||
+      frame.payload.readOnly ||
+      !frame.payload.controller
+    ) {
+      const reason =
+        frame.payload.reason ?? "Bridge rejected the controller connection.";
       this.#manualStop = true;
       this.#setStatus({ kind: "disconnected", reason });
       this.#socket?.end();
@@ -245,7 +291,12 @@ export class BridgeClient {
     clearTimeout(pending.timer);
     this.#pending.delete(frame.id);
     if (frame.ok) pending.resolve(frame.value);
-    else pending.reject(Object.assign(new Error(frame.error.message), { code: frame.error.code }));
+    else
+      pending.reject(
+        Object.assign(new Error(frame.error.message), {
+          code: frame.error.code,
+        }),
+      );
   }
 
   #handleClose(socket: Socket): void {
@@ -254,16 +305,27 @@ export class BridgeClient {
     this.#handshakeTimer = undefined;
     this.#socket = undefined;
     this.#helloReceived = false;
-    this.#rejectPending("Bridge disconnected; in-flight commands were not queued for retry.");
+    this.#rejectPending(
+      "Bridge disconnected; in-flight commands were not queued for retry.",
+    );
     if (this.#manualStop) return;
-    const delayIndex = Math.min(Math.max(0, this.#attempt - 1), this.#reconnectDelaysMs.length - 1);
+    const delayIndex = Math.min(
+      Math.max(0, this.#attempt - 1),
+      this.#reconnectDelaysMs.length - 1,
+    );
     const delay = this.#reconnectDelaysMs[delayIndex];
     if (delay === undefined || this.#attempt > this.#reconnectDelaysMs.length) {
       this.#manualStop = true;
-      this.#setStatus({ kind: "disconnected", reason: "Reconnect limit reached." });
+      this.#setStatus({
+        kind: "disconnected",
+        reason: "Reconnect limit reached.",
+      });
       return;
     }
-    this.#setStatus({ kind: "disconnected", reason: `Connection lost; retrying (${this.#attempt}/${this.#reconnectDelaysMs.length}).` });
+    this.#setStatus({
+      kind: "disconnected",
+      reason: `Connection lost; retrying (${this.#attempt}/${this.#reconnectDelaysMs.length}).`,
+    });
     this.#reconnectTimer = setTimeout(() => {
       this.#reconnectTimer = undefined;
       this.#connectNow();

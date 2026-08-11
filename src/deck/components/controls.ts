@@ -10,8 +10,18 @@ export interface HitBox {
   activate(): void;
 }
 
-export function hitTest(boxes: readonly HitBox[], x: number, y: number): HitBox | undefined {
-  return boxes.find((box) => x >= box.x && x < box.x + box.width && y >= box.y && y < box.y + box.height);
+export function hitTest(
+  boxes: readonly HitBox[],
+  x: number,
+  y: number,
+): HitBox | undefined {
+  return boxes.find(
+    (box) =>
+      x >= box.x &&
+      x < box.x + box.width &&
+      y >= box.y &&
+      y < box.y + box.height,
+  );
 }
 
 export class PressReleaseTracker {
@@ -38,7 +48,8 @@ export class PressReleaseTracker {
     }
     if (event.type === "move") {
       if (!this.#pressedId) return false;
-      if (event.x !== this.#pressX || event.y !== this.#pressY) this.#dragged = true;
+      if (event.x !== this.#pressX || event.y !== this.#pressY)
+        this.#dragged = true;
       return true;
     }
     const pressedId = this.#pressedId;
@@ -52,7 +63,10 @@ export class PressReleaseTracker {
   }
 }
 
-export function renderButton(label: string, options: { disabled?: boolean; focused?: boolean } = {}): string {
+export function renderButton(
+  label: string,
+  options: { disabled?: boolean; focused?: boolean } = {},
+): string {
   const wrapped = `[${label}]`;
   if (options.disabled) return `(${label})`;
   return options.focused ? `>${wrapped}<` : wrapped;
