@@ -363,6 +363,11 @@ test("orchestrator extension reload transfers runtime credential and registers t
   ]);
   assert.equal(await waitForRegistrationResponse(1), 1);
   await waitForConnectedBinding();
+  assert.deepEqual(firstHarness.activeTools.sort(), [
+    "orchestrator_ask",
+    "orchestrator_result",
+    "read",
+  ]);
   assert.equal(registrationCount, 1);
   await shutdown(firstActive, "reload");
   await unlink(tokenPath);
@@ -380,6 +385,11 @@ test("orchestrator extension reload transfers runtime credential and registers t
   ]);
   assert.equal(await waitForRegistrationResponse(2), 2);
   await waitForConnectedBinding();
+  assert.deepEqual(secondHarness.activeTools.sort(), [
+    "orchestrator_ask",
+    "orchestrator_result",
+    "read",
+  ]);
   assert.equal(registrationCount, 2);
   assert.equal(first.tools.length, 2);
   assert.equal(second.tools.length, 2);

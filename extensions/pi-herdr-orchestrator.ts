@@ -69,7 +69,7 @@ function reconcileActiveTools(pi: PiApiLike, allowed: readonly string[]): void {
   const current = pi.getActiveTools?.() ?? [];
   const next = [
     ...current.filter((name) => !ORCHESTRATION_TOOLS.has(name)),
-    ...allowed.filter((name) => !current.includes(name)),
+    ...allowed,
   ];
   pi.setActiveTools([...new Set(next)]);
 }
