@@ -89,7 +89,7 @@ export async function doctor(
       binaryOk,
       true,
       binaryOk
-        ? binary!
+        ? "Authoritative Herdr binary is executable."
         : "HERDR_BIN_PATH is missing or unsafe. Upgrade to Herdr 0.8.0 or newer and run this command inside its managed pane.",
     ),
   );
@@ -227,6 +227,79 @@ export async function doctor(
     node: process.versions.node,
     checks,
     ok: checks.every((item) => !item.mandatory || item.available),
+  };
+}
+function boundedText(value: unknown, maxBytes: number): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    Buffer.byteLength(value, "utf8") <= maxBytes &&
+    !/[\u0000-\u001f\u007f]/u.test(value)
+  );
+}
+export function validateDoctorReport(value: unknown): DoctorReport {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("Broker returned an invalid doctor report.");
+  const report = value as Record<string, unknown>;
+  if (
+    Object.keys(report).length !== 5 ||
+    !["version", "platform", "node", "checks", "ok"].every((key) =>
+      Object.hasOwn(report, key),
+    ) ||
+    !boundedText(report.version, 64) ||
+    !boundedText(report.platform, 64) ||
+    !boundedText(report.node, 64) ||
+    typeof report.ok !== "boolean" ||
+    !Array.isArray(report.checks) ||
+    report.checks.length > 64
+  )
+    throw new Error("Broker returned an invalid doctor report.");
+  const checks = report.checks.map((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      throw new Error("Broker returned an invalid doctor report.");
+    const item = value as Record<string, unknown>;
+    if (
+      Object.keys(item).length !== 4 ||
+      !["name", "available", "mandatory", "detail"].every((key) =>
+        Object.hasOwn(item, key),
+      ) ||
+      !boundedText(item.name, 128) ||
+      !boundedText(item.detail, 1024) ||
+      typeof item.available !== "boolean" ||
+      typeof item.mandatory !== "boolean"
+    )
+      throw new Error("Broker returned an invalid doctor report.");
+    return {
+      name: item.name,
+      available: item.available,
+      mandatory: item.mandatory,
+      detail: item.detail,
+    };
+  });
+  if (report.ok !== checks.every((item) => !item.mandatory || item.available))
+    throw new Error("Broker returned an invalid doctor report.");
+  return {
+    version: report.version,
+    platform: report.platform,
+    node: report.node,
+    checks,
+    ok: report.ok,
+  };
+}
+export function unavailableDoctorReport(): DoctorReport {
+  return {
+    version: "0.1.0",
+    platform: process.platform,
+    node: process.versions.node,
+    checks: [
+      {
+        name: "broker",
+        available: false,
+        mandatory: true,
+        detail: "Authenticated session broker is unavailable.",
+      },
+    ],
+    ok: false,
   };
 }
 export function doctorJson(report: DoctorReport): string {

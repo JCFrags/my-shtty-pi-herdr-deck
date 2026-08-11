@@ -34,6 +34,18 @@ function finiteReceipt<T>(label: string): {
   return { promise, resolve };
 }
 
+function errorReceipt(error: unknown): unknown {
+  if (error instanceof AggregateError)
+    return {
+      name: error.name,
+      message: error.message,
+      errors: error.errors.map(errorReceipt),
+    };
+  return error instanceof Error
+    ? { name: error.name, message: error.message }
+    : { name: "Unknown", message: "Unknown failure." };
+}
+
 async function starter(): Promise<void> {
   const paths = await ensureBroker();
   const pid = JSON.parse(await readFile(paths.pid, "utf8")) as {
@@ -51,6 +63,18 @@ async function starter(): Promise<void> {
       runtime: paths.runtime,
     })}\n`,
   );
+}
+
+async function expectedStarterFailure(): Promise<void> {
+  try {
+    await ensureBroker();
+    throw new Error("Expected broker startup to fail.");
+  } catch (error) {
+    process.stdout.write(
+      `${JSON.stringify({ event: "starter-failed", error: errorReceipt(error) })}\n`,
+    );
+    process.exitCode = 87;
+  }
 }
 
 async function crashStartupPublisher(): Promise<void> {
@@ -232,14 +256,17 @@ async function extensionClient(): Promise<void> {
   await assert.rejects(
     wrongSession.connect(),
     (error: unknown) =>
-      error instanceof Error && error.message === "BROKER_SOCKET_ERROR",
+      error instanceof Error &&
+      ["BROKER_SOCKET_ERROR", "BROKER_HELLO_INVALID"].includes(error.message),
   );
   assert.equal(wrongSession.connected, false);
   process.env.HERDR_PANE_ID = "pane-root";
   process.env.HERDR_TERMINAL_ID = "terminal-root";
 
+  assert.equal((await brokerStatus()).status, "running");
   for (const handler of handlers.get("session_shutdown") ?? [])
     await handler({ reason: "quit" }, harness.context);
+  assert.equal((await brokerStatus()).status, "running");
   const stopped = await stopBroker();
   assert.equal(stopped, "stopped");
   process.stdout.write(
@@ -255,6 +282,7 @@ async function extensionClient(): Promise<void> {
 
 const action = process.argv[2];
 if (action === "starter") await starter();
+else if (action === "expected-starter-failure") await expectedStarterFailure();
 else if (action === "crash-startup-publisher") await crashStartupPublisher();
 else if (action === "extension") await extensionClient();
 else throw new Error("Unknown production startup child action.");

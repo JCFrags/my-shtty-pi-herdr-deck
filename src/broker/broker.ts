@@ -7,7 +7,7 @@ import {
 import { lstatSync, renameSync, unlinkSync } from "node:fs";
 import { chmod, lstat } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
   createPrivateExclusive,
   readPrivateRegular,
@@ -164,6 +164,41 @@ function safeText(value: unknown, max = 4096): value is string {
     value.length <= max &&
     !/[\u0000-\u001f\u007f]/u.test(value)
   );
+}
+export function validatePiSessionReference(value: unknown): {
+  source: "herdr:pi";
+  agent: "pi";
+  kind: "path" | "id";
+  value: string;
+} {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new OrchestratorError(
+      "INVALID_REQUEST",
+      "Pi session reference is invalid.",
+    );
+  const reference = value as Record<string, unknown>;
+  const kind = reference.kind;
+  const sessionValue = reference.value;
+  if (
+    !exactKeys(reference, ["source", "agent", "kind", "value"]) ||
+    reference.source !== "herdr:pi" ||
+    reference.agent !== "pi" ||
+    (kind !== "path" && kind !== "id") ||
+    !safeText(sessionValue, kind === "path" ? 4096 : 256) ||
+    Buffer.byteLength(sessionValue, "utf8") > (kind === "path" ? 4096 : 256) ||
+    (kind === "path" &&
+      (!isAbsolute(sessionValue) || resolve(sessionValue) !== sessionValue))
+  )
+    throw new OrchestratorError(
+      "INVALID_REQUEST",
+      "Pi session reference is invalid.",
+    );
+  return {
+    source: "herdr:pi",
+    agent: "pi",
+    kind,
+    value: sessionValue,
+  };
 }
 function exactRequestedIsolation(value: unknown): unknown {
   if (value === undefined) return undefined;
@@ -853,6 +888,9 @@ export class Broker {
       if (type === "server_response") return validateServerResponse(value);
       return validateRequest(value);
     });
+    socket.on("error", () => {
+      socket.destroy();
+    });
     socket.on("data", (data) => {
       const decoded = decoder.push(data);
       const queued = [] as typeof decoded;
@@ -1131,6 +1169,7 @@ export class Broker {
       let result: unknown;
       let replayEvents: import("../state/types.js").StoredEvent[] = [];
       let committedEvent: import("../state/types.js").StoredEvent | undefined;
+      let responseBoundary: (() => Promise<void>) | undefined;
       const deferred: Array<() => Promise<void>> = [];
       let shutdownAfterResponse = false;
       if (
@@ -1150,6 +1189,22 @@ export class Broker {
           lastEventSeq: this.store.state.lastEventSeq,
           corruption: this.store.corruption,
         };
+      } else if (request.method === "system.doctor") {
+        if (
+          !exactKeys(request.params, []) ||
+          Object.keys(request.params).length ||
+          !this.#herdr
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "System doctor parameters are invalid.",
+          );
+        if (principal.kind !== "cli" && principal.kind !== "human")
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "Only an authenticated local operator can run doctor.",
+          );
+        result = await this.#herdr.diagnose();
       } else if (request.method === "system.shutdown") {
         if (
           !exactKeys(request.params, []) ||
@@ -1526,7 +1581,13 @@ export class Broker {
           pi = p.pi as Record<string, unknown>;
         if (
           !Object.keys(herdr).every((key) =>
-            ["paneId", "terminalId", "detectedKind", "name"].includes(key),
+            [
+              "paneId",
+              "terminalId",
+              "detectedKind",
+              "name",
+              "sessionReference",
+            ].includes(key),
           ) ||
           !Object.keys(pi).every((key) =>
             ["sessionId", "sessionName", "capabilities", "state"].includes(key),
@@ -1542,6 +1603,9 @@ export class Broker {
             "INVALID_REQUEST",
             "Pi registration fields are invalid.",
           );
+        const sessionReference = validatePiSessionReference(
+          herdr.sessionReference,
+        );
         if (
           request.method === "agent.register_managed" &&
           (!isEntityId(p.agentId, "agt") ||
@@ -1552,6 +1616,7 @@ export class Broker {
             "INVALID_REQUEST",
             "Managed registration identity is invalid.",
           );
+        let registrationConnectionGeneration: number | undefined;
         let agentId: string = (
           request.method === "agent.register_managed"
             ? (principal.agentId ?? p.agentId)
@@ -1560,13 +1625,45 @@ export class Broker {
         if (
           !safeText(agentId) ||
           !safeText(herdr.paneId) ||
-          !safeText(herdr.terminalId) ||
+          (herdr.terminalId !== undefined && !safeText(herdr.terminalId)) ||
           !safeText(pi.sessionId)
         )
           throw new OrchestratorError(
             "INVALID_REQUEST",
             "Pi identity is invalid.",
           );
+        let adoptedContext:
+          | {
+              paneId: string;
+              terminalId: string;
+              workspaceId?: string;
+              tabId?: string;
+              cwd?: string;
+              worktreeId?: string;
+            }
+          | undefined;
+        if (request.method === "agent.register_adopted") {
+          if (!this.#herdr || typeof this.#herdr.verifyRoot !== "function")
+            throw new OrchestratorError(
+              "HERDR_UNAVAILABLE",
+              "Adopted registration requires Herdr verification.",
+            );
+          try {
+            adoptedContext = await this.#herdr.verifyRoot({
+              paneId: herdr.paneId as string,
+              ...(safeText(herdr.terminalId)
+                ? { terminalId: herdr.terminalId }
+                : {}),
+              sessionReference,
+            });
+            herdr.terminalId = adoptedContext.terminalId;
+          } catch {
+            throw new OrchestratorError(
+              "AGENT_REPLACED",
+              "Herdr occupant verification failed.",
+            );
+          }
+        }
         let existing = this.store.state.agents[agentId];
         if (request.method === "agent.register_adopted") {
           const roots = Object.values(this.store.state.agents).filter(
@@ -1612,35 +1709,6 @@ export class Broker {
           );
         const adoptedReconnect =
           request.method === "agent.register_adopted" && Boolean(existing);
-        let adoptedContext:
-          | {
-              paneId: string;
-              terminalId: string;
-              workspaceId?: string;
-              tabId?: string;
-              cwd?: string;
-              worktreeId?: string;
-            }
-          | undefined;
-        if (request.method === "agent.register_adopted") {
-          if (!this.#herdr || typeof this.#herdr.verifyRoot !== "function")
-            throw new OrchestratorError(
-              "HERDR_UNAVAILABLE",
-              "Adopted registration requires Herdr verification.",
-            );
-          try {
-            adoptedContext = await this.#herdr.verifyRoot({
-              paneId: herdr.paneId as string,
-              terminalId: herdr.terminalId as string,
-              sessionId: pi.sessionId as string,
-            });
-          } catch {
-            throw new OrchestratorError(
-              "AGENT_REPLACED",
-              "Herdr occupant verification failed.",
-            );
-          }
-        }
         if (!existing) {
           const event = await this.store.append({
             type: "agent.registered",
@@ -1673,11 +1741,21 @@ export class Broker {
         }
         if (request.method === "agent.register_adopted") {
           try {
-            adoptedContext = await this.#herdr!.verifyRoot({
+            const finalContext = await this.#herdr!.verifyRoot({
               paneId: herdr.paneId as string,
-              terminalId: herdr.terminalId as string,
-              sessionId: pi.sessionId as string,
+              terminalId: adoptedContext!.terminalId,
+              sessionReference,
             });
+            if (
+              finalContext.paneId !== adoptedContext!.paneId ||
+              finalContext.terminalId !== adoptedContext!.terminalId ||
+              finalContext.workspaceId !== adoptedContext!.workspaceId ||
+              finalContext.tabId !== adoptedContext!.tabId ||
+              finalContext.cwd !== adoptedContext!.cwd ||
+              finalContext.worktreeId !== adoptedContext!.worktreeId
+            )
+              throw new Error("HERDR_IDENTITY_MISMATCH");
+            adoptedContext = finalContext;
           } catch {
             await this.store
               .append({
@@ -1725,53 +1803,164 @@ export class Broker {
               },
             });
           }
-          principal.agentId = agentId;
-          principal.generation =
-            this.store.state.agents[agentId]?.generation ?? 1;
-          principal.piSessionId = pi.sessionId as string;
-          client.adoptedRegistration = true;
+          responseBoundary = async () => {
+            try {
+              const boundary = await this.#herdr!.verifyRoot({
+                paneId: adoptedContext!.paneId,
+                terminalId: adoptedContext!.terminalId,
+                sessionReference,
+              });
+              if (
+                boundary.paneId !== adoptedContext!.paneId ||
+                boundary.terminalId !== adoptedContext!.terminalId ||
+                boundary.workspaceId !== adoptedContext!.workspaceId ||
+                boundary.tabId !== adoptedContext!.tabId ||
+                boundary.cwd !== adoptedContext!.cwd ||
+                boundary.worktreeId !== adoptedContext!.worktreeId
+              )
+                throw new Error("HERDR_IDENTITY_MISMATCH");
+            } catch (primary) {
+              const errors: unknown[] = [primary];
+              try {
+                await this.store.append({
+                  type: "agent.state_changed",
+                  actor: { principalId: principal.id, kind: principal.kind },
+                  entityRefs: { agentId },
+                  payload: {
+                    agentId,
+                    state: "replaced",
+                    reason: "HERDR_IDENTITY_MISMATCH",
+                  },
+                });
+              } catch (eventError) {
+                errors.push(eventError);
+                this.#observeBackgroundFailure(eventError);
+              }
+              const failure = new OrchestratorError(
+                "AGENT_REPLACED",
+                "Herdr occupant changed during adoption.",
+              );
+              Object.assign(failure, {
+                cause: new AggregateError(
+                  errors,
+                  "Adopted registration identity changed at response boundary.",
+                ),
+              });
+              throw failure;
+            }
+            principal.agentId = agentId;
+            principal.generation =
+              this.store.state.agents[agentId]?.generation ?? 1;
+            principal.piSessionId = pi.sessionId as string;
+            client.adoptedRegistration = true;
+          };
         }
         if (request.method === "agent.register_managed") {
-          if (
-            this.#herdr &&
-            this.store.state.herdrResources?.[agentId]?.state === "pending"
-          )
+          if (!this.#herdr)
+            throw new OrchestratorError(
+              "HERDR_UNAVAILABLE",
+              "Managed registration requires Herdr verification.",
+            );
+          const presentedIdentity = {
+            paneId: herdr.paneId as string,
+            ...(safeText(herdr.terminalId)
+              ? { terminalId: herdr.terminalId }
+              : {}),
+            sessionReference,
+          };
+          if (this.store.state.herdrResources?.[agentId]?.state === "pending")
             await this.#herdr.register(
               agentId,
               {
-                paneId: herdr.paneId,
-                ...(safeText(herdr.terminalId)
-                  ? { terminalId: herdr.terminalId }
-                  : {}),
+                ...presentedIdentity,
                 sessionId: pi.sessionId,
                 generation: Number(p.generation ?? 1),
               },
               undefined,
             );
+          const managedContext = await this.#herdr.verifyManagedPane(
+            agentId,
+            presentedIdentity,
+          );
           const current = this.store.state.agents[agentId];
-          if (current)
-            await this.store.append({
-              type: "agent.state_changed",
-              actor: { principalId: principal.id, kind: principal.kind },
-              entityRefs: { agentId },
-              payload: {
+          const nextConnectionGeneration =
+            (current?.connectionGeneration ?? 0) + 1;
+          registrationConnectionGeneration = nextConnectionGeneration;
+          responseBoundary = async () => {
+            const exactManagedContext = async () => {
+              const boundary = await this.#herdr!.verifyManagedPane(
                 agentId,
-                state: "idle",
-                paneId: herdr.paneId,
-                ...(safeText(herdr.terminalId)
-                  ? { terminalId: herdr.terminalId }
-                  : {}),
-                piSessionId: pi.sessionId,
-                connectionGeneration: (current.connectionGeneration ?? 0) + 1,
-              },
-            });
-          client.managedConnectionGeneration =
-            this.store.state.agents[agentId]?.connectionGeneration;
+                managedContext,
+              );
+              if (
+                boundary.paneId !== managedContext.paneId ||
+                boundary.terminalId !== managedContext.terminalId ||
+                boundary.workspaceId !== managedContext.workspaceId ||
+                boundary.tabId !== managedContext.tabId ||
+                boundary.cwd !== managedContext.cwd ||
+                boundary.worktreeId !== managedContext.worktreeId
+              )
+                throw new Error("HERDR_REGISTRATION_IDENTITY_MISMATCH");
+            };
+            try {
+              await exactManagedContext();
+              if (current)
+                await this.store.append({
+                  type: "agent.state_changed",
+                  actor: { principalId: principal.id, kind: principal.kind },
+                  entityRefs: { agentId },
+                  payload: {
+                    agentId,
+                    state: "idle",
+                    paneId: managedContext.paneId,
+                    terminalId: managedContext.terminalId,
+                    piSessionId: pi.sessionId,
+                    connectionGeneration: nextConnectionGeneration,
+                  },
+                });
+              await exactManagedContext();
+            } catch (primary) {
+              const errors: unknown[] = [primary];
+              try {
+                await this.#herdr!.recordRegistrationMismatch(agentId);
+              } catch (resourceError) {
+                errors.push(resourceError);
+                this.#observeBackgroundFailure(resourceError);
+              }
+              if (this.store.state.agents[agentId])
+                try {
+                  await this.store.append({
+                    type: "agent.state_changed",
+                    actor: { principalId: principal.id, kind: principal.kind },
+                    entityRefs: { agentId },
+                    payload: {
+                      agentId,
+                      state: "replaced",
+                      reason: "HERDR_REGISTRATION_IDENTITY_MISMATCH",
+                    },
+                  });
+                } catch (agentError) {
+                  errors.push(agentError);
+                  this.#observeBackgroundFailure(agentError);
+                }
+              const failure = new OrchestratorError(
+                "AGENT_REPLACED",
+                "Managed Herdr resource changed during registration.",
+              );
+              Object.assign(failure, {
+                cause: new AggregateError(
+                  errors,
+                  "Managed registration identity changed at response boundary.",
+                ),
+              });
+              throw failure;
+            }
+            client.managedConnectionGeneration = nextConnectionGeneration;
+          };
           const runId = this.store.state.agents[agentId]?.currentRunId;
           const run = runId ? this.store.state.runs[runId] : undefined;
           if (run && !isRunClosedForAdapterProgress(run.state)) {
-            const connectionGeneration =
-              this.store.state.agents[agentId]?.connectionGeneration ?? 1;
+            const connectionGeneration = nextConnectionGeneration;
             const agentGeneration =
               this.store.state.agents[agentId]?.generation ?? 1;
             const assignmentId = run.assignmentId ?? createId("asg");
@@ -1907,7 +2096,9 @@ export class Broker {
           agentId,
           generation: this.store.state.agents[agentId]?.generation ?? 1,
           connectionGeneration:
-            this.store.state.agents[agentId]?.connectionGeneration ?? 1,
+            registrationConnectionGeneration ??
+            this.store.state.agents[agentId]?.connectionGeneration ??
+            1,
           heartbeatMs: 5_000,
           permissions: principal.permissions,
         };
@@ -3858,6 +4049,7 @@ export class Broker {
       } else throw new OrchestratorError("NOT_FOUND", "Method was not found.");
       assertInvariants(this.store.state);
       if (committedEvent) await this.#writeSnapshotBestEffort();
+      await responseBoundary?.();
       const response = {
         v: 1,
         type: "response",

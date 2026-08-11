@@ -9,6 +9,10 @@ platforms = ["linux"]
 command = ["npm", "run", "build"]
 platforms = ["linux"]
 
+[[startup]]
+command = ["./bin/pi-herdr-orchestrator", "broker", "startup"]
+platforms = ["linux"]
+
 [[panes]]
 id = "deck"
 title = "Pi Herd"

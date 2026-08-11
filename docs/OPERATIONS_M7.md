@@ -26,16 +26,20 @@ Project configuration is accepted only when `PI_HERDR_ORCH_PROJECT_TRUSTED=1` is
 
 ## Broker lifecycle, state, and export
 
-Run broker commands inside the affected Herdr session. Herdr 0.8.0 or newer injects the canonical socket and an absolute `HERDR_BIN_PATH`. Do not set an internal broker socket, session key, client secret, or token. If `doctor` reports that `HERDR_BIN_PATH` is missing, upgrade Herdr and reopen the pane.
+Run broker commands inside the affected Herdr session. Herdr 0.8.0 or newer gives the canonical socket to ordinary panes. It gives the authoritative `HERDR_BIN_PATH` to the plugin startup hook and plugin panes. Do not set an internal broker socket, session key, client secret, token, terminal ID, or binary path. The broker never searches `PATH` for Herdr.
 
-A new Pi session starts or reuses its session broker and registers itself as the adopted root. The deck uses the same path. Manual lifecycle commands are available for checks and maintenance:
+Link or enable alone does not run the plugin startup hook. Use an authorized Herdr start or restart after link. The hook then starts or reuses the session broker and exits. A new Pi session attaches to that broker and registers itself as the adopted root. The deck uses the same broker.
+
+Ordinary Herdr panes can run these authenticated attach-only commands:
 
 ```bash
-pi-herdr-orchestrator broker start
 pi-herdr-orchestrator broker status
-pi-herdr-orchestrator broker restart
+pi-herdr-orchestrator doctor --json
+pi-herdr-orchestrator events verify --json
 pi-herdr-orchestrator broker stop
 ```
+
+The public `broker start` and `broker restart` commands require Herdr plugin runtime context. Do not set or copy a binary path. Use the authorized Herdr restart and startup hook for installation, recovery, and rollback.
 
 `start` and `status` accept only an authenticated broker for the canonical Herdr session. `stop` and `restart` verify the recorded process-start identity. They do not signal an unverified process.
 
@@ -87,7 +91,7 @@ Canary order is: fake validation, package smoke, disposable fake stack, then an 
 2. Export and verify state.
 3. Check stored schema compatibility with the target version.
 4. Restore the exact prior package or checkout.
-5. Reopen Pi to start the broker on demand. Run `doctor` and `broker status`.
+5. Use an authorized Herdr start or restart so the restored startup hook starts the broker. Verify `broker status` and `doctor`, then reopen Pi.
 6. Reconcile agents and retain dirty or ambiguous worktrees.
 
 Never run older code against a newer unsupported state generation. Never kill-scan processes. Never remove a dirty, live, unknown, missing, ambiguous, or replaced resource. Operation verification fails closed when a resource identity changes.

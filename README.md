@@ -27,6 +27,7 @@ The Pi control deck also requires component mouse events, per-tool expansion sta
 | Managed pane entrypoint   | `deck`                                       |
 | Managed pane title        | `Pi Herd`                                    |
 | Managed pane command      | `./bin/pi-herdr-orchestrator deck`           |
+| Startup hook command      | `./bin/pi-herdr-orchestrator broker startup` |
 | Minimum Herdr             | `0.8.0`                                      |
 
 The package manifest and plugin manifest are the source of truth for these identifiers.
@@ -41,6 +42,26 @@ npm run validate
 ```
 
 The build emits the Pi extension and runtime under `dist/`. Validation runs type checks, schema checks, the static release-document check, the build, unit and integration tests, and the package smoke test. Tests use local fakes and do not need a live Pi or Herdr process.
+
+## Link the Herdr plugin and run startup
+
+Confirm that Herdr is version 0.8.0 or newer. Then link the reviewed package root:
+
+```bash
+PACKAGE_ROOT=$(pwd)
+herdr plugin link "$PACKAGE_ROOT"
+```
+
+The manifest links plugin `pi.herdr.orchestrator`. It declares entrypoint `deck`, title `Pi Herd`, and pane command `./bin/pi-herdr-orchestrator deck`. Its one-shot startup command is `./bin/pi-herdr-orchestrator broker startup`. Herdr resolves both relative commands from the linked package root.
+
+Linking or enabling the plugin does not run its startup hook. Use the authorized Herdr maintenance procedure to start or restart Herdr after the link. Herdr runs the hook after restore and socket readiness. The hook receives the authoritative binary path, starts or reuses one broker, writes no secret to standard output or standard error, and exits. This restart is an installation step. It is not a manual broker service, secret, or binary-path step.
+
+After the authorized Herdr restart, verify the attach-only broker from an ordinary Herdr pane:
+
+```bash
+./bin/pi-herdr-orchestrator broker status
+./bin/pi-herdr-orchestrator doctor --json
+```
 
 ## Install the local Pi package
 
@@ -60,20 +81,9 @@ PACKAGE_ROOT=$(pwd)
 pi install -l "$PACKAGE_ROOT"
 ```
 
-Open a new Pi session inside Herdr after installation. Pi loads `./dist/extensions/pi-herdr-orchestrator.js` from the package manifest. The extension uses only the session context that Herdr injects. It resolves the canonical Herdr socket, starts one broker for that Herdr session when needed, and registers the current Pi pane as the adopted root. A reload reuses the same adopted root.
+Open a new Pi session inside Herdr after startup verification. Pi loads `./dist/extensions/pi-herdr-orchestrator.js` from the package manifest. The extension uses the standard Herdr socket and pane context. It attaches to the session broker and registers the current Pi pane as the adopted root. A reload reuses the same adopted root.
 
-Do not set a broker socket, client secret, session key, or token for normal installed use. Herdr 0.8.0 or newer must inject an absolute `HERDR_BIN_PATH`. If `/orchestrator-status` reports that this value is missing, upgrade Herdr and reopen the Pi session. Do not search `PATH` or add an internal environment workaround.
-
-## Link the Herdr plugin
-
-Confirm that Herdr is version 0.8.0 or newer. Then link the same package root:
-
-```bash
-PACKAGE_ROOT=$(pwd)
-herdr plugin link "$PACKAGE_ROOT"
-```
-
-The manifest links plugin `pi.herdr.orchestrator`. It declares entrypoint `deck`, title `Pi Herd`, and pane command `./bin/pi-herdr-orchestrator deck`.
+Do not set a broker socket, client secret, session key, token, terminal ID, or Herdr binary path for normal installed use. Ordinary Pi panes do not need the binary value. The broker never searches `PATH` for Herdr.
 
 ## Open Pi Herd
 
@@ -116,16 +126,18 @@ For command-line checks, run these commands in a Herdr pane:
 ./bin/pi-herdr-orchestrator events verify --json
 ```
 
-The broker lifecycle commands are authenticated and scoped to the canonical Herdr session:
+Ordinary Herdr panes can use authenticated attach-only checks and stop:
 
 ```bash
-./bin/pi-herdr-orchestrator broker start
 ./bin/pi-herdr-orchestrator broker status
-./bin/pi-herdr-orchestrator broker restart
+./bin/pi-herdr-orchestrator doctor --json
+./bin/pi-herdr-orchestrator events verify --json
 ./bin/pi-herdr-orchestrator broker stop
 ```
 
-`start` is idempotent. Concurrent callers reuse one broker. `status` reports only an authenticated broker. `stop` and `restart` verify the recorded process start identity before they request shutdown. They do not signal an unverified process.
+`status` reports only an authenticated broker. `doctor` asks that broker to run the same checks with its retained exact Herdr binary. The response does not include a binary path, session key, client secret, or token. `stop` verifies the recorded process-start identity before it requests shutdown. It does not signal an unverified process.
+
+The public `broker start` and `broker restart` commands require Herdr plugin runtime context because only that context has the authoritative binary path. Do not run them from an ordinary pane. Normal installation and recovery use an authorized Herdr start or restart so Herdr runs the one-shot startup hook. Do not set or copy a binary path.
 
 A dry-run release rehearsal is also available:
 
@@ -174,7 +186,7 @@ herdr plugin unlink pi.herdr.orchestrator
 herdr plugin link "$PRIOR_PACKAGE_ROOT"
 ```
 
-Before a live package rollback, run `./bin/pi-herdr-orchestrator broker stop` from the affected Herdr session. After you install and link the prior reviewed package, reopen Pi and run `/orchestrator-status`. The extension starts the compatible broker on demand. A live rollback also requires approved health checks, reconciliation, and recorded proof. The dry-run harness is plan-only and is not live rollback proof.
+Before a live package rollback, run `./bin/pi-herdr-orchestrator broker stop` from the affected Herdr session. Restore and link the prior reviewed package. Then use an authorized Herdr start or restart so its startup hook starts the compatible broker. Verify `broker status` and `doctor --json` before you reopen Pi and run `/orchestrator-status`. Reopening Pi alone does not start a broker. A live rollback also requires approved health checks, reconciliation, and recorded proof. The dry-run harness is plan-only and is not live rollback proof.
 
 ## Unlink and remove
 

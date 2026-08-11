@@ -227,6 +227,29 @@ class AbortHerdr {
       paneId: `pane-${this.count}`,
     };
   }
+  async verifyManagedPane(agentId: string, identity: any) {
+    const resource = this.store.state.herdrResources?.[agentId];
+    return {
+      paneId: identity.paneId,
+      terminalId: identity.terminalId ?? resource?.terminalId,
+      workspaceId: "w",
+      cwd: "/fake",
+    };
+  }
+  async recordRegistrationMismatch(agentId: string) {
+    await this.store.append({
+      type: "herdr.provision.outcome",
+      actor: { principalId: "prn_00000000000000000000000000", kind: "system" },
+      entityRefs: { agentId },
+      payload: {
+        agentId,
+        state: "replaced",
+        reason: "registration_identity_mismatch",
+        cleanupOutcome: "retained",
+        unknown: true,
+      },
+    });
+  }
   async register(agentId: string, identity: any) {
     const resource = this.store.state.herdrResources?.[agentId];
     await this.store.append({
@@ -301,6 +324,12 @@ async function setupAbortCase(
           paneId: "root-pane",
           terminalId: "root-term",
           detectedKind: "pi",
+          sessionReference: {
+            source: "herdr:pi",
+            agent: "pi",
+            kind: "id",
+            value: "integration-session",
+          },
           name: "parent",
         },
         pi: {
@@ -371,6 +400,12 @@ async function setupAbortCase(
           paneId: "pane-1",
           terminalId: "term-1",
           detectedKind: "pi",
+          sessionReference: {
+            source: "herdr:pi",
+            agent: "pi",
+            kind: "id",
+            value: "integration-session",
+          },
           name: "child",
         },
         pi: {
@@ -544,12 +579,19 @@ class WorkflowCli {
             kind: "pi",
             terminalId: "root-term",
             sessionId: "parent-session",
+            sessionReference: {
+              source: "herdr:pi",
+              agent: "pi",
+              kind: "id",
+              value: "integration-session",
+            },
             generation: 1,
           },
         },
       ],
       tabs: [],
       workspaces: [],
+      agents: [],
       worktrees: [],
     };
   }
@@ -689,6 +731,12 @@ async function setupProvisionCase(
           paneId: "root-pane",
           terminalId: "root-term",
           detectedKind: "pi",
+          sessionReference: {
+            source: "herdr:pi",
+            agent: "pi",
+            kind: "id",
+            value: "integration-session",
+          },
           name: "parent",
         },
         pi: {

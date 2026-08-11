@@ -1,4 +1,7 @@
-import { doctor } from "../broker/doctor.js";
+import {
+  unavailableDoctorReport,
+  validateDoctorReport,
+} from "../broker/doctor.js";
 import { Broker } from "../broker/broker.js";
 import { ensurePrivateDirectory, resolveHerdrPaths } from "../shared/paths.js";
 import { brokerStatus, ensureBroker, stopBroker } from "../broker/startup.js";
@@ -65,7 +68,22 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     return;
   }
   if (command === "doctor") {
-    const report = await doctor();
+    const report = await (async () => {
+      try {
+        const { paths } = await resolveHerdrPaths();
+        return validateDoctorReport(
+          await brokerRequest(
+            paths.socket,
+            paths.secret,
+            "system.doctor",
+            {},
+            paths.sessionKey,
+          ),
+        );
+      } catch {
+        return unavailableDoctorReport();
+      }
+    })();
     console.log(
       argv.includes("--json")
         ? JSON.stringify(report)
@@ -74,6 +92,10 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
             .join("\n"),
     );
     if (!report.ok) process.exitCode = 1;
+    return;
+  }
+  if (command === "broker" && subcommand === "startup") {
+    await ensureBroker();
     return;
   }
   if (command === "broker" && subcommand === "start") {

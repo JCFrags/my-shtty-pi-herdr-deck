@@ -24,34 +24,109 @@ const id = (r: Record<string, unknown>, ...keys: string[]) => {
 };
 export function normalizeWorkspace(raw: unknown): HerdrWorkspace | undefined {
   const r = record(raw),
-    value = id(r, "id", "workspace_id", "workspaceId");
-  return value ? ({ ...r, id: value, tabs: [] } as HerdrWorkspace) : undefined;
+    value = id(r, "id", "workspace_id", "workspaceId"),
+    rawWorktree = r.worktree,
+    worktreeRecord = record(rawWorktree),
+    repoKey = str(worktreeRecord.repo_key ?? worktreeRecord.repoKey),
+    repoName = str(worktreeRecord.repo_name ?? worktreeRecord.repoName),
+    repoRoot = str(worktreeRecord.repo_root ?? worktreeRecord.repoRoot),
+    checkoutPath = str(
+      worktreeRecord.checkout_path ?? worktreeRecord.checkoutPath,
+    ),
+    linked =
+      worktreeRecord.is_linked_worktree ?? worktreeRecord.isLinkedWorktree,
+    hasWorktree = rawWorktree !== undefined && rawWorktree !== null,
+    validWorktree =
+      repoKey &&
+      repoName &&
+      repoRoot &&
+      checkoutPath &&
+      typeof linked === "boolean";
+  const { worktree: _rawWorktree, ...workspaceFields } = r;
+  return value
+    ? ({
+        ...workspaceFields,
+        id: value,
+        ...(validWorktree
+          ? {
+              cwd: checkoutPath,
+              worktree: {
+                repoKey,
+                repoName,
+                repoRoot,
+                checkoutPath,
+                isLinkedWorktree: linked,
+              },
+            }
+          : {}),
+        ...(hasWorktree && !validWorktree ? { worktreeInvalid: true } : {}),
+        tabs: [],
+      } as HerdrWorkspace)
+    : undefined;
 }
 export function normalizeTab(raw: unknown): HerdrTab | undefined {
   const r = record(raw),
-    value = id(r, "id", "tab_id", "tabId");
-  return value ? ({ ...r, id: value, panes: [] } as HerdrTab) : undefined;
-}
-export function normalizePane(raw: unknown): HerdrPane | undefined {
-  const r = record(raw),
-    value = id(r, "id", "pane_id", "paneId");
+    value = id(r, "id", "tab_id", "tabId"),
+    workspaceId = id(r, "workspace_id", "workspaceId");
   return value
     ? ({
         ...r,
         id: value,
-        ...(id(r, "terminal_id", "terminalId")
-          ? { terminalId: id(r, "terminal_id", "terminalId") }
-          : {}),
-        ...(id(r, "tab_id", "tabId")
-          ? { tabId: id(r, "tab_id", "tabId") }
-          : {}),
+        ...(workspaceId ? { workspaceId } : {}),
+        panes: [],
+      } as HerdrTab)
+    : undefined;
+}
+export function normalizePane(raw: unknown): HerdrPane | undefined {
+  const r = record(raw),
+    value = id(r, "id", "pane_id", "paneId"),
+    terminalId = id(r, "terminal_id", "terminalId"),
+    workspaceId = id(r, "workspace_id", "workspaceId"),
+    tabId = id(r, "tab_id", "tabId");
+  return value
+    ? ({
+        ...r,
+        id: value,
+        ...(terminalId ? { terminalId } : {}),
+        ...(workspaceId ? { workspaceId } : {}),
+        ...(tabId ? { tabId } : {}),
       } as HerdrPane)
     : undefined;
 }
 export function normalizeAgent(raw: unknown): HerdrAgent | undefined {
   const r = record(raw),
-    paneId = id(r, "pane_id", "paneId");
-  return paneId ? ({ ...r, paneId } as HerdrAgent) : undefined;
+    paneId = id(r, "pane_id", "paneId"),
+    terminalId = id(r, "terminal_id", "terminalId"),
+    workspaceId = id(r, "workspace_id", "workspaceId"),
+    tabId = id(r, "tab_id", "tabId"),
+    kind = str(r.kind ?? r.agent),
+    sessionId = id(r, "session_id", "sessionId"),
+    rawSession = record(r.agent_session ?? r.sessionReference),
+    sessionSource = str(rawSession.source),
+    sessionAgent = str(rawSession.agent),
+    sessionKind = str(rawSession.kind),
+    sessionValue = str(rawSession.value);
+  return paneId
+    ? ({
+        ...r,
+        paneId,
+        ...(terminalId ? { terminalId } : {}),
+        ...(workspaceId ? { workspaceId } : {}),
+        ...(tabId ? { tabId } : {}),
+        ...(kind ? { kind } : {}),
+        ...(sessionId ? { sessionId } : {}),
+        ...(sessionSource && sessionAgent && sessionKind && sessionValue
+          ? {
+              sessionReference: {
+                source: sessionSource,
+                agent: sessionAgent,
+                kind: sessionKind,
+                value: sessionValue,
+              },
+            }
+          : {}),
+      } as HerdrAgent)
+    : undefined;
 }
 export function normalizeWorktree(raw: unknown): HerdrWorktree | undefined {
   const r = record(raw),
@@ -69,7 +144,8 @@ export function normalizeWorktree(raw: unknown): HerdrWorktree | undefined {
 }
 export function normalizeSnapshot(raw: unknown): HerdrSnapshot {
   const r = record(raw),
-    root = record(r.result ?? r),
+    result = record(r.result ?? r),
+    root = record(result.snapshot ?? result),
     list = (key: string) => (Array.isArray(root[key]) ? root[key] : []);
   return {
     ...root,
