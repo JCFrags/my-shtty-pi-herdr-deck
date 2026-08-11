@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, chmod, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  chmod,
+  mkdir,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -28,6 +35,11 @@ test("provisioner inserts the created owner-only token path into the tab environ
     join(root, "private"),
     () => [],
     true,
+    undefined,
+    {
+      socketPath: "/tmp/owned-runtime/broker.sock",
+      sessionKey: "0123456789abcdef01234567",
+    },
   ).provision({
     agentId: "agt",
     parentAgentId: "parent",
@@ -46,6 +58,47 @@ test("provisioner inserts the created owner-only token path into the tab environ
     result.token.token,
   );
   assert.equal(Object.hasOwn(tabEnv!, "PI_HERDR_ORCH_AGENT_TOKEN"), false);
+  assert.equal(
+    tabEnv?.PI_HERDR_ORCH_BROKER_SOCKET,
+    "/tmp/owned-runtime/broker.sock",
+  );
+  assert.equal(tabEnv?.PI_HERDR_ORCH_SESSION_KEY, "0123456789abcdef01234567");
+  assert.equal(
+    Object.values(tabEnv!).some((value) => value.includes("secret")),
+    false,
+  );
+});
+
+test("provisioner always rejects caller broker and session overrides", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-token-override-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let mutations = 0;
+  const cli = {
+    createTab: async () => {
+      mutations += 1;
+      return {};
+    },
+  };
+  const provisioner = new HerdrProvisioner(cli as never, join(root, "private"));
+  for (const env of [
+    { PI_HERDR_ORCH_BROKER_SOCKET: "/tmp/caller.sock" },
+    { PI_HERDR_ORCH_SESSION_KEY: "f".repeat(24) },
+  ])
+    await assert.rejects(
+      provisioner.provision({
+        agentId: "agt",
+        parentAgentId: "parent",
+        role: "scout",
+        workspaceId: "ws",
+        cwd: root,
+        profileId: "scout",
+        isolation: "shared-readonly",
+        prompt: "prompt",
+        env,
+      }),
+      /Managed environment override rejected/u,
+    );
+  assert.equal(mutations, 0);
 });
 
 test("adopted secret resolution uses the real resolvePaths sibling and ignores sock.secret decoys", async () => {
@@ -54,6 +107,7 @@ test("adopted secret resolution uses the real resolvePaths sibling and ignores s
   process.env.PI_HERDR_ORCH_RUNTIME_ROOT = root;
   try {
     const paths = resolvePaths("adopted-test");
+    await mkdir(paths.runtime, { recursive: true, mode: 0o700 });
     await writeFile(
       paths.secret,
       "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi012345_-\n",

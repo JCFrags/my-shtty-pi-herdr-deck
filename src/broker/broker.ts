@@ -4,7 +4,8 @@ import {
   type Server,
   type Socket,
 } from "node:net";
-import { chmod, lstat, rename, unlink } from "node:fs/promises";
+import { lstatSync, renameSync, unlinkSync } from "node:fs";
+import { chmod, lstat } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import {
@@ -28,8 +29,15 @@ import {
 } from "./authentication.js";
 import { BrokerLock } from "./lock.js";
 import {
+  createBrokerProcessRecord,
+  removeBrokerProcessRecord,
+  type BrokerProcessRecord,
+  type BrokerProcessRecordIdentity,
+} from "./process-record.js";
+import {
   ensurePrivateDirectory,
   sessionKey,
+  type CanonicalResolvedPaths,
   type ResolvedPaths,
 } from "../shared/paths.js";
 import { OrchestratorError } from "../shared/errors.js";
@@ -269,6 +277,59 @@ async function listening(path: string): Promise<boolean> {
     });
   });
 }
+function sameSocketIdentity(
+  stat: { dev: number; ino: number; uid: number },
+  expected: SocketIdentity,
+): boolean {
+  return (
+    stat.dev === expected.dev &&
+    stat.ino === expected.ino &&
+    stat.uid === expected.uid
+  );
+}
+function exactSocketSync(path: string, expected: SocketIdentity): void {
+  const stat = lstatSync(path);
+  if (
+    !stat.isSocket() ||
+    stat.nlink !== 1 ||
+    (stat.mode & 0o077) !== 0 ||
+    stat.uid !== process.getuid?.() ||
+    !sameSocketIdentity(stat, expected)
+  )
+    throw new Error("Broker socket identity changed during quarantine.");
+}
+function absentSocketPathSync(path: string): void {
+  try {
+    lstatSync(path);
+    throw new Error(`Replacement socket was preserved at ${path}.`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+function restoreSocketSync(
+  original: string,
+  quarantine: string,
+  expected: SocketIdentity,
+): void {
+  try {
+    exactSocketSync(quarantine, expected);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  absentSocketPathSync(original);
+  renameSync(quarantine, original);
+  exactSocketSync(original, expected);
+}
+export function finalizeStaleSocketRemovalSync(
+  original: string,
+  quarantine: string,
+  expected: SocketIdentity,
+): void {
+  exactSocketSync(quarantine, expected);
+  absentSocketPathSync(original);
+  unlinkSync(quarantine);
+}
 export async function safeStaleSocket(
   path: string,
   expected?: SocketIdentity,
@@ -284,93 +345,91 @@ export async function safeStaleSocket(
     throw new Error("Refusing to remove non-socket broker path.");
   if (
     observed.nlink !== 1 ||
-    (process.getuid?.() !== undefined && observed.uid !== process.getuid()) ||
+    observed.uid !== process.getuid?.() ||
     (observed.mode & 0o077) !== 0
   )
     throw new Error("Broker socket ownership or mode is unsafe.");
+  const identity = { dev: observed.dev, ino: observed.ino, uid: observed.uid };
+  if (expected && !sameSocketIdentity(identity, expected))
+    throw new Error("Broker socket identity changed before quarantine.");
   if (await listening(path)) throw new Error("Broker socket is already live.");
 
   const quarantine = socketQuarantine(path, "stale");
-  await rename(path, quarantine);
-  const restore = async (): Promise<void> => {
-    try {
-      await lstat(path);
-      throw new Error(
-        `Broker socket was preserved at ${quarantine}; its path was replaced.`,
+  exactSocketSync(path, identity);
+  renameSync(path, quarantine);
+  const failures: unknown[] = [];
+  try {
+    const quarantined = await lstat(quarantine);
+    if (!sameSocketIdentity(quarantined, identity))
+      throw new Error("Broker socket identity changed during quarantine.");
+    if (await listening(quarantine))
+      throw new Error("Broker socket became live during quarantine.");
+    finalizeStaleSocketRemovalSync(path, quarantine, identity);
+    return;
+  } catch (error) {
+    failures.push(error);
+  }
+  try {
+    restoreSocketSync(path, quarantine, identity);
+  } catch (error) {
+    failures.push(error);
+  }
+  throw failures.length === 1
+    ? failures[0]
+    : new AggregateError(
+        failures,
+        "Broker socket identity cleanup and restoration failed.",
       );
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-    await rename(quarantine, path);
-  };
-
-  const quarantined = await lstat(quarantine);
-  const sameObserved =
-    quarantined.isSocket() &&
-    quarantined.nlink === 1 &&
-    (quarantined.mode & 0o077) === 0 &&
-    quarantined.dev === observed.dev &&
-    quarantined.ino === observed.ino &&
-    quarantined.uid === observed.uid;
-  const sameExpected =
-    !expected ||
-    (expected.dev === quarantined.dev &&
-      expected.ino === quarantined.ino &&
-      expected.uid === quarantined.uid);
-  if (!sameObserved || !sameExpected) {
-    await restore();
-    throw new Error("Broker socket identity changed during quarantine.");
-  }
-  if (await listening(quarantine)) {
-    await restore();
-    throw new Error("Broker socket became live during quarantine.");
-  }
-  await unlink(quarantine);
 }
 interface CloseQuarantine {
   path: string;
   owned: boolean;
+  identity: SocketIdentity;
+}
+function exactPathIdentitySync(path: string, expected: SocketIdentity): void {
+  const stat = lstatSync(path);
+  if (!sameSocketIdentity(stat, expected))
+    throw new Error("Replacement socket path identity changed.");
 }
 async function quarantineForClose(
   path: string,
   expected: SocketIdentity,
 ): Promise<CloseQuarantine | undefined> {
   const quarantine = socketQuarantine(path, "close");
+  let current;
   try {
-    await rename(path, quarantine);
+    current = lstatSync(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw error;
   }
-  const stat = await lstat(quarantine);
-  return {
-    path: quarantine,
-    owned:
-      stat.isSocket() &&
-      stat.dev === expected.dev &&
-      stat.ino === expected.ino &&
-      stat.uid === expected.uid,
-  };
+  const identity = { dev: current.dev, ino: current.ino, uid: current.uid };
+  const owned =
+    current.isSocket() &&
+    current.nlink === 1 &&
+    (current.mode & 0o077) === 0 &&
+    current.uid === process.getuid?.() &&
+    sameSocketIdentity(identity, expected);
+  renameSync(path, quarantine);
+  exactPathIdentitySync(quarantine, identity);
+  absentSocketPathSync(path);
+  return { path: quarantine, owned, identity };
 }
-async function restoreReplacement(
+function restoreReplacement(
   original: string,
   quarantine: string,
-): Promise<void> {
-  try {
-    await lstat(original);
-    throw new Error(
-      `Replacement socket was preserved at ${quarantine}; the original path is occupied.`,
-    );
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  await rename(quarantine, original);
+  expected: SocketIdentity,
+): void {
+  exactPathIdentitySync(quarantine, expected);
+  absentSocketPathSync(original);
+  renameSync(quarantine, original);
+  exactPathIdentitySync(original, expected);
 }
 export function sessionKeyMatches(
-  expectedSocket: string,
+  expectedSessionKey: string,
   received: string,
 ): boolean {
-  return sessionKey(expectedSocket) === received;
+  return expectedSessionKey === received;
 }
 export interface BrokerOptions {
   herdr?: HerdrService;
@@ -379,13 +438,13 @@ export interface BrokerOptions {
   clearTimeout?: (timer: NodeJS.Timeout) => void;
   herdrFactory?: (
     store: EventStore,
-    paths: ResolvedPaths,
+    paths: CanonicalResolvedPaths,
   ) => Promise<HerdrService>;
 }
 export class Broker {
   readonly store: EventStore;
   readonly snapshotStore: SnapshotStore;
-  readonly paths: ResolvedPaths;
+  readonly paths: CanonicalResolvedPaths;
   #server: Server | undefined;
   #socketIdentity: SocketIdentity | undefined;
   #mutationTail: Promise<void> = Promise.resolve();
@@ -396,6 +455,9 @@ export class Broker {
   #backgroundFailure: unknown;
   #advanceTail: Promise<void> = Promise.resolve();
   #lock: BrokerLock;
+  #processRecord:
+    | { record: BrokerProcessRecord; identity: BrokerProcessRecordIdentity }
+    | undefined;
   #secret: string;
   #clients = new Set<Client>();
   #questionTimers = new Map<string, NodeJS.Timeout>();
@@ -405,18 +467,28 @@ export class Broker {
   #clearTimeout: (timer: NodeJS.Timeout) => void;
   #herdr?: HerdrService;
   readonly #herdrFactory:
-    | ((store: EventStore, paths: ResolvedPaths) => Promise<HerdrService>)
+    | ((
+        store: EventStore,
+        paths: CanonicalResolvedPaths,
+      ) => Promise<HerdrService>)
     | undefined;
   constructor(paths: ResolvedPaths, options: BrokerOptions = {}) {
-    this.paths = paths;
-    this.#lock = new BrokerLock(paths.lock, paths.socket);
+    this.paths = {
+      ...paths,
+      startup: paths.startup ?? `${paths.lock}.startup`,
+      pid: paths.pid ?? `${paths.lock}.pid`,
+      log: paths.log ?? `${paths.socket}.log`,
+      herdrSocket: paths.herdrSocket ?? paths.socket,
+      sessionKey: paths.sessionKey ?? sessionKey(paths.socket),
+    };
+    this.#lock = new BrokerLock(this.paths.lock, this.paths.socket);
     this.#secret = "";
     this.#now = options.now ?? Date.now;
     this.#setTimeout =
       options.setTimeout ??
       ((callback, delayMs) => setTimeout(callback, delayMs));
     this.#clearTimeout = options.clearTimeout ?? clearTimeout;
-    this.store = new EventStore(paths.events);
+    this.store = new EventStore(this.paths.events);
     this.store.onAppend((event) => {
       if (
         event.entityRefs?.taskId &&
@@ -465,7 +537,7 @@ export class Broker {
         }
       }
     });
-    this.snapshotStore = new SnapshotStore(paths.snapshot);
+    this.snapshotStore = new SnapshotStore(this.paths.snapshot);
     if (options.herdr) {
       if (options.herdr.store !== this.store)
         throw new Error("Herdr service must use the broker-owned event store.");
@@ -490,6 +562,11 @@ export class Broker {
       await ensurePrivateDirectory(this.paths.root);
       await ensurePrivateDirectory(this.paths.runtime);
       await this.#lock.acquire();
+      this.#processRecord = await createBrokerProcessRecord(
+        this.paths.pid,
+        this.paths.sessionKey,
+        this.paths.socket,
+      );
       await safeStaleSocket(this.paths.socket);
       this.#secret = await this.#loadSecret();
       const snapshot = await this.snapshotStore
@@ -586,15 +663,35 @@ export class Broker {
       )
         throw new Error("Broker socket changed while securing its mode.");
     } catch (error) {
-      try {
-        if (this.#server) await this.stop();
-        else await this.#lock.release();
-      } catch (cleanupError) {
+      const cleanupFailures: unknown[] = [];
+      if (this.#server)
+        try {
+          await this.stop();
+        } catch (cleanupError) {
+          cleanupFailures.push(cleanupError);
+        }
+      else {
+        if (this.#processRecord)
+          try {
+            await removeBrokerProcessRecord(
+              this.paths.pid,
+              this.#processRecord,
+            );
+            this.#processRecord = undefined;
+          } catch (cleanupError) {
+            cleanupFailures.push(cleanupError);
+          }
+        try {
+          await this.#lock.release();
+        } catch (cleanupError) {
+          cleanupFailures.push(cleanupError);
+        }
+      }
+      if (cleanupFailures.length)
         throw new AggregateError(
-          [error, cleanupError],
+          [error, ...cleanupFailures],
           "Broker start and cleanup failed.",
         );
-      }
       throw error;
     }
   }
@@ -614,11 +711,30 @@ export class Broker {
   stop(): Promise<void> {
     if (this.#stopPromise) return this.#stopPromise;
     this.#stopping = true;
-    this.#stopPromise = this.#stopUnlocked();
-    return this.#stopPromise;
+    const attempt = this.#stopUnlocked();
+    this.#stopPromise = attempt;
+    void attempt.then(
+      () => undefined,
+      () => {
+        if (
+          this.#stopPromise === attempt &&
+          (this.#processRecord !== undefined ||
+            this.#lock.identity !== undefined)
+        )
+          this.#stopPromise = undefined;
+      },
+    );
+    return attempt;
   }
   async #stopUnlocked(): Promise<void> {
-    let failure: unknown;
+    const failures: unknown[] = [];
+    let backgroundRecorded = false;
+    const recordBackgroundFailure = (): void => {
+      if (!backgroundRecorded && this.#backgroundFailure !== undefined) {
+        failures.push(this.#backgroundFailure);
+        backgroundRecorded = true;
+      }
+    };
     let quarantined: CloseQuarantine | undefined;
     const identity = this.#socketIdentity;
     try {
@@ -633,9 +749,9 @@ export class Broker {
       for (const timer of this.#deadlineTimers.values())
         this.#clearTimeout(timer);
       this.#deadlineTimers.clear();
+      if (typeof this.#herdr?.shutdown === "function") this.#herdr.shutdown();
       await this.#drainAdmittedWork();
-      if (failure === undefined && this.#backgroundFailure !== undefined)
-        failure = this.#backgroundFailure;
+      recordBackgroundFailure();
       if (this.#server && identity)
         quarantined = await quarantineForClose(this.paths.socket, identity);
       await new Promise<void>(
@@ -645,18 +761,37 @@ export class Broker {
       if (quarantined?.owned) await safeStaleSocket(quarantined.path, identity);
       else if (quarantined) {
         const replacement = quarantined.path;
-        await restoreReplacement(this.paths.socket, replacement);
+        restoreReplacement(
+          this.paths.socket,
+          replacement,
+          quarantined.identity,
+        );
         quarantined = undefined;
         throw new Error("Broker socket identity changed before shutdown.");
       }
     } catch (error) {
-      if (failure === undefined) failure = error;
+      failures.push(error);
+      if (this.#server)
+        try {
+          await new Promise<void>((resolve, reject) =>
+            this.#server!.close((closeError) =>
+              closeError ? reject(closeError) : resolve(),
+            ),
+          );
+        } catch (closeError) {
+          failures.push(closeError);
+        }
+      this.#server = undefined;
       if (quarantined && !quarantined.owned)
-        await restoreReplacement(this.paths.socket, quarantined.path).catch(
-          (restoreError) => {
-            if (failure === undefined) failure = restoreError;
-          },
-        );
+        try {
+          restoreReplacement(
+            this.paths.socket,
+            quarantined.path,
+            quarantined.identity,
+          );
+        } catch (restoreError) {
+          failures.push(restoreError);
+        }
     } finally {
       for (const timer of this.#questionTimers.values())
         this.#clearTimeout(timer);
@@ -664,17 +799,27 @@ export class Broker {
       for (const timer of this.#deadlineTimers.values())
         this.#clearTimeout(timer);
       this.#deadlineTimers.clear();
+      if (this.#processRecord)
+        try {
+          await removeBrokerProcessRecord(this.paths.pid, this.#processRecord);
+          this.#processRecord = undefined;
+        } catch (error) {
+          failures.push(error);
+        }
       try {
         await this.#lock.release();
       } catch (error) {
-        if (failure === undefined) failure = error;
+        failures.push(error);
       }
       this.#socketIdentity = undefined;
     }
-    if (failure === undefined && this.#backgroundFailure !== undefined)
-      failure = this.#backgroundFailure;
-    if (failure && (failure as NodeJS.ErrnoException).code !== "ENOENT")
-      throw failure;
+    recordBackgroundFailure();
+    const retained = failures.filter(
+      (failure) => (failure as NodeJS.ErrnoException).code !== "ENOENT",
+    );
+    if (retained.length === 1) throw retained[0];
+    if (retained.length > 1)
+      throw new AggregateError(retained, "Broker shutdown and cleanup failed.");
   }
   get secret(): string {
     return this.#secret;
@@ -765,11 +910,14 @@ export class Broker {
               }
               try {
                 if (
-                  !sessionKeyMatches(this.paths.socket, item.value.sessionKey)
+                  !sessionKeyMatches(
+                    this.paths.sessionKey,
+                    item.value.sessionKey,
+                  )
                 )
                   throw new OrchestratorError(
                     "AUTH_FAILED",
-                    "Session key does not match the broker socket.",
+                    "Session key does not match the orchestration session.",
                   );
                 if (item.value.client.kind === "pi_child") {
                   if (
@@ -984,6 +1132,7 @@ export class Broker {
       let replayEvents: import("../state/types.js").StoredEvent[] = [];
       let committedEvent: import("../state/types.js").StoredEvent | undefined;
       const deferred: Array<() => Promise<void>> = [];
+      let shutdownAfterResponse = false;
       if (
         request.method === "system.ping" ||
         request.method === "system.status"
@@ -1001,6 +1150,22 @@ export class Broker {
           lastEventSeq: this.store.state.lastEventSeq,
           corruption: this.store.corruption,
         };
+      } else if (request.method === "system.shutdown") {
+        if (
+          !exactKeys(request.params, []) ||
+          Object.keys(request.params).length
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "System shutdown parameters must be empty.",
+          );
+        if (principal.kind !== "cli" && principal.kind !== "human")
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "Only an authenticated local operator can stop the broker.",
+          );
+        result = { stopping: true };
+        shutdownAfterResponse = true;
       } else if (request.method === "herdr.status") {
         requirePermission(principal, "read:state");
         if (Object.keys(request.params).length || !this.#herdr)
@@ -1467,6 +1632,7 @@ export class Broker {
             adoptedContext = await this.#herdr.verifyRoot({
               paneId: herdr.paneId as string,
               terminalId: herdr.terminalId as string,
+              sessionId: pi.sessionId as string,
             });
           } catch {
             throw new OrchestratorError(
@@ -1510,6 +1676,7 @@ export class Broker {
             adoptedContext = await this.#herdr!.verifyRoot({
               paneId: herdr.paneId as string,
               terminalId: herdr.terminalId as string,
+              sessionId: pi.sessionId as string,
             });
           } catch {
             await this.store
@@ -3700,6 +3867,12 @@ export class Broker {
         result,
       };
       this.#writeFrame(client, response);
+      if (shutdownAfterResponse)
+        setImmediate(() => {
+          void this.stop().catch((error: unknown) =>
+            this.#observeBackgroundFailure(error),
+          );
+        });
       for (const action of deferred) this.#trackDeferred(action);
       for (const event of replayEvents) this.#sendEvent(client, event);
       if (client.initializing) {

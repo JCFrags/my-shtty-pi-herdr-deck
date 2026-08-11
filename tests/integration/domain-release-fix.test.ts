@@ -11,7 +11,7 @@ import {
 } from "../../src/herdr/service.js";
 import { digest } from "../../src/broker/authentication.js";
 import { createId } from "../../src/shared/ids.js";
-import { resolvePaths, sessionKey } from "../../src/shared/paths.js";
+import { sessionKey } from "../../src/shared/paths.js";
 import { encodeFrame, NdjsonDecoder } from "../../src/shared/protocol/codec.js";
 import type { EventStore } from "../../src/state/event-store.js";
 
@@ -28,7 +28,7 @@ const actor = { principalId: "prn_00000000000000000000000000", kind: "system" };
 
 function pathsFor(root: string, runtime: string) {
   return {
-    ...resolvePaths(join(runtime, "herdr.sock")),
+    sessionKey: sessionKey(join(runtime, "broker.sock")),
     root,
     runtime,
     events: join(root, "events.jsonl"),
@@ -119,7 +119,7 @@ async function connect(
         version: "0.1.0",
         capabilities: [],
       },
-      sessionKey: sessionKey(paths.socket),
+      sessionKey: paths.sessionKey!,
       auth: { kind: "client_secret", secret },
     }),
   );
@@ -166,7 +166,7 @@ async function connectChild(
         version: "0.1.0",
         capabilities: ["pi.lifecycle"],
       },
-      sessionKey: sessionKey(paths.socket),
+      sessionKey: paths.sessionKey!,
       auth: {
         kind: "agent_token",
         token,
@@ -540,7 +540,12 @@ class WorkflowCli {
           tabId: "t",
           cwd: "/fake",
           terminalId: "root-term",
-          occupant: { terminalId: "root-term" },
+          occupant: {
+            kind: "pi",
+            terminalId: "root-term",
+            sessionId: "parent-session",
+            generation: 1,
+          },
         },
       ],
       tabs: [],

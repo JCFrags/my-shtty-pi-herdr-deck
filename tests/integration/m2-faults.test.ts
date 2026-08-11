@@ -12,7 +12,6 @@ import { HerdrService } from "../../src/herdr/service.js";
 import { createId } from "../../src/shared/ids.js";
 import { EventStore } from "../../src/state/event-store.js";
 import { Broker } from "../../src/broker/broker.js";
-import { sessionKey } from "../../src/shared/paths.js";
 
 const methods = [
   "tab.create",
@@ -285,7 +284,7 @@ async function brokerRequestForTest(
         version: "0.1.0",
         capabilities: [],
       },
-      sessionKey: sessionKey(broker.paths.socket),
+      sessionKey: broker.paths.sessionKey,
       auth: { kind: "client_secret", secret: broker.secret },
     }) + "\n",
   );

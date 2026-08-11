@@ -98,7 +98,16 @@ export class HerdrProvisioner {
     readonly liveNames: () => Iterable<string> = () => [],
     readonly retainRegistrationFiles = false,
     readonly gitEvidence?: (cwd: string, base?: string) => Promise<GitEvidence>,
-  ) {}
+    readonly orchestration?: { socketPath: string; sessionKey: string },
+  ) {
+    if (
+      orchestration &&
+      (!orchestration.socketPath.startsWith("/") ||
+        /[\u0000-\u001f\u007f]/u.test(orchestration.socketPath) ||
+        !/^[0-9a-f]{24}$/u.test(orchestration.sessionKey))
+    )
+      throw new Error("HERDR_ORCHESTRATION_IDENTITY_INVALID");
+  }
   async registrationRetentionStatus(): Promise<RegistrationRetentionStatus> {
     let names: string[];
     try {
@@ -194,10 +203,21 @@ export class HerdrProvisioner {
       PI_HERDR_ORCH_PARENT_AGENT_ID: input.parentAgentId,
       PI_HERDR_ORCH_PROFILE_ID: input.profileId,
       PI_HERDR_ORCH_TOKEN_FILE: "",
+      ...(this.orchestration
+        ? {
+            PI_HERDR_ORCH_BROKER_SOCKET: this.orchestration.socketPath,
+            PI_HERDR_ORCH_SESSION_KEY: this.orchestration.sessionKey,
+          }
+        : {}),
     };
     const forbidden = Object.keys(input.env ?? {}).filter(
       (key) =>
-        Object.hasOwn(managed, key) || key === "PI_HERDR_ORCH_AGENT_TOKEN",
+        Object.hasOwn(managed, key) ||
+        [
+          "PI_HERDR_ORCH_BROKER_SOCKET",
+          "PI_HERDR_ORCH_SESSION_KEY",
+          "PI_HERDR_ORCH_AGENT_TOKEN",
+        ].includes(key),
     );
     if (forbidden.length)
       throw new Error(

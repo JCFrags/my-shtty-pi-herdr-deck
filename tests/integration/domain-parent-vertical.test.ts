@@ -7,7 +7,7 @@ import test from "node:test";
 import { Broker } from "../../src/broker/broker.js";
 import { digest } from "../../src/broker/authentication.js";
 import { createId } from "../../src/shared/ids.js";
-import { resolvePaths, sessionKey } from "../../src/shared/paths.js";
+import { sessionKey, type ResolvedPaths } from "../../src/shared/paths.js";
 import { encodeFrame, NdjsonDecoder } from "../../src/shared/protocol/codec.js";
 import type { EventStore } from "../../src/state/event-store.js";
 type Frame = {
@@ -156,7 +156,7 @@ function send(
   });
 }
 async function connect(
-  paths: ReturnType<typeof resolvePaths>,
+  paths: ResolvedPaths & { sessionKey: string },
   auth: any,
   kind: string,
   onServerRequest?: (frame: Frame, socket: Socket) => void,
@@ -193,7 +193,7 @@ async function connect(
         version: "0.1.0",
         capabilities: ["events.replay", "pi.lifecycle", "pi.controls"],
       },
-      sessionKey: sessionKey(paths.socket),
+      sessionKey: paths.sessionKey!,
       auth,
     }),
   );
@@ -234,7 +234,7 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
   const root = await mkdtemp(join(tmpdir(), "parent-vertical-"));
   const runtime = await mkdtemp(join(tmpdir(), "parent-vertical-runtime-"));
   const paths = {
-    ...resolvePaths(join(runtime, "herdr.sock")),
+    sessionKey: sessionKey(join(runtime, "broker.sock")),
     root,
     runtime,
     events: join(root, "events"),

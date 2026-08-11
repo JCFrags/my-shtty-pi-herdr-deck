@@ -24,7 +24,22 @@ pi-herdr-orchestrator config validate ./config.json
 
 Project configuration is accepted only when `PI_HERDR_ORCH_PROJECT_TRUSTED=1` is set by the trusted Pi context. Unknown fields, writable files, symlinks, and secret-like fields fail closed. The shipped CLI also applies the effective config policy and returns its generation and hash.
 
-## State and export
+## Broker lifecycle, state, and export
+
+Run broker commands inside the affected Herdr session. Herdr 0.8.0 or newer injects the canonical socket and an absolute `HERDR_BIN_PATH`. Do not set an internal broker socket, session key, client secret, or token. If `doctor` reports that `HERDR_BIN_PATH` is missing, upgrade Herdr and reopen the pane.
+
+A new Pi session starts or reuses its session broker and registers itself as the adopted root. The deck uses the same path. Manual lifecycle commands are available for checks and maintenance:
+
+```bash
+pi-herdr-orchestrator broker start
+pi-herdr-orchestrator broker status
+pi-herdr-orchestrator broker restart
+pi-herdr-orchestrator broker stop
+```
+
+`start` and `status` accept only an authenticated broker for the canonical Herdr session. `stop` and `restart` verify the recorded process-start identity. They do not signal an unverified process.
+
+For state checks:
 
 ```bash
 pi-herdr-orchestrator broker status
@@ -68,11 +83,11 @@ Canary order is: fake validation, package smoke, disposable fake stack, then an 
 
 ## Rollback
 
-1. Stop the broker through its owner-controlled command.
+1. Run `pi-herdr-orchestrator broker stop` inside the affected Herdr session.
 2. Export and verify state.
 3. Check stored schema compatibility with the target version.
 4. Restore the exact prior package or checkout.
-5. Start the broker and run `doctor` and `status`.
+5. Reopen Pi to start the broker on demand. Run `doctor` and `broker status`.
 6. Reconcile agents and retain dirty or ambiguous worktrees.
 
 Never run older code against a newer unsupported state generation. Never kill-scan processes. Never remove a dirty, live, unknown, missing, ambiguous, or replaced resource. Operation verification fails closed when a resource identity changes.
