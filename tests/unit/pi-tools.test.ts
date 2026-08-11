@@ -772,6 +772,212 @@ test("parent tools let the broker authorize child targets without model identity
   }
 });
 
+test("agent_wait polls fresh broker state to an allowed outcome and enforces the broker timeout bound", async () => {
+  const tools: Array<{
+    name: string;
+    parameters: {
+      properties?: Record<string, { maximum?: number }>;
+    };
+    execute: (...args: never[]) => Promise<unknown>;
+  }> = [];
+  const states = ["working", "settled", "succeeded"];
+  let calls = 0;
+  const client = {
+    connected: true,
+    principal: {
+      id: "principal_1",
+      kind: "pi_parent" as const,
+      permissions: ["read:state"],
+    },
+    request: async (method: string) => {
+      assert.equal(method, "agent.wait");
+      return {
+        agentId: "child_1",
+        taskId: "task_1",
+        runId: "run_1",
+        state: states[Math.min(calls++, states.length - 1)],
+        settled: calls > 1,
+      };
+    },
+  };
+  registerParentTools(
+    {
+      registerTool: (definition: (typeof tools)[number]) =>
+        tools.push(definition),
+    } as never,
+    fakeAdapter() as never,
+    client as never,
+  );
+  const wait = tools.find((tool) => tool.name === "agent_wait");
+  assert.ok(wait);
+  assert.equal(wait.parameters.properties?.timeoutMs?.maximum, 30_000);
+  const execute = wait.execute as unknown as (
+    ...args: unknown[]
+  ) => Promise<unknown>;
+  const response = await execute(
+    "call",
+    {
+      agentId: "child_1",
+      taskId: "task_1",
+      runId: "run_1",
+      until: ["succeeded"],
+      timeoutMs: 1000,
+    },
+    AbortSignal.timeout(2000),
+    undefined,
+    fakeContext(),
+  );
+  assert.equal(calls, 3);
+  assert.match(JSON.stringify(response), /succeeded/u);
+  await assert.rejects(
+    () =>
+      execute(
+        "call",
+        {
+          agentId: "child_1",
+          taskId: "task_1",
+          runId: "run_1",
+          until: ["succeeded"],
+          timeoutMs: 30_001,
+        },
+        AbortSignal.timeout(1000),
+        undefined,
+        fakeContext(),
+      ),
+    /INVALID_REQUEST/u,
+  );
+  assert.equal(calls, 3);
+});
+
+test("agent_wait bounds initial and repeat broker reads and observes cancellation", async () => {
+  const makeExecute = (client: unknown) => {
+    const tools: Array<{
+      name: string;
+      execute: (...args: never[]) => Promise<unknown>;
+    }> = [];
+    registerParentTools(
+      {
+        registerTool: (definition: (typeof tools)[number]) =>
+          tools.push(definition),
+      } as never,
+      fakeAdapter() as never,
+      client as never,
+    );
+    const wait = tools.find((tool) => tool.name === "agent_wait");
+    assert.ok(wait);
+    return wait.execute as unknown as (...args: unknown[]) => Promise<unknown>;
+  };
+  const input = {
+    agentId: "child_1",
+    taskId: "task_1",
+    runId: "run_1",
+    until: ["succeeded"],
+    timeoutMs: 20,
+    idempotencyKey: "model-call-key",
+  };
+  const slowRequest = () =>
+    new Promise<Record<string, unknown>>((resolve) => {
+      setTimeout(
+        () =>
+          resolve({
+            agentId: "child_1",
+            taskId: "task_1",
+            runId: "run_1",
+            state: "working",
+            settled: false,
+          }),
+        500,
+      );
+    });
+
+  const timeoutExecute = makeExecute({
+    connected: true,
+    principal: {
+      id: "principal_1",
+      kind: "pi_parent" as const,
+      permissions: ["read:state"],
+    },
+    request: slowRequest,
+  });
+  const timeoutStarted = Date.now();
+  await assert.rejects(
+    () =>
+      timeoutExecute(
+        "call",
+        input,
+        AbortSignal.timeout(1000),
+        undefined,
+        fakeContext(),
+      ),
+    /WAIT_TIMEOUT/u,
+  );
+  assert.ok(Date.now() - timeoutStarted < 250);
+
+  const options: Array<Record<string, unknown> | undefined> = [];
+  let pollCalls = 0;
+  const pollExecute = makeExecute({
+    connected: true,
+    principal: {
+      id: "principal_1",
+      kind: "pi_parent" as const,
+      permissions: ["read:state"],
+    },
+    request: async (
+      _method: string,
+      _params: Record<string, unknown>,
+      requestOptions?: Record<string, unknown>,
+    ) => {
+      options.push(requestOptions);
+      if (pollCalls++ === 0)
+        return {
+          agentId: "child_1",
+          taskId: "task_1",
+          runId: "run_1",
+          state: "working",
+          settled: false,
+        };
+      return slowRequest();
+    },
+  });
+  const pollStarted = Date.now();
+  const latest = await pollExecute(
+    "call",
+    { ...input, timeoutMs: 150 },
+    AbortSignal.timeout(1000),
+    undefined,
+    fakeContext(),
+  );
+  assert.ok(Date.now() - pollStarted < 350);
+  assert.match(JSON.stringify(latest), /working/u);
+  assert.equal(options[0]?.idempotencyKey, "model-call-key");
+  assert.deepEqual(options[1], {});
+
+  const abortExecute = makeExecute({
+    connected: true,
+    principal: {
+      id: "principal_1",
+      kind: "pi_parent" as const,
+      permissions: ["read:state"],
+    },
+    request: slowRequest,
+  });
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 20);
+  const abortStarted = Date.now();
+  await assert.rejects(
+    () =>
+      abortExecute(
+        "call",
+        { ...input, timeoutMs: 1000 },
+        controller.signal,
+        undefined,
+        fakeContext(),
+      ),
+    /CANCELLED/u,
+  );
+  assert.ok(Date.now() - abortStarted < 250);
+});
+
 test("managed tools fail closed and do not queue while disconnected", async () => {
   const tools: Array<{
     name: string;

@@ -4,6 +4,7 @@ import {
   ParentToolService,
   type ParentToolName,
   type ParentToolRequest,
+  type ParentToolResponse,
   type ToolPrincipal,
 } from "./parent-tools.js";
 import {
@@ -640,7 +641,8 @@ function validateParentInput(
       ) &&
       (!Number.isSafeInteger(value) ||
         (value as number) < 1 ||
-        (key === "timeoutMs" && (value as number) > 1_800_000) ||
+        (key === "timeoutMs" &&
+          (value as number) > (tool === "agent_wait" ? 30_000 : 1_800_000)) ||
         (key === "maxBytes" && (value as number) > 262_144) ||
         (key === "limit" && (value as number) > 500))
     )
@@ -887,7 +889,12 @@ function parentInputSchema(tool: ParentToolName): unknown {
     maxProperties: 32,
     properties: {
       ...Object.fromEntries(
-        parentInputKeys[tool].map((key) => [key, schemaForKey(key)]),
+        parentInputKeys[tool].map((key) => [
+          key,
+          key === "timeoutMs" && tool === "agent_wait"
+            ? { type: "integer", minimum: 1, maximum: 30_000 }
+            : schemaForKey(key),
+        ]),
       ),
       idempotencyKey: { type: "string", minLength: 1, maxLength: 256 },
     },
@@ -1479,6 +1486,81 @@ export function registerManagedChildTools(
   });
 }
 
+function waitForParentPoll(
+  delayMs: number,
+  signal: AbortSignal,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new Error("CANCELLED"));
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new Error("CANCELLED"));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    timer.unref?.();
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function executeParentWaitRequest(
+  service: ParentToolService,
+  request: ParentToolRequest,
+  principal: ToolPrincipal,
+  signal: AbortSignal,
+  deadline: number,
+): Promise<ParentToolResponse | undefined> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new Error("CANCELLED"));
+      return;
+    }
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      resolve(undefined);
+      return;
+    }
+    let settled = false;
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+    };
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error("CANCELLED"));
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(undefined);
+    }, remainingMs);
+    timer.unref?.();
+    signal.addEventListener("abort", onAbort, { once: true });
+    void service.execute(request, principal, signal).then(
+      (response) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(response);
+      },
+      (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
+
 export function registerParentTools(
   api: PiApiLike,
   adapterOrBinding: PiAdapter | PiToolBinding,
@@ -1549,7 +1631,47 @@ export function registerParentTools(
           ...(typeof idempotencyKey === "string" ? { idempotencyKey } : {}),
         };
         if (!isParentToolRequest(request)) throw new Error("INVALID_REQUEST");
-        const response = await service.execute(request, principal, signal);
+        let response: ParentToolResponse;
+        if (tool === "agent_wait") {
+          const until = new Set(raw.until as string[]);
+          const deadline = Date.now() + (raw.timeoutMs as number);
+          const initial = await executeParentWaitRequest(
+            service,
+            request,
+            principal,
+            signal,
+            deadline,
+          );
+          if (!initial) throw new Error("WAIT_TIMEOUT");
+          response = initial;
+          const pollRequest: ParentToolRequest = {
+            tool: request.tool,
+            input: request.input,
+          };
+          while (
+            response.ok &&
+            !until.has(
+              String(
+                (response.result as Record<string, unknown> | undefined)?.state,
+              ),
+            ) &&
+            Date.now() < deadline
+          ) {
+            await waitForParentPoll(
+              Math.min(100, Math.max(1, deadline - Date.now())),
+              signal,
+            );
+            const next = await executeParentWaitRequest(
+              service,
+              pollRequest,
+              principal,
+              signal,
+              deadline,
+            );
+            if (!next) break;
+            response = next;
+          }
+        } else response = await service.execute(request, principal, signal);
         if (!response.ok) {
           const error = boundedSecretFree(
             response.error ?? {
