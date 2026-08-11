@@ -9,7 +9,12 @@ import {
 import type { HerdrSessionReference, HerdrSnapshot } from "./types.js";
 import type { HerdrSocketClient } from "./socket-client.js";
 import { HerdrCli } from "./cli.js";
-import { focus, interrupt, type OccupantGuard } from "./controls.js";
+import {
+  focus,
+  interrupt,
+  piSessionMatches,
+  type OccupantGuard,
+} from "./controls.js";
 import { HerdrProcessRunner } from "./runner.js";
 import { projectCapabilities } from "./capabilities.js";
 import { isAbsolute, join, resolve } from "node:path";
@@ -50,6 +55,7 @@ interface ExactPiPaneIdentity {
   tabId?: string;
   cwd?: string;
   worktreeId?: string;
+  generation?: number;
 }
 function exactPiPane(
   snapshot: HerdrSnapshot,
@@ -89,8 +95,11 @@ function exactPiPane(
       occupant.agentId !== undefined &&
       occupant.agentId !== expectedAgentId) ||
     (expectedLegacySessionId !== undefined &&
-      snapshot.agents.length === 0 &&
-      occupant.sessionId !== expectedLegacySessionId) ||
+      !piSessionMatches(
+        expectedLegacySessionId,
+        occupant.sessionId,
+        occupant.sessionReference,
+      )) ||
     (expectedSessionReference !== undefined &&
       (!occupant.sessionReference ||
         occupant.sessionReference.source !== expectedSessionReference.source ||
@@ -173,6 +182,9 @@ function exactPiPane(
     ...(pane.tabId ? { tabId: pane.tabId } : {}),
     ...(cwd ? { cwd } : {}),
     ...(worktrees[0]?.id ? { worktreeId: worktrees[0].id } : {}),
+    ...(typeof occupant.generation === "number"
+      ? { generation: occupant.generation }
+      : {}),
   };
 }
 function samePaneIdentity(
@@ -185,7 +197,8 @@ function samePaneIdentity(
     left.workspaceId === right.workspaceId &&
     left.tabId === right.tabId &&
     left.cwd === right.cwd &&
-    left.worktreeId === right.worktreeId
+    left.worktreeId === right.worktreeId &&
+    left.generation === right.generation
   );
 }
 export class HerdrService {
@@ -335,7 +348,7 @@ export class HerdrService {
             ...(result.worktreePath
               ? {
                   worktreePath: result.worktreePath,
-                  workspaceId: input.workspaceId,
+                  workspaceId: result.workspaceId ?? input.workspaceId,
                 }
               : {}),
             ...(result.token.digest
@@ -583,9 +596,10 @@ export class HerdrService {
         ? undefined
         : this.resources[agentId];
       if (resource?.dirty) throw new Error("HERDR_DIRTY_WORKTREE");
-      if (resource?.worktreeId) {
-        if (!resource.worktreePath || !this.#gitEvidence)
-          throw new Error("HERDR_GIT_EVIDENCE_UNKNOWN");
+      if (resource?.worktreeId && !resource.worktreePath)
+        throw new Error("HERDR_GIT_EVIDENCE_UNKNOWN");
+      if (resource?.worktreePath) {
+        if (!this.#gitEvidence) throw new Error("HERDR_GIT_EVIDENCE_UNKNOWN");
         const evidence = await this.#gitEvidence(resource.worktreePath);
         if (
           evidence.dirty ||
@@ -617,18 +631,29 @@ export class HerdrService {
           "mutation_pending",
           true,
         );
-      await revalidateAndRun(this.#cli, guard, () =>
-        this.#cli.closePane(guard.paneId),
-      );
-      if (resource?.worktreeId) {
-        // Herdr has no compare-and-remove operation. Retain the worktree;
-        // removing its path after pane.close could delete a replacement.
-      }
+      let removedWorktree = false;
+      await revalidateAndRun(this.#cli, guard, async (identity) => {
+        if (
+          resource?.worktreePath &&
+          !resource.worktreeId &&
+          identity.workspaceId &&
+          identity.cwd === resource.worktreePath
+        ) {
+          await this.#cli.removeWorktree(identity.workspaceId);
+          removedWorktree = true;
+        } else {
+          await this.#cli.closePane(guard.paneId);
+        }
+      });
       if (!agentId.startsWith("pane:"))
         await this.recordLifecycle(
           agentId,
           "closed",
-          resource?.worktreeId ? "retained_worktree" : "close_succeeded",
+          removedWorktree
+            ? "worktree_removed"
+            : resource?.worktreePath
+              ? "retained_worktree"
+              : "close_succeeded",
         );
     });
   }
@@ -787,24 +812,60 @@ export class HerdrService {
     await interrupt(this.#cli, () => this.#cli.snapshot(), guard);
   }
 }
+function legacyOccupantIdentity(
+  snapshot: HerdrSnapshot,
+  guard: OccupantGuard,
+): ExactPiPaneIdentity {
+  const pane = snapshot.panes.find((item) => item.id === guard.paneId);
+  const occupant = pane?.occupant;
+  const terminalId = occupant?.terminalId ?? pane?.terminalId;
+  if (
+    !pane ||
+    !occupant ||
+    (guard.terminalId !== undefined && terminalId !== guard.terminalId) ||
+    (guard.sessionId !== undefined &&
+      !piSessionMatches(
+        guard.sessionId,
+        occupant.sessionId,
+        occupant.sessionReference,
+      ))
+  )
+    throw new Error("HERDR_IDENTITY_MISMATCH");
+  return {
+    paneId: pane.id,
+    terminalId: terminalId ?? "legacy-terminal",
+    ...(pane.workspaceId ? { workspaceId: pane.workspaceId } : {}),
+    ...(pane.tabId ? { tabId: pane.tabId } : {}),
+    ...(pane.cwd ? { cwd: pane.cwd } : {}),
+    ...(typeof occupant.generation === "number"
+      ? { generation: occupant.generation }
+      : {}),
+  };
+}
+
 async function revalidateAndRun(
   cli: HerdrCli,
   guard: OccupantGuard,
-  action: () => Promise<void>,
+  action: (identity: ExactPiPaneIdentity) => Promise<void>,
 ): Promise<void> {
-  const before = await cli.snapshot();
-  const pane = before.panes.find((p) => p.id === guard.paneId);
-  const occ = pane?.occupant;
-  const terminal = occ?.terminalId ?? pane?.terminalId;
+  const snapshot = await cli.snapshot();
+  const identity =
+    snapshot.agents.length > 0
+      ? exactPiPane(
+          snapshot,
+          guard.paneId,
+          guard.terminalId,
+          undefined,
+          undefined,
+          guard.sessionId,
+        )
+      : legacyOccupantIdentity(snapshot, guard);
   if (
-    !pane ||
-    !occ ||
-    (guard.terminalId !== undefined && terminal !== guard.terminalId) ||
-    (guard.sessionId !== undefined && occ.sessionId !== guard.sessionId) ||
-    (guard.generation !== undefined && occ.generation !== guard.generation)
+    guard.generation !== undefined &&
+    identity.generation !== guard.generation
   )
     throw new Error("HERDR_IDENTITY_MISMATCH");
-  await action();
+  await action(identity);
   await cli.snapshot();
 }
 

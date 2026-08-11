@@ -1,5 +1,20 @@
+import { basename, isAbsolute } from "node:path";
 import type { HerdrCli } from "./cli.js";
-import type { HerdrSnapshot } from "./types.js";
+import type { HerdrSessionReference, HerdrSnapshot } from "./types.js";
+
+export function piSessionMatches(
+  sessionId: string,
+  legacySessionId: string | undefined,
+  reference: HerdrSessionReference | undefined,
+): boolean {
+  if (legacySessionId !== undefined) return legacySessionId === sessionId;
+  if (!reference || reference.source !== "herdr:pi" || reference.agent !== "pi")
+    return false;
+  if (reference.kind === "id") return reference.value === sessionId;
+  if (reference.kind !== "path" || !isAbsolute(reference.value)) return false;
+  const name = basename(reference.value);
+  return name === `${sessionId}.jsonl` || name.endsWith(`_${sessionId}.jsonl`);
+}
 export interface OccupantGuard {
   paneId: string;
   terminalId?: string;
@@ -20,7 +35,12 @@ export async function revalidateOccupant(
     !pane ||
     !occupant ||
     (guard.terminalId !== undefined && terminal !== guard.terminalId) ||
-    (guard.sessionId !== undefined && occupant.sessionId !== guard.sessionId) ||
+    (guard.sessionId !== undefined &&
+      !piSessionMatches(
+        guard.sessionId,
+        occupant.sessionId,
+        occupant.sessionReference,
+      )) ||
     (guard.generation !== undefined && occupant.generation !== guard.generation)
   )
     throw new Error("HERDR_IDENTITY_MISMATCH");

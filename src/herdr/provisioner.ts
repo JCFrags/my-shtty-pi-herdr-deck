@@ -34,6 +34,7 @@ export interface ProvisionResult {
   token: ManagedToken;
   tabId?: string;
   paneId?: string;
+  workspaceId?: string;
   worktreeId?: string;
   worktreePath?: string;
   unusedTabId?: string;
@@ -249,6 +250,7 @@ export class HerdrProvisioner {
     let prompt: string | undefined;
     let tabId: string | undefined;
     let paneId: string | undefined;
+    let workspaceId: string | undefined;
     let worktreePath: string | undefined;
     let worktreeId: string | undefined;
     let unusedTabId: string | undefined;
@@ -272,6 +274,7 @@ export class HerdrProvisioner {
         ? await managedFileIdentity(prompt)
         : undefined;
       if (input.reuseWorktreeId || input.reuseWorktreePath) {
+        workspaceId = input.workspaceId;
         worktreeId = input.reuseWorktreeId!;
         worktreePath = input.reuseWorktreePath!;
         const current = await this.cli.snapshot();
@@ -314,13 +317,13 @@ export class HerdrProvisioner {
             ? r.path
             : nestedString(r, "worktree", "path");
         worktreeId = typeof r.id === "string" ? r.id : undefined;
-        const workspace =
+        workspaceId =
           typeof r.workspace_id === "string"
             ? r.workspace_id
             : (nestedString(r, "workspace", "workspace_id") ??
               input.workspaceId);
         const created = await this.cli.createTab({
-          workspaceId: workspace,
+          workspaceId,
           cwd: worktreePath ?? input.cwd,
           label: label(input.role),
           env,
@@ -396,6 +399,7 @@ export class HerdrProvisioner {
         ...(promptFileIdentity ? { promptFileIdentity } : {}),
         ...(tokenFileIdentity ? { tokenFileIdentity } : {}),
         paneId: typeof sr.pane_id === "string" ? sr.pane_id : paneId,
+        ...(workspaceId ? { workspaceId } : {}),
         ...(worktreeId ? { worktreeId } : {}),
         ...(worktreePath ? { worktreePath } : {}),
         ...(unusedTabId ? { unusedTabId } : {}),
