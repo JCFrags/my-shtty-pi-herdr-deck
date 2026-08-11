@@ -133,6 +133,16 @@ test("orchestrator extension reload transfers runtime credential and registers t
       registrationWaiters.set(expected, { resolve, reject, timer });
     });
   };
+  const waitForConnectedBinding = async (): Promise<void> => {
+    const key = Symbol.for("pi-herdr-orchestrator.tools.v1");
+    for (let attempt = 0; attempt < 300; attempt++) {
+      const binding = (globalThis as Record<PropertyKey, unknown>)[key] as
+        { client?: { connected?: boolean } } | undefined;
+      if (binding?.client?.connected) return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error("Timed out waiting for the connected tool binding.");
+  };
   const observeRegistrationResponse = (count: number): void => {
     if (count !== registrationResponseCount + 1) {
       failServer(new Error("Registration responses completed out of order."));
@@ -340,9 +350,19 @@ test("orchestrator extension reload transfers runtime credential and registers t
   const firstActive = { api: first, context: firstHarness.context };
   activeHarnesses.push(firstActive);
   await extension(first.api as never);
-  await emit(first, "session_start", firstHarness.context);
-  assert.equal(await waitForRegistrationResponse(1), 1);
   assert.equal(await first.waitForToolRegistration(2), 2);
+  assert.deepEqual(
+    (first.tools as Array<{ name: string }>).map((tool) => tool.name).sort(),
+    ["orchestrator_ask", "orchestrator_result"],
+  );
+  await emit(first, "session_start", firstHarness.context);
+  assert.deepEqual(firstHarness.activeTools.sort(), [
+    "orchestrator_ask",
+    "orchestrator_result",
+    "read",
+  ]);
+  assert.equal(await waitForRegistrationResponse(1), 1);
+  await waitForConnectedBinding();
   assert.equal(registrationCount, 1);
   await shutdown(firstActive, "reload");
   await unlink(tokenPath);
@@ -351,9 +371,15 @@ test("orchestrator extension reload transfers runtime credential and registers t
   const secondActive = { api: second, context: secondHarness.context };
   activeHarnesses.push(secondActive);
   await extension(second.api as never);
-  await emit(second, "session_start", secondHarness.context);
-  assert.equal(await waitForRegistrationResponse(2), 2);
   assert.equal(await second.waitForToolRegistration(2), 2);
+  await emit(second, "session_start", secondHarness.context);
+  assert.deepEqual(secondHarness.activeTools.sort(), [
+    "orchestrator_ask",
+    "orchestrator_result",
+    "read",
+  ]);
+  assert.equal(await waitForRegistrationResponse(2), 2);
+  await waitForConnectedBinding();
   assert.equal(registrationCount, 2);
   assert.equal(first.tools.length, 2);
   assert.equal(second.tools.length, 2);

@@ -362,6 +362,10 @@ export default async function piHerdrOrchestrator(
   }> = [];
   let lifecycleInFlight = false;
   const managed = process.env.PI_HERDR_ORCH_MANAGED === "1";
+  if (managed) {
+    registerManagedChildTools(pi, binding);
+    childToolsRegistered = true;
+  }
   const herdrPaneActive =
     process.env.HERDR_ENV === "1" && !!process.env.HERDR_PANE_ID;
   const herdrActive = herdrPaneActive && !!process.env.HERDR_SOCKET_PATH;
@@ -851,7 +855,11 @@ export default async function piHerdrOrchestrator(
       );
     },
   });
-  api.on("session_start", (_event, next) => void start(next as PiContextLike));
+  api.on("session_start", (_event, next) => {
+    if (managed)
+      reconcileActiveTools(pi, ["orchestrator_result", "orchestrator_ask"]);
+    void start(next as PiContextLike);
+  });
   api.on("session_shutdown", (event) =>
     runtime.cleanup(
       event && typeof event === "object" && "reason" in event
