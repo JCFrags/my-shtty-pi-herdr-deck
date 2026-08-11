@@ -1640,6 +1640,7 @@ export class Broker {
                       runId: run.id,
                       agentId,
                       generation: agentGeneration,
+                      assignmentGeneration: run.assignmentGeneration,
                       objective:
                         this.store.state.tasks[run.taskId]?.objective ?? "",
                       constraints:
