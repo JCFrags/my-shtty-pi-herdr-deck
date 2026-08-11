@@ -11,6 +11,7 @@ import { lstat, open, realpath } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { brokerRequest } from "../cli/client.js";
+import { validateDoctorReport } from "./doctor.js";
 import { readPrivateRegular } from "../shared/private-fs.js";
 import {
   ensurePrivateDirectory,
@@ -603,6 +604,21 @@ async function authenticatedPing(
   return true;
 }
 
+async function validateRetainedBrokerBinary(
+  paths: CanonicalResolvedPaths,
+): Promise<void> {
+  const report = validateDoctorReport(
+    await brokerRequest(
+      paths.socket,
+      paths.secret,
+      "system.doctor",
+      {},
+      paths.sessionKey,
+    ),
+  );
+  if (!report.ok) throw new Error("Running broker failed its doctor checks.");
+}
+
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -796,6 +812,7 @@ export async function ensureBroker(): Promise<CanonicalResolvedPaths> {
     await inspectAuthenticatedStartup(paths);
     await revalidateHerdrSocket(herdr);
     await revalidateHerdrBinary(herdrBinary);
+    await validateRetainedBrokerBinary(paths);
     return paths;
   }
   const command = await packageCommand();
@@ -961,12 +978,14 @@ export async function ensureBroker(): Promise<CanonicalResolvedPaths> {
       if (state === "live") {
         await waitReady(paths, herdr, deadline);
         await revalidateHerdrBinary(herdrBinary);
+        await validateRetainedBrokerBinary(paths);
         return paths;
       }
       if (await authenticatedPing(paths)) {
         await inspectAuthenticatedStartup(paths);
         await revalidateHerdrSocket(herdr);
         await revalidateHerdrBinary(herdrBinary);
+        await validateRetainedBrokerBinary(paths);
         return paths;
       }
       await safeStaleSocket(paths.socket);

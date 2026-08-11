@@ -893,11 +893,13 @@ export async function createProductionHerdrService(
     },
     diagnostic: async () => {
       await revalidateHerdrBinary(binaryIdentity);
-      return await doctor({
+      const report = await doctor({
         herdrBinary: binaryIdentity.path,
         herdrSocket: socketPath,
         schema: await runner.json(["api", "schema", "--json"]),
       });
+      await revalidateHerdrBinary(binaryIdentity);
+      return report;
     },
   });
 }

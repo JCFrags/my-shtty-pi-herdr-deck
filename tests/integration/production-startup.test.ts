@@ -23,8 +23,14 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { resolvePaths, sessionKey } from "../../src/shared/paths.js";
-import { linuxProcessStart } from "../../src/broker/startup.js";
+import {
+  resolveHerdrPaths,
+  resolvePaths,
+  sessionKey,
+} from "../../src/shared/paths.js";
+import { ensureBroker, linuxProcessStart } from "../../src/broker/startup.js";
+import { Broker } from "../../src/broker/broker.js";
+import { createProductionHerdrService } from "../../src/herdr/service.js";
 
 const root = process.cwd();
 
@@ -887,7 +893,7 @@ test("held live broker readiness failure proves exact exit and preserves a repla
   await unlink(paths.socket);
 });
 
-test("fresh owned startup revalidates the retained binary after readiness and cleans its exact child", async (t) => {
+test("fresh owned startup revalidates the retained binary after readiness and cleans its exact child", async () => {
   const temporary = await mkdtemp(join(tmpdir(), "orch-binary-startup-"));
   const herdrSocket = join(temporary, "herdr.sock");
   const fakeBinary = join(temporary, "fake-herdr.mjs");
@@ -973,69 +979,211 @@ test("fresh owned startup revalidates the retained binary after readiness and cl
       mutationReject(error as Error);
     }
   });
-  t.after(async () => {
-    watcher.close();
-    if (
-      brokerIdentity &&
-      linuxProcessStart(brokerIdentity.pid) === brokerIdentity.startIdentity
-    )
-      process.kill(brokerIdentity.pid, "SIGKILL");
-    await new Promise<void>((resolve, reject) =>
-      herdrServer.close((error) => (error ? reject(error) : resolve())),
+  let starter:
+    Promise<{ stdout: string; stderr: string; code: number }> | undefined;
+  let starterObserved = false;
+  let bodyError: unknown;
+  try {
+    const environment: NodeJS.ProcessEnv = {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      USER: process.env.USER,
+      LOGNAME: process.env.LOGNAME,
+      LANG: "C.UTF-8",
+      HERDR_ENV: "1",
+      HERDR_SOCKET_PATH: herdrSocket,
+      HERDR_BIN_PATH: fakeBinary,
+      HERDR_CONFIG_PATH: fakeState,
+      HERDR_PANE_ID: "pane-binary",
+      HERDR_TERMINAL_ID: "terminal-binary",
+      PI_HERDR_ORCH_RUNTIME_ROOT: runtimeBase,
+      PI_HERDR_ORCH_STATE_ROOT: stateBase,
+    };
+    const childModule = join(
+      root,
+      "dist",
+      "tests",
+      "helpers",
+      "production-startup-child.js",
     );
-    await rm(temporary, { recursive: true, force: true });
+    starter = runChild([childModule, "starter"], environment);
+    let mutationTimer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      mutation,
+      new Promise<never>((_resolve, reject) => {
+        mutationTimer = setTimeout(
+          () =>
+            reject(new Error("Timed out waiting for broker socket receipt.")),
+          10_000,
+        );
+      }),
+    ]).finally(() => {
+      if (mutationTimer) clearTimeout(mutationTimer);
+    });
+    const failed = await starter.finally(() => {
+      starterObserved = true;
+    });
+    assert.notEqual(failed.code, 0);
+    assert.match(
+      failed.stderr,
+      /HERDR_BIN_PATH is missing, replaced, or unsafe/u,
+    );
+    assert.ok(brokerIdentity);
+    assert.notEqual(
+      linuxProcessStart(brokerIdentity.pid),
+      brokerIdentity.startIdentity,
+    );
+    await missing(paths.pid);
+    await missing(paths.lock);
+    await missing(paths.socket);
+    await noStartupLinks(paths.runtime);
+    assert.equal(mode((await lstat(herdrSocket)).mode), 0o600);
+  } catch (error) {
+    bodyError = error;
+  } finally {
+    await collectTerminalOutcome(
+      bodyError,
+      [
+        () => watcher.close(),
+        () =>
+          brokerIdentity
+            ? terminateExactTestProcess(brokerIdentity)
+            : undefined,
+        async () => {
+          if (starter && !starterObserved)
+            await starter.finally(() => {
+              starterObserved = true;
+            });
+        },
+        () =>
+          new Promise<void>((resolve, reject) =>
+            herdrServer.close((error) => (error ? reject(error) : resolve())),
+          ),
+        () => rm(temporary, { recursive: true, force: true }),
+      ],
+      "Retained-binary startup test body and teardown failed.",
+    );
+  }
+});
+
+test("existing-broker reuse rejects an unsafe broker-retained binary instead of trusting a safe caller binary", async () => {
+  const temporary = await mkdtemp(join(tmpdir(), "orch-reuse-binary-"));
+  const herdrSocket = join(temporary, "herdr.sock");
+  const stateRoot = join(temporary, "state");
+  const runtimeRoot = join(temporary, "runtime");
+  const schemaPath = join(temporary, "schema.json");
+  const callsA = join(temporary, "calls-a");
+  const callsB = join(temporary, "calls-b");
+  const binaryA = join(temporary, "herdr-a.mjs");
+  const binaryB = join(temporary, "herdr-b.mjs");
+  const methods = [
+    "session.snapshot",
+    "events.subscribe",
+    "workspace.list",
+    "workspace.get",
+    "workspace.focus",
+    "workspace.close",
+    "tab.create",
+    "tab.get",
+    "tab.close",
+    "pane.list",
+    "pane.get",
+    "pane.focus",
+    "pane.close",
+    "agent.list",
+    "agent.get",
+    "agent.start",
+    "agent.focus",
+    "agent.stop",
+    "agent.interrupt",
+    "worktree.list",
+    "worktree.create",
+    "worktree.open",
+    "worktree.remove",
+  ];
+  await writeFile(schemaPath, JSON.stringify({ methods }), { mode: 0o600 });
+  const fakeBinary = (calls: string) => `#!/usr/bin/env node
+import { appendFileSync, readFileSync } from "node:fs";
+const command = process.argv.slice(2).join(" ");
+appendFileSync(${JSON.stringify(calls)}, command + "\\n");
+if (command === "api schema --json")
+  process.stdout.write(readFileSync(${JSON.stringify(schemaPath)}, "utf8"));
+else if (command === "session snapshot --json")
+  process.stdout.write(JSON.stringify({ result: { snapshot: { version: "0.8.0", protocol: 19, workspaces: [], tabs: [], panes: [], layouts: [], agents: [] } } }));
+else {
+  process.stderr.write("unexpected command");
+  process.exitCode = 31;
+}
+`;
+  await writeFile(binaryA, fakeBinary(callsA), { mode: 0o700 });
+  await writeFile(binaryB, fakeBinary(callsB), { mode: 0o700 });
+  const connections = new Set<Socket>();
+  const server = createServer((socket) => {
+    connections.add(socket);
+    socket.resume();
+    socket.once("close", () => connections.delete(socket));
   });
-  const environment: NodeJS.ProcessEnv = {
-    PATH: process.env.PATH,
-    HOME: process.env.HOME,
-    USER: process.env.USER,
-    LOGNAME: process.env.LOGNAME,
-    LANG: "C.UTF-8",
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(herdrSocket, resolve);
+  });
+  await chmod(herdrSocket, 0o600);
+  const environmentKeys = [
+    "HERDR_ENV",
+    "HERDR_SOCKET_PATH",
+    "HERDR_BIN_PATH",
+    "PI_HERDR_ORCH_STATE_ROOT",
+    "PI_HERDR_ORCH_RUNTIME_ROOT",
+  ] as const;
+  const priorEnvironment = new Map(
+    environmentKeys.map((key) => [key, process.env[key]]),
+  );
+  Object.assign(process.env, {
     HERDR_ENV: "1",
     HERDR_SOCKET_PATH: herdrSocket,
-    HERDR_BIN_PATH: fakeBinary,
-    HERDR_CONFIG_PATH: fakeState,
-    HERDR_PANE_ID: "pane-binary",
-    HERDR_TERMINAL_ID: "terminal-binary",
-    PI_HERDR_ORCH_RUNTIME_ROOT: runtimeBase,
-    PI_HERDR_ORCH_STATE_ROOT: stateBase,
-  };
-  const childModule = join(
-    root,
-    "dist",
-    "tests",
-    "helpers",
-    "production-startup-child.js",
-  );
-  const starter = runChild([childModule, "starter"], environment);
-  let mutationTimer: NodeJS.Timeout | undefined;
-  await Promise.race([
-    mutation,
-    new Promise<never>((_resolve, reject) => {
-      mutationTimer = setTimeout(
-        () => reject(new Error("Timed out waiting for broker socket receipt.")),
-        10_000,
-      );
-    }),
-  ]).finally(() => {
-    if (mutationTimer) clearTimeout(mutationTimer);
+    HERDR_BIN_PATH: binaryA,
+    PI_HERDR_ORCH_STATE_ROOT: stateRoot,
+    PI_HERDR_ORCH_RUNTIME_ROOT: runtimeRoot,
   });
-  const failed = await starter;
-  assert.notEqual(failed.code, 0);
-  assert.match(
-    failed.stderr,
-    /HERDR_BIN_PATH is missing, replaced, or unsafe/u,
-  );
-  assert.ok(brokerIdentity);
-  assert.notEqual(
-    linuxProcessStart(brokerIdentity.pid),
-    brokerIdentity.startIdentity,
-  );
-  await missing(paths.pid);
-  await missing(paths.lock);
-  await missing(paths.socket);
-  await noStartupLinks(paths.runtime);
-  assert.equal(mode((await lstat(herdrSocket)).mode), 0o600);
+  let broker: Broker | undefined;
+  let bodyError: unknown;
+  try {
+    const { paths } = await resolveHerdrPaths();
+    broker = new Broker(paths, {
+      herdrFactory: (store, resolved) =>
+        createProductionHerdrService(store, resolved, binaryA),
+    });
+    await broker.start();
+    const retainedCalls = await readFile(callsA, "utf8");
+    await chmod(binaryA, 0o722);
+    process.env.HERDR_BIN_PATH = binaryB;
+    await assert.rejects(ensureBroker(), /Request failed/u);
+    assert.equal(await readFile(callsA, "utf8"), retainedCalls);
+    await assert.rejects(readFile(callsB, "utf8"), { code: "ENOENT" });
+  } catch (error) {
+    bodyError = error;
+  } finally {
+    await collectTerminalOutcome(
+      bodyError,
+      [
+        () => broker?.stop(),
+        () => {
+          for (const socket of connections) socket.destroy();
+        },
+        () =>
+          new Promise<void>((resolve, reject) =>
+            server.close((error) => (error ? reject(error) : resolve())),
+          ),
+        () => {
+          for (const [key, value] of priorEnvironment)
+            if (value === undefined) delete process.env[key];
+            else process.env[key] = value;
+        },
+        () => rm(temporary, { recursive: true, force: true }),
+      ],
+      "Existing-broker retained-binary test body and teardown failed.",
+    );
+  }
 });
 
 test("fresh readiness finalization failure stops its exact child and preserves replacements", async () => {
