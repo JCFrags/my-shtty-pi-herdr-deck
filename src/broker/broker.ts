@@ -4409,8 +4409,10 @@ export class Broker {
           !isRegisteredHerdrResourceState(resource.state) ||
           !safeText(resource.worktreeId) ||
           !safeText(resource.worktreePath) ||
+          !safeText(resource.workspaceId) ||
           !candidate.project ||
-          !safeText(candidate.project.workspaceId)
+          !safeText(candidate.project.workspaceId) ||
+          resource.workspaceId !== candidate.project.workspaceId
         )
           throw new OrchestratorError(
             "INVALID_REQUEST",

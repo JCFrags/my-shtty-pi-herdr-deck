@@ -55,8 +55,17 @@ export function normalizeAgent(raw: unknown): HerdrAgent | undefined {
 }
 export function normalizeWorktree(raw: unknown): HerdrWorktree | undefined {
   const r = record(raw),
-    path = str(r.path ?? r.cwd ?? r.worktree_path);
-  return path ? ({ ...r, path } as HerdrWorktree) : undefined;
+    path = str(r.path ?? r.cwd ?? r.worktree_path),
+    worktreeId = id(r, "id", "worktree_id", "worktreeId"),
+    workspaceId = id(r, "workspace_id", "workspaceId");
+  return path
+    ? ({
+        ...r,
+        path,
+        ...(worktreeId ? { id: worktreeId } : {}),
+        ...(workspaceId ? { workspaceId } : {}),
+      } as HerdrWorktree)
+    : undefined;
 }
 export function normalizeSnapshot(raw: unknown): HerdrSnapshot {
   const r = record(raw),

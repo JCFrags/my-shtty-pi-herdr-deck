@@ -797,6 +797,9 @@ export function reduce(
           ...(typeof p.worktreePath === "string"
             ? { worktreePath: p.worktreePath }
             : {}),
+          ...(typeof p.workspaceId === "string"
+            ? { workspaceId: p.workspaceId }
+            : {}),
           ...(typeof p.reason === "string" ? { reason: p.reason } : {}),
           ...(typeof p.parentAgentId === "string"
             ? { parentAgentId: p.parentAgentId }

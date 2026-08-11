@@ -11,6 +11,8 @@ import { resolvePaths, sessionKey } from "../../src/shared/paths.js";
 import type { PiApiLike, PiContextLike } from "../../src/pi/types.js";
 import { EventStore } from "../../src/state/event-store.js";
 import { HerdrProvisioner } from "../../src/herdr/provisioner.js";
+import { HerdrService } from "../../src/herdr/service.js";
+import { normalizeSnapshot } from "../../src/herdr/normalizers.js";
 
 const actor = {
   principalId: "prn_00000000000000000000000000",
@@ -66,7 +68,8 @@ async function productionParent(
     resourceMode?: "missing" | "wrong-owner" | "stale";
     holdProvisions?: boolean;
     holdReuseProvisions?: boolean;
-    reconcilePresent?: boolean;
+    realReconcileWorktree?:
+      "exact" | "missing" | "replaced" | "wrong-workspace";
   } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "isolation-release-"));
@@ -106,22 +109,57 @@ async function productionParent(
   process.env.HERDR_TERMINAL_ID = "parent-terminal";
   process.env.HERDR_AGENT_NAME = "parent";
   let broker!: Broker;
-  const herdr = (store: EventStore) => ({
+  let herdrFactoryCalls = 0;
+  const herdr = (store: EventStore, factoryCall: number) => ({
     resources: store.state.herdrResources ?? {},
     async startupReconcile() {
-      if (options.reconcilePresent)
-        for (const resource of Object.values(store.state.herdrResources ?? {}))
-          await store.append({
-            type: "herdr.reconciled",
-            actor,
-            entityRefs: { agentId: resource.agentId },
-            payload: {
-              agentId: resource.agentId,
-              state: "present",
-              ...(resource.paneId ? { paneId: resource.paneId } : {}),
+      if (!options.realReconcileWorktree || factoryCall === 1) return [];
+      const resources = Object.values(store.state.herdrResources ?? {});
+      const snapshot = normalizeSnapshot({
+        panes: Object.values(store.state.agents)
+          .filter((agent) => agent.paneId)
+          .map((agent) => ({
+            id: agent.paneId!,
+            ...(agent.terminalId ? { terminalId: agent.terminalId } : {}),
+            occupant: {
+              agentId: agent.id,
+              ...(agent.terminalId ? { terminalId: agent.terminalId } : {}),
+              ...(agent.piSessionId ? { sessionId: agent.piSessionId } : {}),
+              generation: agent.generation,
             },
-          });
-      return [];
+          })),
+        tabs: [],
+        workspaces: [],
+        agents: [],
+        worktrees: resources.flatMap((resource) => {
+          if (
+            !resource.worktreeId ||
+            !resource.worktreePath ||
+            !resource.workspaceId ||
+            options.realReconcileWorktree === "missing"
+          )
+            return [];
+          return [
+            {
+              worktree_id: resource.worktreeId,
+              path:
+                options.realReconcileWorktree === "replaced"
+                  ? `${resource.worktreePath}-replacement`
+                  : resource.worktreePath,
+              workspace_id:
+                options.realReconcileWorktree === "wrong-workspace"
+                  ? "wrong-workspace"
+                  : resource.workspaceId,
+            },
+          ];
+        }),
+      });
+      const service = new HerdrService({
+        store,
+        cli: { snapshot: async () => snapshot } as never,
+        provisioner: {} as never,
+      });
+      return service.startupReconcile();
     },
     async verifyRoot(identity: { paneId: string; terminalId: string }) {
       return { ...identity, workspaceId: "parent-workspace", cwd: root };
@@ -162,6 +200,11 @@ async function productionParent(
               ? "agt_wrong_owner"
               : agentId,
           parentAgentId: input.parentAgentId,
+          ...((input.isolation === "worktree" ||
+            typeof input.reuseWorktreeId === "string") &&
+          options.resourceMode !== "missing"
+            ? { workspaceId: input.workspaceId }
+            : {}),
           tokenDigest: digest(`${agentId}-token`),
           sessionId: `session-${agentId}`,
           paneId: `pane-${agentId}`,
@@ -201,7 +244,7 @@ async function productionParent(
     },
   });
   broker = new Broker(paths, {
-    herdrFactory: async (store) => herdr(store) as never,
+    herdrFactory: async (store) => herdr(store, ++herdrFactoryCalls) as never,
   });
   await broker.start();
   const secret = (await readFile(paths.secret, "utf8")).trim();
@@ -242,7 +285,7 @@ async function productionParent(
     client.close();
     await broker.stop();
     broker = new Broker(paths, {
-      herdrFactory: async (store) => herdr(store) as never,
+      herdrFactory: async (store) => herdr(store, ++herdrFactoryCalls) as never,
     });
     await broker.start();
     const nextSecret = (await readFile(paths.secret, "utf8")).trim();
@@ -827,6 +870,81 @@ test("reuse admission fails closed for missing, wrong-owner, and stale resources
   }
 });
 
+test("real startup reconciliation rejects missing, replaced, and wrong-workspace reuse", async () => {
+  for (const mode of ["missing", "replaced", "wrong-workspace"] as const) {
+    const h = await productionParent({ realReconcileWorktree: mode });
+    let removeBinding: () => void = () => undefined;
+    try {
+      const response = (await h.client.request("workflow.create", {
+        objective: `restart-reconcile-${mode}`,
+        parentAgentId: h.registered.agentId,
+        definition: {
+          version: 1,
+          id: `restart-reconcile-${mode}`,
+          name: `restart reconcile ${mode}`,
+          description: `restart reconcile ${mode}`,
+          mode: "dag",
+          failureMode: "fail_fast",
+          maxCorrectionLoops: 0,
+          steps: [
+            {
+              key: "implement",
+              profileId: "implementer",
+              title: "implement",
+              objectiveTemplate: "{{input.objective}}",
+              constraints: [],
+              dependsOn: [],
+              resultProjection: [],
+              isolationMode: "worktree",
+            },
+            {
+              key: "review",
+              profileId: "reviewer",
+              title: "review",
+              objectiveTemplate: "{{input.objective}}",
+              constraints: [],
+              dependsOn: ["implement"],
+              resultProjection: [],
+              isolationMode: "reuse-worktree",
+            },
+          ],
+        },
+        dryRun: false,
+      })) as { tasks: Array<{ taskId: string }> };
+      const implement = h.broker.store.state.tasks[response.tasks[0]!.taskId]!;
+      const reviewId = response.tasks[1]!.taskId;
+      const implementAgent = implement.currentRunId
+        ? h.broker.store.state.runs[implement.currentRunId]?.agentId
+        : undefined;
+      assert.ok(implementAgent);
+      await h.restart();
+      assert.equal(
+        h.broker.store.state.herdrResources?.[implementAgent]?.state,
+        mode === "missing" ? "missing" : "replaced",
+      );
+      let bindingCount = 0;
+      removeBinding = h.broker.store.onAppend((event) => {
+        if (
+          event.type === "task.project_bound" &&
+          event.entityRefs?.taskId === reviewId
+        )
+          bindingCount++;
+      });
+      await connectManagedChild(h, implementAgent);
+      await completeManagedChild(h, implementAgent);
+      assert.equal(bindingCount, 0);
+      assert.equal(
+        h.broker.store.state.tasks[reviewId]?.currentRunId,
+        undefined,
+      );
+      assert.equal(h.provisions.length, 1);
+    } finally {
+      removeBinding();
+      await assert.rejects(h.cleanup(), /dependency worktree|registered|owned/);
+    }
+  }
+});
+
 test("restart rejects a persisted binding that no longer matches its resource", async () => {
   const h = await productionParent({ holdReuseProvisions: true });
   const replayRoot = await mkdtemp(join(tmpdir(), "isolation-binding-replay-"));
@@ -936,6 +1054,7 @@ test("restart rejects a persisted binding that no longer matches its resource", 
                 ownerId: implementAgent,
                 worktreeId: "worktree-replaced-after-crash",
                 worktreePath: "/tmp/worktree-replaced-after-crash",
+                workspaceId: "parent-workspace",
               },
             });
             return [];
@@ -962,6 +1081,13 @@ test("restart rejects a persisted binding that no longer matches its resource", 
 test("HerdrProvisioner reuses an exact worktree without creating one", async () => {
   const root = await mkdtemp(join(tmpdir(), "isolation-reuse-provisioner-"));
   const calls: string[] = [];
+  let liveWorktrees = [
+    {
+      id: "retained-worktree-id",
+      workspaceId: "workspace-reuse",
+      path: "/tmp/retained-worktree-path",
+    },
+  ];
   const cli = {
     createWorktree: async () => {
       calls.push("createWorktree");
@@ -977,7 +1103,7 @@ test("HerdrProvisioner reuses an exact worktree without creating one", async () 
       tabs: [],
       workspaces: [],
       agents: [],
-      worktrees: [],
+      worktrees: liveWorktrees,
     }),
   } as never;
   try {
@@ -1026,6 +1152,48 @@ test("HerdrProvisioner reuses an exact worktree without creating one", async () 
     );
     assert.deepEqual(calls, beforePartial);
     await assert.rejects(stat(partialPromptRoot), { code: "ENOENT" });
+
+    for (const [caseId, worktrees] of [
+      ["missing", []],
+      [
+        "replaced",
+        [
+          {
+            id: "retained-worktree-id",
+            workspaceId: "workspace-reuse",
+            path: "/tmp/replaced-worktree-path",
+          },
+        ],
+      ],
+      [
+        "wrong_workspace",
+        [
+          {
+            id: "retained-worktree-id",
+            workspaceId: "wrong-workspace",
+            path: "/tmp/retained-worktree-path",
+          },
+        ],
+      ],
+    ] as const) {
+      liveWorktrees = [...worktrees];
+      await assert.rejects(
+        provisioner.provision({
+          agentId: `agt_stale_reuse_${caseId}`,
+          parentAgentId: "agt_parent_provisioner",
+          role: "reviewer",
+          workspaceId: "workspace-reuse",
+          cwd: "/tmp/parent-checkout",
+          profileId: "reviewer",
+          isolation: "shared-readonly",
+          prompt: "stale retained identity",
+          reuseWorktreeId: "retained-worktree-id",
+          reuseWorktreePath: "/tmp/retained-worktree-path",
+        }),
+        /IDENTITY_STALE/,
+      );
+      assert.deepEqual(calls, beforePartial);
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -1034,7 +1202,7 @@ test("HerdrProvisioner reuses an exact worktree without creating one", async () 
 test("implement-review-fix admits reviewer into the exact retained worktree", async () => {
   const h = await productionParent({
     holdReuseProvisions: true,
-    reconcilePresent: true,
+    realReconcileWorktree: "exact",
   });
   const receipts: Array<ReturnType<typeof boundedReceipt>> = [];
   try {

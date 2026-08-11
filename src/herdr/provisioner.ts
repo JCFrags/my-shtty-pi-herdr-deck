@@ -231,6 +231,16 @@ export class HerdrProvisioner {
       if (input.reuseWorktreeId || input.reuseWorktreePath) {
         worktreeId = input.reuseWorktreeId!;
         worktreePath = input.reuseWorktreePath!;
+        const current = await this.cli.snapshot();
+        const live = current.worktrees.find(
+          (worktree) => worktree.id === worktreeId,
+        );
+        if (
+          !live ||
+          live.path !== worktreePath ||
+          live.workspaceId !== input.workspaceId
+        )
+          throw new Error("HERDR_REUSE_WORKTREE_IDENTITY_STALE");
         const created = await this.cli.createTab({
           workspaceId: input.workspaceId,
           cwd: worktreePath,

@@ -211,7 +211,10 @@ export class HerdrService {
             ...(result.tabId ? { tabId: result.tabId } : {}),
             ...(result.worktreeId ? { worktreeId: result.worktreeId } : {}),
             ...(result.worktreePath
-              ? { worktreePath: result.worktreePath }
+              ? {
+                  worktreePath: result.worktreePath,
+                  workspaceId: input.workspaceId,
+                }
               : {}),
             ...(result.token.digest
               ? { tokenDigest: result.token.digest }
@@ -569,7 +572,7 @@ export class HerdrService {
     }
     const current = snapshot ?? (await this.#cli.snapshot());
     const agents = Object.values(this.#store.state.agents);
-    const results = reconcileAgents(agents, current);
+    const results = reconcileAgents(agents, current, this.resources);
     for (const result of results) {
       await this.#store
         .append({
@@ -580,6 +583,12 @@ export class HerdrService {
             agentId: result.agentId,
             state: result.kind,
             ...(result.paneId ? { paneId: result.paneId } : {}),
+            ...(result.terminalId ? { terminalId: result.terminalId } : {}),
+            ...(result.worktreeId ? { worktreeId: result.worktreeId } : {}),
+            ...(result.worktreePath
+              ? { worktreePath: result.worktreePath }
+              : {}),
+            ...(result.workspaceId ? { workspaceId: result.workspaceId } : {}),
             ...(result.reason ? { reason: result.reason } : {}),
           },
         })

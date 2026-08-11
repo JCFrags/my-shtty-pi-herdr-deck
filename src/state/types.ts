@@ -161,6 +161,7 @@ export interface OrchestrationState {
       tabId?: string;
       worktreeId?: string;
       worktreePath?: string;
+      workspaceId?: string;
       reason?: string;
       parentAgentId?: string;
       ownerId?: string;

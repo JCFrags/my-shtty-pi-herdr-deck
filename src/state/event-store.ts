@@ -806,6 +806,7 @@ export class EventStore {
             "tabId",
             "worktreeId",
             "worktreePath",
+            "workspaceId",
             "reason",
             "terminalId",
             "sessionId",
