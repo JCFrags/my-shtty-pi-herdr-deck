@@ -112,6 +112,25 @@ function exactRecord(value: unknown): value is StartupRecord {
   );
 }
 
+function missingStartupDuringInspection(): NodeJS.ErrnoException {
+  const error = new Error(
+    "Broker startup record disappeared during inspection.",
+  ) as NodeJS.ErrnoException;
+  error.code = "ENOENT";
+  return error;
+}
+
+async function requireMissingStartupPath(path: string): Promise<never> {
+  try {
+    await lstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT")
+      throw missingStartupDuringInspection();
+    throw error;
+  }
+  throw new Error("Broker startup record changed during inspection.");
+}
+
 async function readStartup(
   path: string,
   companionOverride?: string,
@@ -119,6 +138,7 @@ async function readStartup(
   const handle = await open(path, constants.O_RDONLY | NOFOLLOW);
   try {
     const stat = await handle.stat();
+    if (stat.nlink === 0) await requireMissingStartupPath(path);
     if (
       !stat.isFile() ||
       stat.isSymbolicLink() ||
@@ -162,6 +182,7 @@ async function readStartup(
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         const refreshed = await handle.stat();
+        if (refreshed.nlink === 0) await requireMissingStartupPath(path);
         if (refreshed.nlink !== 1)
           throw new Error("Broker startup record is unsafe or malformed.");
       }
@@ -865,7 +886,13 @@ export async function ensureBroker(): Promise<CanonicalResolvedPaths> {
       return paths;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      const observed = await readStartup(paths.startup);
+      let observed: Awaited<ReturnType<typeof readStartup>>;
+      try {
+        observed = await readStartup(paths.startup);
+      } catch (readError) {
+        if ((readError as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw readError;
+      }
       if (
         observed.record.sessionKey !== paths.sessionKey ||
         observed.record.brokerSocket !== paths.socket ||
