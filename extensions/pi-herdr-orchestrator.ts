@@ -30,22 +30,7 @@ import { resolveHerdrPaths } from "../src/shared/paths.js";
 export const ORCHESTRATION_TOOLS = new Set([
   "orchestrator_result",
   "orchestrator_ask",
-  "delegate",
-  "agent_spawn",
-  "agent_list",
-  "agent_get",
-  "agent_prompt",
-  "agent_steer",
-  "agent_wait",
-  "agent_result",
-  "agent_answer",
-  "agent_interrupt",
-  "agent_stop",
-  "agent_close",
-  "task_list",
-  "task_get",
-  "task_collect",
-  "task_cancel",
+  ...PARENT_TOOL_NAMES,
 ]);
 const LEGACY_ORCHESTRATION_TOOLS = new Set([
   "agent_start_or_reuse",

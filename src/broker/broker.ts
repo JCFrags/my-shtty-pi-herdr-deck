@@ -2752,41 +2752,50 @@ export class Broker {
             "AGENT_NOT_FOUND",
             "Agent was not found.",
           );
-        if (!(await this.#canAccessAgent(principal, target)))
+        if (!this.#canPeerAskAgent(principal, target))
           throw new OrchestratorError(
             "PERMISSION_DENIED",
-            "Agent is outside the descendant scope.",
+            "Agent is outside the project or group peer scope.",
           );
         const messages = [
           p.message,
           ...((p.followUps as string[] | undefined) ?? []),
         ] as string[];
-        const deliveries: unknown[] = [];
-        for (let index = 0; index < messages.length; index++)
-          deliveries.push(
-            await this.#sendAdapterRequest(
-              target,
-              index === 0 ? "control.prompt" : "control.steer",
-              {
-                message: messages[index],
-                delivery: index === 0 ? "normal" : "follow_up",
-              },
-              {
-                generation: agent.generation,
-                ...(agent.piSessionId
-                  ? { piSessionId: agent.piSessionId }
-                  : {}),
-                ...(agent.currentRunId ? { runId: agent.currentRunId } : {}),
-              },
-              p.timeoutMs as number,
-            ),
+        const answers: string[] = [];
+        for (let index = 0; index < messages.length; index++) {
+          const response = await this.#sendAdapterRequest(
+            target,
+            "control.ask",
+            {
+              message: messages[index],
+              delivery: index === 0 ? "normal" : "follow_up",
+              timeoutMs: p.timeoutMs,
+            },
+            {
+              generation: agent.generation,
+              ...(agent.piSessionId ? { piSessionId: agent.piSessionId } : {}),
+              ...(agent.currentRunId ? { runId: agent.currentRunId } : {}),
+            },
+            p.timeoutMs as number,
           );
+          const answer =
+            response && typeof response === "object" && !Array.isArray(response)
+              ? (response as Record<string, unknown>).answer
+              : undefined;
+          if (!safeText(answer, 65_536))
+            throw new OrchestratorError(
+              "PEER_ANSWER_UNAVAILABLE",
+              "The peer did not return an answer.",
+            );
+          answers.push(answer);
+        }
         result = {
           threadId: createId("evt"),
           agentId: target,
           messageCount: messages.length,
           followUpCount: messages.length - 1,
-          deliveries,
+          answer: answers.at(-1),
+          answers,
         };
       } else if (request.method === "coordination.signal") {
         requirePermission(principal, "manage:self");
@@ -4691,6 +4700,23 @@ export class Broker {
       principal.agentId === agentId ||
       this.#isDescendantSync(principal.agentId, agentId)
     );
+  }
+  #canPeerAskAgent(principal: Principal, targetAgentId: string): boolean {
+    if (this.#canAccessAgentSync(principal, targetAgentId)) return true;
+    const sourceId = principal.agentId;
+    const source = sourceId ? this.store.state.agents[sourceId] : undefined;
+    const target = this.store.state.agents[targetAgentId];
+    if (!source || !target) return false;
+    const sameProject =
+      (!!source.workspaceId && source.workspaceId === target.workspaceId) ||
+      (!!source.cwd && source.cwd === target.cwd);
+    const sameGroup = Object.values(this.store.state.groups ?? {}).some(
+      (group) =>
+        group.state === "open" &&
+        group.agentIds.includes(source.id) &&
+        group.agentIds.includes(target.id),
+    );
+    return sameProject || sameGroup;
   }
   #canAccessTaskSync(principal: Principal, taskId: string): boolean {
     if (this.#operator(principal)) return true;

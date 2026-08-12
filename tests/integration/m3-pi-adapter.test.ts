@@ -31,6 +31,37 @@ function lifecycle(type: "turn_start" | "agent_settled", cycle = "cycle-1") {
   } as const;
 }
 
+test("peer ask waits for and returns the assistant answer", async () => {
+  const fake = new FakePi(
+    assignment.agentId,
+    assignment.generation,
+    assignment.piSessionId,
+  );
+  const entries: unknown[] = [];
+  fake.context.sessionManager.getEntries = () => entries;
+  const pending = fake.adapter.handleControl("control.ask", {
+    agentId: assignment.agentId,
+    generation: assignment.generation,
+    piSessionId: assignment.piSessionId,
+    message: "What changed?",
+    delivery: "normal",
+    timeoutMs: 1_000,
+  });
+  await Promise.resolve();
+  entries.push({
+    type: "message",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "Two files changed." }],
+    },
+  });
+  fake.lifecycle({
+    ...lifecycle("turn_start"),
+    type: "agent_end",
+  });
+  assert.deepEqual(await pending, { ok: true, answer: "Two files changed." });
+});
+
 test("M3 fake Pi binds the exact assignment and settles its lifecycle", async () => {
   const fake = new FakePi(
     assignment.agentId,

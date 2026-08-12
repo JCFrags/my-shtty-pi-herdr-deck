@@ -18,6 +18,39 @@ function sessionId(context: PiContextLike): string {
     throw new Error("PI_SESSION_ID_UNAVAILABLE");
   return id;
 }
+function latestAssistantText(context: PiContextLike): string | undefined {
+  const entries = context.sessionManager.getEntries?.() ?? [];
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index];
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const record = entry as Record<string, unknown>;
+    const message =
+      record.message &&
+      typeof record.message === "object" &&
+      !Array.isArray(record.message)
+        ? (record.message as Record<string, unknown>)
+        : record;
+    if (message.role !== "assistant") continue;
+    const content = message.content;
+    const text =
+      typeof content === "string"
+        ? content
+        : Array.isArray(content)
+          ? content
+              .filter(
+                (item): item is Record<string, unknown> =>
+                  !!item && typeof item === "object" && !Array.isArray(item),
+              )
+              .filter(
+                (item) => item.type === "text" && typeof item.text === "string",
+              )
+              .map((item) => item.text as string)
+              .join("\n")
+          : undefined;
+    if (text && Buffer.byteLength(text, "utf8") <= 65_536) return text;
+  }
+  return undefined;
+}
 export function capabilities(
   api: PiApiLike,
   context: PiContextLike,
@@ -46,6 +79,13 @@ export class PiAdapter implements PiControl {
   #connectionGeneration: number | undefined;
   #capabilities: PiAdapterCapabilities;
   #activeCycleId: string | undefined;
+  #peerAsk:
+    | {
+        resolve: (answer: string) => void;
+        reject: (error: Error) => void;
+        timer: NodeJS.Timeout;
+      }
+    | undefined;
   constructor(
     api: PiApiLike,
     context: PiContextLike,
@@ -58,11 +98,17 @@ export class PiAdapter implements PiControl {
     this.#generation = generation;
     this.#connectionGeneration = undefined;
     this.#activeCycleId = undefined;
+    this.#peerAsk = undefined;
     this.#capabilities = capabilities(api, context);
   }
   updateContext(context: PiContextLike): void {
     this.#context = context;
     this.#capabilities = capabilities(this.#api, context);
+  }
+  #discardPeerAsk(): void {
+    if (!this.#peerAsk) return;
+    clearTimeout(this.#peerAsk.timer);
+    this.#peerAsk = undefined;
   }
   bindIdentity(
     agentId: string,
@@ -126,6 +172,14 @@ export class PiAdapter implements PiControl {
   onLifecycle(
     event: PiLifecycleEvent,
   ): "bound" | "manual" | "ignored" | "settled" {
+    if (event.type === "agent_end" && this.#peerAsk) {
+      const pending = this.#peerAsk;
+      this.#peerAsk = undefined;
+      clearTimeout(pending.timer);
+      const answer = latestAssistantText(this.#context);
+      if (answer) pending.resolve(answer);
+      else pending.reject(new Error("PEER_ANSWER_UNAVAILABLE"));
+    }
     const cycle =
       event.type === "agent_start"
         ? (this.#activeCycleId = `cyc_${createId("evt").slice(4)}`)
@@ -273,7 +327,7 @@ export class PiAdapter implements PiControl {
   async handleControl(
     method: string,
     params: Record<string, unknown>,
-  ): Promise<{ ok: true }> {
+  ): Promise<{ ok: true; answer?: string }> {
     const state = this.safeState();
     const identity = [
       "agentId",
@@ -299,8 +353,14 @@ export class PiAdapter implements PiControl {
       throw new Error("PI_IDENTITY_MISMATCH");
     const allowed = new Set([
       ...identity,
-      ...(method === "control.prompt" || method === "control.steer"
-        ? ["message", "delivery"]
+      ...(method === "control.prompt" ||
+      method === "control.steer" ||
+      method === "control.ask"
+        ? [
+            "message",
+            "delivery",
+            ...(method === "control.ask" ? ["timeoutMs"] : []),
+          ]
         : method === "control.set_model"
           ? ["provider", "modelId"]
           : method === "control.set_thinking"
@@ -315,6 +375,7 @@ export class PiAdapter implements PiControl {
       ![
         "control.prompt",
         "control.steer",
+        "control.ask",
         "control.abort",
         "control.compact",
         "control.set_model",
@@ -325,7 +386,11 @@ export class PiAdapter implements PiControl {
       Object.keys(params).some((key) => !allowed.has(key))
     )
       throw new Error("INVALID_REQUEST");
-    if (method === "control.prompt" || method === "control.steer") {
+    if (
+      method === "control.prompt" ||
+      method === "control.steer" ||
+      method === "control.ask"
+    ) {
       if (
         typeof params.message !== "string" ||
         params.message.length === 0 ||
@@ -333,6 +398,33 @@ export class PiAdapter implements PiControl {
         /[\u0000-\u001f\u007f]/u.test(params.message)
       )
         throw new Error("INVALID_REQUEST");
+      if (method === "control.ask") {
+        if (
+          this.#peerAsk ||
+          !Number.isSafeInteger(params.timeoutMs) ||
+          Number(params.timeoutMs) < 1 ||
+          Number(params.timeoutMs) > 120_000 ||
+          (params.delivery !== "normal" && params.delivery !== "follow_up")
+        )
+          throw new Error("INVALID_REQUEST");
+        const answer = new Promise<string>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            if (this.#peerAsk?.timer !== timer) return;
+            this.#peerAsk = undefined;
+            reject(new Error("PEER_ANSWER_TIMEOUT"));
+          }, Number(params.timeoutMs));
+          timer.unref?.();
+          this.#peerAsk = { resolve, reject, timer };
+        });
+        try {
+          if (params.delivery === "normal") await this.prompt(params.message);
+          else await this.followUp(params.message);
+          return { ok: true, answer: await answer };
+        } catch (error) {
+          this.#discardPeerAsk();
+          throw error;
+        }
+      }
       if (method === "control.prompt") {
         if (params.delivery !== undefined && params.delivery !== "normal")
           throw new Error("INVALID_REQUEST");

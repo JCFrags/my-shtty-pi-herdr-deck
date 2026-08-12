@@ -61,7 +61,11 @@ test("requirement 11: peer ask uses a distinct broker method", async () => {
   const broker: ParentToolBroker = {
     async invoke(method, params) {
       calls.push({ method, params });
-      return { threadId: "thread", followUpCount: 3 };
+      return {
+        threadId: "thread",
+        answer: "Peer answer",
+        answers: ["Peer answer"],
+      };
     },
   };
   const service = new ParentToolService(broker);
@@ -78,6 +82,7 @@ test("requirement 11: peer ask uses a distinct broker method", async () => {
     principal,
   );
   assert.equal(response.ok, true);
+  assert.equal((response.result as { answer: string }).answer, "Peer answer");
   assert.deepEqual(calls, [
     {
       method: "agent.ask",
