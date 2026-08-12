@@ -7,6 +7,9 @@ import { ensurePrivateDirectory, resolveHerdrPaths } from "../shared/paths.js";
 import { brokerStatus, ensureBroker, stopBroker } from "../broker/startup.js";
 import { brokerRequest } from "./client.js";
 import { readPrivateRegular } from "../shared/private-fs.js";
+import { access } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { createProductionHerdrService } from "../herdr/service.js";
 import { loadConfig } from "../ops/config.js";
 import { exportState, planRetention } from "../ops/retention.js";
@@ -319,7 +322,19 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     );
     return;
   }
-  const brokerConfigPath = process.env.PI_HERDR_ORCH_CONFIG_PATH;
+  const defaultBrokerConfigPath = join(
+    homedir(),
+    ".config",
+    "pi-herdr-orchestrator",
+    "config.json",
+  );
+  const brokerConfigPath =
+    process.env.PI_HERDR_ORCH_CONFIG_PATH ??
+    ((await access(defaultBrokerConfigPath)
+      .then(() => true)
+      .catch(() => false))
+      ? defaultBrokerConfigPath
+      : undefined);
   const brokerConfig = brokerConfigPath
     ? await loadConfig(brokerConfigPath, {
         trustedProject: process.env.PI_HERDR_ORCH_PROJECT_TRUSTED === "1",

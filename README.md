@@ -51,7 +51,7 @@ A caller can request `new-workspace` placement with the `manager` model profile.
 
 The broker resolves task-profile compatibility and the model allowlist first. The provisioner then reads the installed Pi model catalog and CLI thinking capabilities before it creates registration files or Herdr resources. Pi starts with explicit `--provider`, provider-qualified `--model`, and `--thinking` arguments. Managed registration must report the same provider, model, and thinking level. A mismatch fails registration and compensates the pending visible resources.
 
-Broker configuration can override the `manager` and `subagent` selections, the allowlist, and task-profile compatibility through `modelPolicy`. The effective selection must be in the allowlist. The `max` thinking level is not permitted.
+Broker configuration can override the `manager` and `subagent` selections, the allowlist, and task-profile compatibility through `modelPolicy`. The broker reads `~/.config/pi-herdr-orchestrator/config.json` by default. Set `PI_HERDR_ORCH_CONFIG_PATH` to use a different owner-controlled file. The effective selection must be in the allowlist. The `max` thinking level is not permitted.
 
 ## Link the Herdr plugin and run startup
 
