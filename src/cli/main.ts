@@ -142,13 +142,24 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     const config = await loadConfig(file, {
       trustedProject: process.env.PI_HERDR_ORCH_PROJECT_TRUSTED === "1",
     });
-    const policy = new ConfigPolicy({ user: config });
+    const policy = new ConfigPolicy({
+      user: {
+        version: config.version,
+        ...(config.scheduler ? { scheduler: config.scheduler } : {}),
+        ...(config.timeouts ? { timeouts: config.timeouts } : {}),
+        ...(config.retention ? { retention: config.retention } : {}),
+        ...(config.security ? { security: config.security } : {}),
+        ...(config.ui ? { ui: config.ui } : {}),
+        ...(config.logging ? { logging: config.logging } : {}),
+      },
+    });
     console.log(
       JSON.stringify({
         valid: true,
         version: config.version,
         generation: policy.snapshot.generation,
         hash: policy.snapshot.hash,
+        modelPolicy: config.modelPolicy ? "configured" : "default",
       }),
     );
     return;
