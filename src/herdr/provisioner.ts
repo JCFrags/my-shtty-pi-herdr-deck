@@ -102,6 +102,26 @@ async function withRetentionAdmission<T>(
       retentionAdmissions.delete(root);
   }
 }
+function assertManagedEnvironmentNotOverridden(
+  input: ProvisionInput,
+  managed: Record<string, string> = {},
+): void {
+  const forbidden = Object.keys(input.env ?? {}).filter(
+    (key) =>
+      Object.hasOwn(managed, key) ||
+      [
+        "PI_HERDR_ORCH_BROKER_SOCKET",
+        "PI_HERDR_ORCH_SESSION_KEY",
+        "PI_HERDR_ORCH_AGENT_TOKEN",
+        "PI_HERDR_ORCH_TOKEN_FILE",
+        "HERDR_BIN_PATH",
+      ].includes(key),
+  );
+  if (forbidden.length)
+    throw new Error(
+      `Managed environment override rejected: ${forbidden.join(", ")}`,
+    );
+}
 function assertReuseWorktreeIdentity(input: ProvisionInput): void {
   const hasReuseId = input.reuseWorktreeId !== undefined;
   const hasReusePath = input.reuseWorktreePath !== undefined;
@@ -213,6 +233,7 @@ export class HerdrProvisioner {
   }
   async provision(input: ProvisionInput): Promise<ProvisionResult> {
     assertReuseWorktreeIdentity(input);
+    assertManagedEnvironmentNotOverridden(input);
     const selectedModel = input.model ?? DEFAULT_SUBAGENT_MODEL;
     await this.piCapabilities.validate(selectedModel);
     await mkdir(this.promptRoot, { recursive: true, mode: 0o700 });
@@ -251,20 +272,7 @@ export class HerdrProvisioner {
           }
         : {}),
     };
-    const forbidden = Object.keys(input.env ?? {}).filter(
-      (key) =>
-        Object.hasOwn(managed, key) ||
-        [
-          "PI_HERDR_ORCH_BROKER_SOCKET",
-          "PI_HERDR_ORCH_SESSION_KEY",
-          "PI_HERDR_ORCH_AGENT_TOKEN",
-          "HERDR_BIN_PATH",
-        ].includes(key),
-    );
-    if (forbidden.length)
-      throw new Error(
-        `Managed environment override rejected: ${forbidden.join(", ")}`,
-      );
+    assertManagedEnvironmentNotOverridden(input, managed);
     let prompt: string | undefined;
     let tabId: string | undefined;
     let paneId: string | undefined;
