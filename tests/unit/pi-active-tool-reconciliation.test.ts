@@ -43,7 +43,6 @@ test("active-tool reconciliation preserves every non-orchestrator tool across re
     "read",
     "ask_user_question",
     "search_tools",
-    "coordination_wait",
     "another_extension_tool",
     "agent_get",
   ]);
