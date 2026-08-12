@@ -18,6 +18,13 @@ import {
 } from "../../src/pi/token-file.js";
 import { resolvePaths } from "../../src/shared/paths.js";
 
+const testModel = {
+  provider: "openai-codex",
+  modelId: "gpt-5.6-luna",
+  thinkingLevel: "medium" as const,
+};
+const modelValidator = { validate: async () => undefined };
+
 test("provisioner inserts the created owner-only token path into the tab environment", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-token-provision-"));
   let tabEnv: Record<string, string> | undefined;
@@ -40,6 +47,7 @@ test("provisioner inserts the created owner-only token path into the tab environ
       socketPath: "/tmp/owned-runtime/broker.sock",
       sessionKey: "0123456789abcdef01234567",
     },
+    modelValidator,
   ).provision({
     agentId: "agt",
     parentAgentId: "parent",
@@ -48,6 +56,7 @@ test("provisioner inserts the created owner-only token path into the tab environ
     cwd: root,
     profileId: "scout",
     isolation: "shared-readonly",
+    model: testModel,
     prompt: "prompt",
   });
   assert.ok(tabEnv?.PI_HERDR_ORCH_TOKEN_FILE);
@@ -94,6 +103,9 @@ test("official worktree creation returns the child workspace identity", async ()
     join(root, "private"),
     () => [],
     true,
+    undefined,
+    undefined,
+    modelValidator,
   ).provision({
     agentId: "agt",
     parentAgentId: "parent",
@@ -102,6 +114,7 @@ test("official worktree creation returns the child workspace identity", async ()
     cwd: root,
     profileId: "implementer",
     isolation: "worktree",
+    model: testModel,
     projectBase: "HEAD",
     prompt: "prompt",
   });

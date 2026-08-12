@@ -255,6 +255,8 @@ const parentInputKeys: Readonly<Record<ParentToolName, readonly string[]>> =
     agent_spawn: [
       "task",
       "profileId",
+      "modelProfileId",
+      "placement",
       "project",
       "isolation",
       "budget",
@@ -445,6 +447,8 @@ function validateExactNested(input: Record<string, unknown>): void {
     "questionId",
     "resultId",
     "profileId",
+    "modelProfileId",
+    "placement",
     "workspaceId",
     "message",
     "reason",
@@ -585,6 +589,16 @@ function validateExactNested(input: Record<string, unknown>): void {
         )
           throw new Error("INVALID_REQUEST");
       }
+      continue;
+    }
+    if (key === "modelProfileId") {
+      if (value !== "manager" && value !== "subagent")
+        throw new Error("INVALID_REQUEST");
+      continue;
+    }
+    if (key === "placement") {
+      if (value !== "current-workspace" && value !== "new-workspace")
+        throw new Error("INVALID_REQUEST");
       continue;
     }
     if (stringFields.has(key)) {
@@ -874,6 +888,13 @@ function schemaForKey(key: string): unknown {
     };
   if (["delivery"].includes(key))
     return { type: "string", enum: ["normal", "steer", "follow_up"] };
+  if (key === "modelProfileId")
+    return { type: "string", enum: ["manager", "subagent"] };
+  if (key === "placement")
+    return {
+      type: "string",
+      enum: ["current-workspace", "new-workspace"],
+    };
   if (["failureMode"].includes(key))
     return { type: "string", enum: ["fail_fast", "collect_all"] };
   if (["waitUntil"].includes(key))

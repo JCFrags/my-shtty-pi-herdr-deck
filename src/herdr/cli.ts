@@ -51,6 +51,34 @@ export class HerdrCli {
   requireMutationCapabilities(methods: readonly string[]): void {
     this.capabilities.require(methods);
   }
+  async createWorkspace(input: {
+    cwd: string;
+    label: string;
+    env: Record<string, string>;
+  }) {
+    this.capabilities.require(["workspace.create"]);
+    return commandResult(
+      await this.runner.json([
+        "workspace",
+        "create",
+        "--cwd",
+        input.cwd,
+        "--label",
+        input.label,
+        ...Object.entries(input.env).flatMap(([k, v]) => [
+          "--env",
+          `${k}=${v}`,
+        ]),
+        "--no-focus",
+      ]),
+      "cli:workspace:create",
+      "workspace_created",
+    );
+  }
+  async closeWorkspace(id: string) {
+    this.capabilities.require(["workspace.close"]);
+    await this.runner.run(["workspace", "close", id]);
+  }
   async createTab(input: {
     workspaceId: string;
     cwd: string;

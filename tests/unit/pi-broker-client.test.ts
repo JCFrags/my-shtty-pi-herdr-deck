@@ -16,6 +16,8 @@ const state = {
   pendingMessages: 0,
   activity: "working" as const,
   activeTools: ["read"],
+  model: { provider: "fake", id: "model", name: "model" },
+  thinkingLevel: "medium",
   capabilities: {
     core: true,
     prompt: true,
@@ -148,7 +150,13 @@ test("PiBrokerClient accepts real hello_result and binds adopted registration id
     pi: {
       sessionId: "pi-session",
       capabilities: state.capabilities,
-      state: { activity: "working", idle: false, pendingMessages: 0 },
+      state: {
+        activity: "working",
+        idle: false,
+        pendingMessages: 0,
+        model: { provider: "fake", modelId: "model" },
+        thinkingLevel: "medium",
+      },
     },
   });
   assert.equal(client.principal?.id, "prn_parent");
@@ -217,7 +225,13 @@ test("PiBrokerClient emits the exact managed registration frame", async () => {
     pi: {
       sessionId: "pi-session",
       capabilities: state.capabilities,
-      state: { activity: "working", idle: false, pendingMessages: 0 },
+      state: {
+        activity: "working",
+        idle: false,
+        pendingMessages: 0,
+        model: { provider: "fake", modelId: "model" },
+        thinkingLevel: "medium",
+      },
     },
   });
   client.close();

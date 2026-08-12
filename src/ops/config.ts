@@ -1,6 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { lstat } from "node:fs/promises";
 import { resolve } from "node:path";
+import {
+  validateModelSelection,
+  type ModelPolicyConfig,
+} from "../broker/model-policy.js";
 
 export interface OrchConfig {
   version: 1;
@@ -8,6 +12,7 @@ export interface OrchConfig {
   timeouts?: Record<string, number>;
   retention?: Record<string, number | boolean>;
   security?: Record<string, number | boolean>;
+  modelPolicy?: ModelPolicyConfig;
   ui?: Record<string, string | boolean>;
   logging?: Record<string, string | number>;
 }
@@ -47,6 +52,7 @@ export function validateConfig(value: unknown): OrchConfig {
     "timeouts",
     "retention",
     "security",
+    "modelPolicy",
     "ui",
     "logging",
   ]);
@@ -54,6 +60,52 @@ export function validateConfig(value: unknown): OrchConfig {
     if (!allowed.has(key))
       throw new Error(`Unknown configuration field: ${key}.`);
   walkSafe(value);
+  const modelPolicy = value.modelPolicy;
+  if (modelPolicy !== undefined) {
+    if (!isObject(modelPolicy))
+      throw new Error("modelPolicy must be an object.");
+    const allowedModelKeys = new Set([
+      "profiles",
+      "allowlist",
+      "compatibility",
+    ]);
+    if (Object.keys(modelPolicy).some((key) => !allowedModelKeys.has(key)))
+      throw new Error("modelPolicy contains an unknown field.");
+    if (modelPolicy.profiles !== undefined) {
+      if (
+        !isObject(modelPolicy.profiles) ||
+        Object.keys(modelPolicy.profiles).some(
+          (key) => key !== "manager" && key !== "subagent",
+        )
+      )
+        throw new Error("modelPolicy.profiles is invalid.");
+      for (const selection of Object.values(modelPolicy.profiles))
+        validateModelSelection(selection);
+    }
+    if (
+      modelPolicy.allowlist !== undefined &&
+      (!Array.isArray(modelPolicy.allowlist) ||
+        modelPolicy.allowlist.length < 1 ||
+        modelPolicy.allowlist.length > 64)
+    )
+      throw new Error("modelPolicy.allowlist is invalid.");
+    for (const selection of modelPolicy.allowlist ?? [])
+      validateModelSelection(selection);
+    if (modelPolicy.compatibility !== undefined) {
+      if (!isObject(modelPolicy.compatibility))
+        throw new Error("modelPolicy.compatibility is invalid.");
+      for (const [profile, compatible] of Object.entries(
+        modelPolicy.compatibility,
+      ))
+        if (
+          !/^[a-z][a-z0-9_-]{0,63}$/u.test(profile) ||
+          !Array.isArray(compatible) ||
+          compatible.length < 1 ||
+          compatible.some((item) => item !== "manager" && item !== "subagent")
+        )
+          throw new Error("modelPolicy.compatibility is invalid.");
+    }
+  }
   for (const section of [
     "scheduler",
     "timeouts",

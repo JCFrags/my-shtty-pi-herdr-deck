@@ -84,6 +84,13 @@ export interface Run {
   terminalReason?: ErrorSummary;
   cancelled?: boolean;
 }
+export interface AgentModelMetadata {
+  profileId?: "manager" | "subagent";
+  placement?: "current-workspace" | "new-workspace";
+  provider?: string;
+  modelId?: string;
+  thinkingLevel?: string;
+}
 export interface Agent {
   id: string;
   state: AgentState;
@@ -94,6 +101,10 @@ export interface Agent {
   displayName?: string;
   herdrName?: string;
   profileId?: string;
+  requestedModel?: AgentModelMetadata;
+  effectiveModel?: AgentModelMetadata;
+  actualModel?: AgentModelMetadata;
+  modelPolicyHash?: string;
   terminalId?: string;
   paneId?: string;
   workspaceId?: string;

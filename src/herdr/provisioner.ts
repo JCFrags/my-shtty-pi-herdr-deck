@@ -4,6 +4,11 @@ import type { GitEvidence } from "../git/porcelain.js";
 import { mkdir, open, readdir, realpath, stat } from "node:fs/promises";
 import { constants } from "node:fs";
 import { join, resolve } from "node:path";
+import type { AgentPlacement, ModelSelection } from "../broker/model-policy.js";
+import {
+  InstalledPiCapabilities,
+  type PiModelValidator,
+} from "../pi/model-capabilities.js";
 import {
   createManagedToken,
   createManagedTokenFile,
@@ -22,6 +27,8 @@ export interface ProvisionInput {
   cwd: string;
   profileId: string;
   isolation: "shared-readonly" | "worktree";
+  placement?: AgentPlacement;
+  model?: ModelSelection;
   prompt: string;
   projectBase?: string;
   branch?: string;
@@ -38,6 +45,9 @@ export interface ProvisionResult {
   worktreeId?: string;
   worktreePath?: string;
   unusedTabId?: string;
+  createdWorkspace?: boolean;
+  model?: ModelSelection;
+  placement?: AgentPlacement;
   promptPath?: string;
   tokenFilePath?: string;
   promptFileIdentity?: FileIdentity;
@@ -52,6 +62,11 @@ export interface RegistrationRetentionStatus {
   maxBytes: number;
   maxAgeMs: number;
 }
+const DEFAULT_SUBAGENT_MODEL: ModelSelection = Object.freeze({
+  provider: "openai-codex",
+  modelId: "gpt-5.6-luna",
+  thinkingLevel: "medium",
+});
 const RETENTION_MAX_FILES = 128;
 const RETENTION_MAX_BYTES = 32 * 1024 * 1024;
 
@@ -116,6 +131,7 @@ export class HerdrProvisioner {
       sessionKey: string;
       herdrBinary?: string;
     },
+    readonly piCapabilities: PiModelValidator = new InstalledPiCapabilities(),
   ) {
     if (
       orchestration &&
@@ -197,6 +213,8 @@ export class HerdrProvisioner {
   }
   async provision(input: ProvisionInput): Promise<ProvisionResult> {
     assertReuseWorktreeIdentity(input);
+    const selectedModel = input.model ?? DEFAULT_SUBAGENT_MODEL;
+    await this.piCapabilities.validate(selectedModel);
     await mkdir(this.promptRoot, { recursive: true, mode: 0o700 });
     const canonicalRoot = await realpath(resolve(this.promptRoot));
     const rootStat = await stat(canonicalRoot);
@@ -207,7 +225,7 @@ export class HerdrProvisioner {
     )
       throw new Error("HERDR_REGISTRATION_ROOT_UNSAFE");
     return await withRetentionAdmission(canonicalRoot, () =>
-      this.provisionWithRetentionAdmission(input),
+      this.provisionWithRetentionAdmission({ ...input, model: selectedModel }),
     );
   }
   private async provisionWithRetentionAdmission(
@@ -254,6 +272,7 @@ export class HerdrProvisioner {
     let worktreePath: string | undefined;
     let worktreeId: string | undefined;
     let unusedTabId: string | undefined;
+    let createdWorkspace = false;
     let promptFileIdentity: FileIdentity | undefined;
     let tokenFileIdentity: FileIdentity | undefined;
     try {
@@ -273,7 +292,34 @@ export class HerdrProvisioner {
       promptFileIdentity = prompt
         ? await managedFileIdentity(prompt)
         : undefined;
-      if (input.reuseWorktreeId || input.reuseWorktreePath) {
+      if (
+        input.placement === "new-workspace" &&
+        input.isolation === "shared-readonly"
+      ) {
+        if (input.reuseWorktreeId || input.reuseWorktreePath)
+          throw new Error("HERDR_NEW_WORKSPACE_REUSE_FORBIDDEN");
+        const created = await this.cli.createWorkspace({
+          cwd: input.cwd,
+          label: label(input.role),
+          env,
+        });
+        const r = created as Record<string, unknown>;
+        workspaceId =
+          typeof r.workspace_id === "string"
+            ? r.workspace_id
+            : nestedString(r, "workspace", "workspace_id");
+        tabId =
+          typeof r.tab_id === "string"
+            ? r.tab_id
+            : nestedString(r, "tab", "tab_id");
+        paneId =
+          typeof r.root_pane_id === "string"
+            ? r.root_pane_id
+            : nestedString(r, "root_pane", "pane_id");
+        if (!workspaceId)
+          throw new Error("HERDR_COMMAND_FAILED: workspace identity missing.");
+        createdWorkspace = true;
+      } else if (input.reuseWorktreeId || input.reuseWorktreePath) {
         workspaceId = input.workspaceId;
         worktreeId = input.reuseWorktreeId!;
         worktreePath = input.reuseWorktreePath!;
@@ -370,10 +416,22 @@ export class HerdrProvisioner {
         throw new Error("HERDR_COMMAND_FAILED: tab identity missing.");
       if (!paneId)
         throw new Error("HERDR_COMMAND_FAILED: pane identity missing.");
+      if (!input.model) throw new Error("PI_MODEL_SELECTION_REQUIRED");
       const started = await this.cli.startPi({
         name,
         paneId,
-        args: ["--name", name, "--append-system-prompt", prompt],
+        args: [
+          "--name",
+          name,
+          "--provider",
+          input.model.provider,
+          "--model",
+          `${input.model.provider}/${input.model.modelId}`,
+          "--thinking",
+          input.model.thinkingLevel,
+          "--append-system-prompt",
+          prompt,
+        ],
         timeoutMs: 30_000,
       });
       const sr = started as Record<string, unknown>;
@@ -403,6 +461,9 @@ export class HerdrProvisioner {
         ...(worktreeId ? { worktreeId } : {}),
         ...(worktreePath ? { worktreePath } : {}),
         ...(unusedTabId ? { unusedTabId } : {}),
+        ...(createdWorkspace ? { createdWorkspace: true } : {}),
+        model: input.model,
+        placement: input.placement ?? "current-workspace",
       };
     } catch (error) {
       if (prompt)
@@ -425,6 +486,8 @@ export class HerdrProvisioner {
         await this.cli.closeTab(tabId).catch(() => undefined);
       if (paneId && (await this.ownsPane(paneId, input.agentId)).safe)
         await this.cli.closePane(paneId).catch(() => undefined);
+      if (createdWorkspace && workspaceId)
+        await this.cli.closeWorkspace(workspaceId).catch(() => undefined);
       throw error;
     }
   }
@@ -447,6 +510,8 @@ export class HerdrProvisioner {
       (await this.ownsPane(result.paneId, expectedAgentId)).safe
     )
       await this.cli.closePane(result.paneId).catch(() => undefined);
+    if (result.createdWorkspace && result.workspaceId)
+      await this.cli.closeWorkspace(result.workspaceId).catch(() => undefined);
   }
   private async ownsPane(
     id: string,

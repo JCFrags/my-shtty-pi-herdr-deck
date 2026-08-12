@@ -70,6 +70,14 @@ import {
   resolveIsolation,
   resolveWorkflowIsolation,
 } from "./isolation-policy.js";
+import {
+  modelSelectionMatches,
+  resolveSpawnPolicy,
+  validateModelSelection,
+  type AgentPlacement,
+  type ModelPolicyConfig,
+  type ModelProfileId,
+} from "./model-policy.js";
 interface SubscriptionFilter {
   events?: string[];
   agentIds?: string[];
@@ -233,6 +241,23 @@ function safeBoundedRecord(value: unknown): value is Record<string, unknown> {
           (typeof item === "number" && Number.isFinite(item)) ||
           (typeof item === "string" && safeText(item, 1024))),
     )
+  );
+}
+function safePiState(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const state = value as Record<string, unknown>;
+  const model = state.model;
+  const scalarState = { ...state };
+  delete scalarState.model;
+  return (
+    safeBoundedRecord(scalarState) &&
+    (model === undefined ||
+      (!!model &&
+        typeof model === "object" &&
+        !Array.isArray(model) &&
+        exactKeys(model as Record<string, unknown>, ["provider", "modelId"]) &&
+        safeText((model as Record<string, unknown>).provider, 128) &&
+        safeText((model as Record<string, unknown>).modelId, 256)))
   );
 }
 function isTerminal(value: unknown): boolean {
@@ -475,6 +500,7 @@ export interface BrokerOptions {
     store: EventStore,
     paths: CanonicalResolvedPaths,
   ) => Promise<HerdrService>;
+  modelPolicy?: ModelPolicyConfig;
 }
 export class Broker {
   readonly store: EventStore;
@@ -502,6 +528,7 @@ export class Broker {
   #setTimeout: (callback: () => void, delayMs: number) => NodeJS.Timeout;
   #clearTimeout: (timer: NodeJS.Timeout) => void;
   #herdr?: HerdrService;
+  readonly #modelPolicy: ModelPolicyConfig;
   readonly #herdrFactory:
     | ((
         store: EventStore,
@@ -524,6 +551,7 @@ export class Broker {
       options.setTimeout ??
       ((callback, delayMs) => setTimeout(callback, delayMs));
     this.#clearTimeout = options.clearTimeout ?? clearTimeout;
+    this.#modelPolicy = options.modelPolicy ?? {};
     this.store = new EventStore(this.paths.events);
     this.store.onAppend((event) => {
       if (
@@ -1597,7 +1625,7 @@ export class Broker {
           herdr.detectedKind !== "pi" ||
           (herdr.name !== undefined && !safeText(herdr.name, 256)) ||
           !safeBoundedRecord(pi.capabilities) ||
-          !safeBoundedRecord(pi.state) ||
+          !safePiState(pi.state) ||
           (pi.sessionName !== undefined && !safeText(pi.sessionName, 256))
         )
           throw new OrchestratorError(
@@ -1698,6 +1726,81 @@ export class Broker {
               "The adopted root is already active.",
             );
           if (existing) agentId = existing.id;
+        }
+        let actualModel:
+          | { provider: string; modelId: string; thinkingLevel: string }
+          | undefined;
+        if (request.method === "agent.register_managed") {
+          const piState = pi.state as Record<string, unknown>;
+          const reportedModel = piState.model;
+          const expected = existing?.effectiveModel;
+          const hasAttestation =
+            !!reportedModel &&
+            typeof reportedModel === "object" &&
+            !Array.isArray(reportedModel) &&
+            safeText(
+              (reportedModel as Record<string, unknown>).provider,
+              128,
+            ) &&
+            safeText((reportedModel as Record<string, unknown>).modelId, 256) &&
+            safeText(piState.thinkingLevel, 32);
+          if (!hasAttestation && expected) {
+            if (this.#herdr)
+              await this.#herdr.recordRegistrationMismatch(agentId);
+            await this.store.append({
+              type: "agent.state_changed",
+              actor: { principalId: principal.id, kind: principal.kind },
+              entityRefs: { agentId },
+              payload: {
+                agentId,
+                state: "replaced",
+                reason: "PI_MODEL_ATTESTATION_MISSING",
+              },
+            });
+            throw new OrchestratorError(
+              "AGENT_REPLACED",
+              "Managed Pi registration lacks model attestation.",
+            );
+          }
+          if (hasAttestation) {
+            actualModel = {
+              provider: (reportedModel as Record<string, unknown>)
+                .provider as string,
+              modelId: (reportedModel as Record<string, unknown>)
+                .modelId as string,
+              thinkingLevel: piState.thinkingLevel as string,
+            };
+          }
+          if (
+            expected &&
+            actualModel &&
+            !modelSelectionMatches(
+              {
+                provider: String(expected.provider ?? ""),
+                modelId: String(expected.modelId ?? ""),
+                thinkingLevel: expected.thinkingLevel as never,
+              },
+              actualModel,
+            )
+          ) {
+            if (this.#herdr)
+              await this.#herdr.recordRegistrationMismatch(agentId);
+            await this.store.append({
+              type: "agent.state_changed",
+              actor: { principalId: principal.id, kind: principal.kind },
+              entityRefs: { agentId },
+              payload: {
+                agentId,
+                state: "replaced",
+                actualModel,
+                reason: "PI_MODEL_ATTESTATION_MISMATCH",
+              },
+            });
+            throw new OrchestratorError(
+              "AGENT_REPLACED",
+              "Managed Pi model attestation does not match policy.",
+            );
+          }
         }
         if (
           existing &&
@@ -1916,6 +2019,7 @@ export class Broker {
                     paneId: managedContext.paneId,
                     terminalId: managedContext.terminalId,
                     piSessionId: pi.sessionId,
+                    ...(actualModel ? { actualModel } : {}),
                     connectionGeneration: nextConnectionGeneration,
                   },
                 });
@@ -3602,6 +3706,8 @@ export class Broker {
             ? [
                 "task",
                 "profileId",
+                "modelProfileId",
+                "placement",
                 "project",
                 "isolation",
                 "budget",
@@ -3683,6 +3789,19 @@ export class Broker {
           request.method === "agent.spawn"
             ? exactRequestedIsolation(p.isolation)
             : undefined;
+        if (
+          request.method === "agent.spawn" &&
+          ((p.placement !== undefined &&
+            p.placement !== "current-workspace" &&
+            p.placement !== "new-workspace") ||
+            (p.modelProfileId !== undefined &&
+              p.modelProfileId !== "manager" &&
+              p.modelProfileId !== "subagent"))
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Spawn placement or model profile is invalid.",
+          );
         const dryRun = p.dryRun === true;
         const creationNow = this.#now();
         const createdAt = new Date(creationNow).toISOString();
@@ -3746,6 +3865,22 @@ export class Broker {
           const record = raw as Record<string, unknown>;
           const profileId = record.profileId as string;
           const requested = requestedIsolation;
+          const spawnPolicy = resolveSpawnPolicy(
+            {
+              taskProfileId: profileId,
+              ...(request.method === "agent.spawn" &&
+              (p.placement === "current-workspace" ||
+                p.placement === "new-workspace")
+                ? { placement: p.placement as AgentPlacement }
+                : {}),
+              ...(request.method === "agent.spawn" &&
+              (p.modelProfileId === "manager" ||
+                p.modelProfileId === "subagent")
+                ? { modelProfileId: p.modelProfileId as ModelProfileId }
+                : {}),
+            },
+            this.#modelPolicy,
+          );
           return {
             key: safeText(record.key, 64)
               ? (record.key as string)
@@ -3762,6 +3897,7 @@ export class Broker {
               ? (record.dependsOn as unknown[])
               : [],
             isolation: resolveIsolation(profileId, requested),
+            spawnPolicy,
           };
         });
         const taskIds = planned.map(() => createId("tsk"));
@@ -3829,6 +3965,8 @@ export class Broker {
               title: step.title,
               objective: step.objective,
               estimatedAgentCount: 1,
+              requestedModel: step.spawnPolicy.requested,
+              effectiveModel: step.spawnPolicy.effective,
             })),
           };
         } else {
@@ -3872,6 +4010,9 @@ export class Broker {
                 project: {
                   ...inheritedProject,
                   isolation: step.isolation,
+                  requestedSpawnPolicy: step.spawnPolicy.requested,
+                  effectiveSpawnPolicy: step.spawnPolicy.effective,
+                  modelPolicyHash: step.spawnPolicy.policyHash,
                 },
                 timeoutAt: wallDeadline,
               },
@@ -5412,6 +5553,28 @@ export class Broker {
           "PERMISSION_DENIED",
           "The canonical task isolation violates its profile policy.",
         );
+      const replayPolicy = resolveSpawnPolicy(
+        { taskProfileId: task.profileId ?? "scout" },
+        this.#modelPolicy,
+      );
+      const storedEffectivePolicy = project.effectiveSpawnPolicy;
+      const effectivePolicy =
+        storedEffectivePolicy &&
+        typeof storedEffectivePolicy === "object" &&
+        !Array.isArray(storedEffectivePolicy)
+          ? (storedEffectivePolicy as Record<string, unknown>)
+          : replayPolicy.effective;
+      const placement = effectivePolicy.placement;
+      const modelProfileId = effectivePolicy.modelProfileId;
+      if (
+        (placement !== "current-workspace" && placement !== "new-workspace") ||
+        (modelProfileId !== "manager" && modelProfileId !== "subagent")
+      )
+        throw new OrchestratorError(
+          "INVALID_REQUEST",
+          "The canonical task model policy is invalid.",
+        );
+      const effectiveModel = validateModelSelection(effectivePolicy.model);
       scheduler.setProvisioning(1);
       const agentId = createId("agt"),
         runId = createId("run"),
@@ -5427,6 +5590,16 @@ export class Broker {
           parentAgentId: task.parentAgentId,
           profileId: task.profileId,
           displayName: task.title,
+          requestedModel:
+            project.requestedSpawnPolicy ?? replayPolicy.requested,
+          effectiveModel: {
+            profileId: modelProfileId,
+            placement,
+            ...effectiveModel,
+          },
+          modelPolicyHash: safeText(project.modelPolicyHash, 64)
+            ? project.modelPolicyHash
+            : replayPolicy.policyHash,
         },
       });
       await this.store.append({
@@ -5458,6 +5631,8 @@ export class Broker {
           cwd: project.cwd,
           profileId: task.profileId ?? "scout",
           isolation,
+          placement,
+          model: effectiveModel,
           prompt: task.objective,
           ...(task.isolationMode === "reuse-worktree"
             ? {

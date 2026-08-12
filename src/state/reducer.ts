@@ -213,6 +213,18 @@ export function reduce(
           ...(typeof p.profileId === "string"
             ? { profileId: p.profileId }
             : {}),
+          ...(p.requestedModel && typeof p.requestedModel === "object"
+            ? { requestedModel: p.requestedModel }
+            : {}),
+          ...(p.effectiveModel && typeof p.effectiveModel === "object"
+            ? { effectiveModel: p.effectiveModel }
+            : {}),
+          ...(p.actualModel && typeof p.actualModel === "object"
+            ? { actualModel: p.actualModel }
+            : {}),
+          ...(typeof p.modelPolicyHash === "string"
+            ? { modelPolicyHash: p.modelPolicyHash }
+            : {}),
           ...(typeof p.paneId === "string" ? { paneId: p.paneId } : {}),
           ...(typeof p.terminalId === "string"
             ? { terminalId: p.terminalId }
@@ -265,6 +277,9 @@ export function reduce(
           ...(typeof p.cwd === "string" ? { cwd: p.cwd } : {}),
           ...(typeof p.worktreeId === "string"
             ? { worktreeId: p.worktreeId }
+            : {}),
+          ...(p.actualModel && typeof p.actualModel === "object"
+            ? { actualModel: p.actualModel }
             : {}),
           ...(typeof p.piSessionId === "string"
             ? { piSessionId: p.piSessionId }

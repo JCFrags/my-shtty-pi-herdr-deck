@@ -450,6 +450,12 @@ async function connectManagedChild(
     pendingMessages: 0,
     activity: "idle",
     activeTools: [],
+    model: {
+      provider: "openai-codex",
+      id: "gpt-5.6-luna",
+      name: "gpt-5.6-luna",
+    },
+    thinkingLevel: "medium",
     capabilities: {
       core: true,
       prompt: true,

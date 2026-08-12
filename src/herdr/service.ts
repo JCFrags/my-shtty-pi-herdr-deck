@@ -316,7 +316,15 @@ export class HerdrService {
               "tab.close",
               "pane.close",
             ]
-          : ["tab.create", "agent.start", "tab.close", "pane.close"],
+          : input.placement === "new-workspace"
+            ? [
+                "workspace.create",
+                "workspace.close",
+                "agent.start",
+                "tab.close",
+                "pane.close",
+              ]
+            : ["tab.create", "agent.start", "tab.close", "pane.close"],
       );
       const beforeGit =
         input.isolation === "worktree" &&
@@ -355,11 +363,9 @@ export class HerdrService {
             ...(result.tabId ? { tabId: result.tabId } : {}),
             ...(result.worktreeId ? { worktreeId: result.worktreeId } : {}),
             ...(result.worktreePath
-              ? {
-                  worktreePath: result.worktreePath,
-                  workspaceId: result.workspaceId ?? input.workspaceId,
-                }
+              ? { worktreePath: result.worktreePath }
               : {}),
+            workspaceId: result.workspaceId ?? input.workspaceId,
             ...(result.token.digest
               ? { tokenDigest: result.token.digest }
               : {}),
@@ -557,10 +563,15 @@ export class HerdrService {
   }
   async recordRegistrationMismatch(agentId: string): Promise<void> {
     await this.withAgentLock(agentId, async () => {
+      const pending = this.#pending.get(agentId);
+      if (pending) {
+        await this.#provisioner.compensate(pending, agentId);
+        await this.#provisioner.cleanupRegistration(pending);
+      }
       await this.recordLifecycle(
         agentId,
         "replaced",
-        "registration_identity_mismatch",
+        "registration_mismatch_compensated",
         true,
       );
       this.#pending.delete(agentId);

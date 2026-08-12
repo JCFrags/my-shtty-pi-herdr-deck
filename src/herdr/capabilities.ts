@@ -32,6 +32,7 @@ const MANDATORY = [
   "worktree.remove",
 ];
 const OPTIONAL = [
+  "workspace.create",
   "pane.report_metadata",
   "agent.prompt",
   "agent.wait",

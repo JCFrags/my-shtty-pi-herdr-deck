@@ -56,7 +56,15 @@ test("M2 production broker and CLI registration proves proof, late deadline, and
       new HerdrService({
         store,
         cli,
-        provisioner: new HerdrProvisioner(cli, prompts, () => [], true),
+        provisioner: new HerdrProvisioner(
+          cli,
+          prompts,
+          () => [],
+          true,
+          undefined,
+          undefined,
+          { validate: async () => undefined },
+        ),
       }),
   });
   try {
