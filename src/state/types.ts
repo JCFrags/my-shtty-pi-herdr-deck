@@ -84,6 +84,13 @@ export interface Run {
   terminalReason?: ErrorSummary;
   cancelled?: boolean;
 }
+export interface AgentModelMetadata {
+  profileId?: "manager" | "subagent";
+  placement?: "current-workspace" | "new-workspace";
+  provider?: string;
+  modelId?: string;
+  thinkingLevel?: string;
+}
 export interface Agent {
   id: string;
   state: AgentState;
@@ -94,6 +101,10 @@ export interface Agent {
   displayName?: string;
   herdrName?: string;
   profileId?: string;
+  requestedModel?: AgentModelMetadata;
+  effectiveModel?: AgentModelMetadata;
+  actualModel?: AgentModelMetadata;
+  modelPolicyHash?: string;
   terminalId?: string;
   paneId?: string;
   workspaceId?: string;
@@ -142,6 +153,16 @@ export interface Workflow {
     "created" | "running" | "blocked" | "succeeded" | "failed" | "cancelled";
   taskIds: string[];
 }
+export interface AgentGroup {
+  id: string;
+  name: string;
+  agentIds: string[];
+  state: "open" | "stopped" | "closed";
+  createdAt: string;
+  createdBy: string;
+  stoppedAt?: string;
+  closedAt?: string;
+}
 export interface OrchestrationState {
   schemaVersion: number;
   lastEventSeq: number;
@@ -152,6 +173,7 @@ export interface OrchestrationState {
   workflows: Record<string, Workflow>;
   results?: Record<string, ResultRecord>;
   questions?: Record<string, QuestionRecord>;
+  groups?: Record<string, AgentGroup>;
   herdrResources?: Record<
     string,
     {

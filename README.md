@@ -43,6 +43,16 @@ npm run validate
 
 The build emits the Pi extension and runtime under `dist/`. Validation runs type checks, schema checks, the static release-document check, the build, unit and integration tests, and the package smoke test. Tests use local fakes and do not need a live Pi or Herdr process.
 
+## Managed model and placement policy
+
+A task agent uses `current-workspace` placement by default. It starts in a new visible tab in the authenticated parent workspace. The default `subagent` model profile is `openai-codex/gpt-5.6-luna` with `medium` thinking.
+
+A caller can request `new-workspace` placement with the `manager` model profile. Herdr creates the visible workspace before Pi starts. The default manager selection is `openai-codex/gpt-5.6-sol` with `medium` thinking. A worktree task uses the new workspace that Herdr creates for the worktree.
+
+The broker resolves task-profile compatibility and the model allowlist first. The provisioner then reads the installed Pi model catalog and CLI thinking capabilities before it creates registration files or Herdr resources. Pi starts with explicit `--provider`, provider-qualified `--model`, and `--thinking` arguments. Managed registration must report the same provider, model, and thinking level. A mismatch fails registration and compensates the pending visible resources.
+
+Broker configuration can override the `manager` and `subagent` selections, the allowlist, and task-profile compatibility through `modelPolicy`. The broker reads `~/.config/pi-herdr-orchestrator/config.json` by default. Set `PI_HERDR_ORCH_CONFIG_PATH` to use a different owner-controlled file. The effective selection must be in the allowlist. The `max` thinking level is not permitted.
+
 ## Link the Herdr plugin and run startup
 
 Confirm that Herdr is version 0.8.0 or newer. Then link the reviewed package root:
@@ -157,7 +167,7 @@ The extension does not serialize credentials, environment variables, prompts, to
 
 Retained registration files have count, size, age, type, ownership, mode, symlink, replacement, and hard-link admission checks. Normal uninstall preserves state. Data deletion is a separate owner-approved operation after the broker and managed agents stop.
 
-See [docs/OPERATIONS_M7.md](docs/OPERATIONS_M7.md) for recovery, export, retention, and operation-plan details. See [docs/OPERATIONS_M7_RELEASE.md](docs/OPERATIONS_M7_RELEASE.md) for the non-live release rehearsal.
+See [docs/OPERATIONS_M7.md](docs/OPERATIONS_M7.md) for recovery, export, retention, and operation-plan details. See [docs/OPERATIONS_M7_RELEASE.md](docs/OPERATIONS_M7_RELEASE.md) for the non-live release rehearsal. See [docs/INSTALL_CONFIG_ARCHIVE.md](docs/INSTALL_CONFIG_ARCHIVE.md) for concise local install, reload, configuration, and legacy archive rules.
 
 ## Roll back a local package change
 

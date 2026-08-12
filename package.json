@@ -27,6 +27,7 @@
     "SECURITY.md",
     "LICENSE",
     "docs",
+    "archive",
     "scripts"
   ],
   "scripts": {
@@ -35,7 +36,7 @@
     "build": "npm run clean && tsc && cp -r schemas profiles workflows examples dist/",
     "test": "node --test dist/tests/unit/*.test.js",
     "test:unit": "node --test dist/tests/unit/*.test.js",
-    "test:integration": "node --test dist/tests/integration/*.test.js",
+    "test:integration": "PI_BIN_PATH=$PWD/tests/fixtures/fake-pi-capabilities.mjs node --test dist/tests/integration/*.test.js",
     "smoke:package": "node scripts/package-smoke.mjs",
     "validate": "npm run check && npm run build && npm run test:unit && npm run test:integration && npm run smoke:package",
     "test:schemas": "node scripts/schema-check.mjs",

@@ -13,6 +13,18 @@ import { createId } from "../../src/shared/ids.js";
 import { EventStore } from "../../src/state/event-store.js";
 import { Broker } from "../../src/broker/broker.js";
 
+function testProvisioner(cli: HerdrCli, root: string): HerdrProvisioner {
+  return new HerdrProvisioner(
+    cli,
+    root,
+    undefined,
+    false,
+    undefined,
+    undefined,
+    { validate: async () => undefined },
+  );
+}
+
 const methods = [
   "tab.create",
   "tab.close",
@@ -109,7 +121,7 @@ test("M2 fake stack persists provisioning and compensates the unused initial tab
     const service = new HerdrService({
       store,
       cli,
-      provisioner: new HerdrProvisioner(cli, promptRoot),
+      provisioner: testProvisioner(cli, promptRoot),
     });
     const result = await service.provision({
       agentId,
@@ -176,7 +188,7 @@ test("M2 authenticated broker routing drives production Herdr service and startu
       new HerdrService({
         store,
         cli,
-        provisioner: new HerdrProvisioner(cli, join(root, "prompts")),
+        provisioner: testProvisioner(cli, join(root, "prompts")),
       }),
   });
   try {
@@ -341,7 +353,7 @@ test("M2 fake stack leaves no resources at each creation fault boundary", async 
         fakeCapabilities(),
       );
       await assert.rejects(async () =>
-        new HerdrProvisioner(cli, promptRoot).provision({
+        testProvisioner(cli, promptRoot).provision({
           agentId: createId("agt"),
           ...(await provisionOptions()),
         }),

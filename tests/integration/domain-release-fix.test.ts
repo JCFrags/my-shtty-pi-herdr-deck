@@ -336,7 +336,10 @@ async function setupAbortCase(
           sessionId: "parent-session",
           sessionName: "parent",
           capabilities: {},
-          state: {},
+          state: {
+            model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+            thinkingLevel: "medium",
+          },
         },
       }),
     );
@@ -412,7 +415,10 @@ async function setupAbortCase(
           sessionId: "abort-session",
           sessionName: "child",
           capabilities: {},
-          state: {},
+          state: {
+            model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+            thinkingLevel: "medium",
+          },
         },
       }),
     );
@@ -743,7 +749,10 @@ async function setupProvisionCase(
           sessionId: "parent-session",
           sessionName: "parent",
           capabilities: {},
-          state: {},
+          state: {
+            model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+            thinkingLevel: "medium",
+          },
         },
       }),
     );

@@ -466,7 +466,10 @@ test("broker domain wire persists correlated result, question, workflow, and rep
           sessionId: "session",
           sessionName: "primary",
           capabilities: {},
-          state: {},
+          state: {
+            model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+            thinkingLevel: "medium",
+          },
         },
       }),
     );
@@ -701,7 +704,10 @@ test("production broker restarts an open question from its durable absolute dead
           sessionId: "session-timeout",
           sessionName: "timeout",
           capabilities: {},
-          state: {},
+          state: {
+            model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+            thinkingLevel: "medium",
+          },
         },
       }),
     );
@@ -820,7 +826,10 @@ test("production broker restarts an open question from its durable absolute dead
           sessionId: "session-expired",
           sessionName: "expired",
           capabilities: {},
-          state: {},
+          state: {
+            model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+            thinkingLevel: "medium",
+          },
         },
       }),
     );
@@ -960,7 +969,10 @@ test("production broker immediately terminalizes an already expired durable ques
           sessionId: "session-timeout",
           sessionName: "timeout",
           capabilities: {},
-          state: {},
+          state: {
+            model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+            thinkingLevel: "medium",
+          },
         },
       }),
     );
@@ -1106,7 +1118,10 @@ test("production broker task cancellation terminalizes an open question durably"
           sessionId: "session-timeout",
           sessionName: "timeout",
           capabilities: {},
-          state: {},
+          state: {
+            model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+            thinkingLevel: "medium",
+          },
         },
       }),
     );
@@ -1241,7 +1256,10 @@ test("production A to B queue races do not resurrect or provision cancelled work
             sessionId: "ab-root",
             sessionName: "ab-root",
             capabilities: {},
-            state: {},
+            state: {
+              model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+              thinkingLevel: "medium",
+            },
           },
         }),
       );
@@ -1329,7 +1347,10 @@ test("production A to B queue races do not resurrect or provision cancelled work
             sessionId: "ab-a",
             sessionName: "ab-a",
             capabilities: {},
-            state: {},
+            state: {
+              model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+              thinkingLevel: "medium",
+            },
           },
         }),
       );
@@ -1588,7 +1609,10 @@ test("production A to B queue races do not resurrect or provision cancelled work
               sessionId: "ab-b",
               sessionName: "ab-b",
               capabilities: {},
-              state: {},
+              state: {
+                model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+                thinkingLevel: "medium",
+              },
             },
           }),
         );
@@ -1694,7 +1718,10 @@ test("production mutation queue orders cancel and run creation without resurrect
             sessionId: "parent-session",
             sessionName: "parent",
             capabilities: {},
-            state: {},
+            state: {
+              model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+              thinkingLevel: "medium",
+            },
           },
         }),
       );
@@ -1780,7 +1807,10 @@ test("production mutation queue orders cancel and run creation without resurrect
             sessionId: "queue-child",
             sessionName: "queue-child",
             capabilities: {},
-            state: {},
+            state: {
+              model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+              thinkingLevel: "medium",
+            },
           },
         }),
       );
@@ -1951,7 +1981,10 @@ test("production managed identity rejects duplicate hello and reconnects exactly
           sessionId: "parent-session",
           sessionName: "parent",
           capabilities: {},
-          state: {},
+          state: {
+            model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+            thinkingLevel: "medium",
+          },
         },
       }),
     );
@@ -2032,7 +2065,10 @@ test("production managed identity rejects duplicate hello and reconnects exactly
           sessionId: "managed-identity",
           sessionName: "managed-identity",
           capabilities: {},
-          state: {},
+          state: {
+            model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+            thinkingLevel: "medium",
+          },
         },
       }),
     );
@@ -2113,7 +2149,10 @@ test("production managed identity rejects duplicate hello and reconnects exactly
           sessionId: "managed-identity",
           sessionName: "managed-identity",
           capabilities: {},
-          state: {},
+          state: {
+            model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+            thinkingLevel: "medium",
+          },
         },
       }),
     );
@@ -2202,7 +2241,10 @@ test("production strict managed child task.cancel-versus-timeout race", async ()
           sessionId: "parent-session",
           sessionName: "parent",
           capabilities: {},
-          state: {},
+          state: {
+            model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+            thinkingLevel: "medium",
+          },
         },
       }),
     );
@@ -2354,7 +2396,10 @@ test("production strict managed child task.cancel-versus-timeout race", async ()
           sessionId: "strict-child",
           sessionName: "strict-child",
           capabilities: {},
-          state: {},
+          state: {
+            model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+            thinkingLevel: "medium",
+          },
         },
       }),
     );
@@ -2504,7 +2549,10 @@ test("production settled managed run times out without adapter abort", async () 
           sessionId: "parent-session",
           sessionName: "parent",
           capabilities: {},
-          state: {},
+          state: {
+            model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+            thinkingLevel: "medium",
+          },
         },
       }),
     );
@@ -2614,7 +2662,10 @@ test("production settled managed run times out without adapter abort", async () 
           sessionId: "settled-timeout",
           sessionName: "settled-timeout",
           capabilities: {},
-          state: {},
+          state: {
+            model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+            thinkingLevel: "medium",
+          },
         },
       }),
     );
@@ -2731,7 +2782,10 @@ test("production strict child receives durable task wall-deadline delivery", asy
           sessionId: "parent-session",
           sessionName: "parent",
           capabilities: {},
-          state: {},
+          state: {
+            model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+            thinkingLevel: "medium",
+          },
         },
       }),
     );
@@ -2879,7 +2933,10 @@ test("production strict child receives durable task wall-deadline delivery", asy
           sessionId: "strict-child",
           sessionName: "strict-child",
           capabilities: {},
-          state: {},
+          state: {
+            model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+            thinkingLevel: "medium",
+          },
         },
       }),
     );
@@ -3048,7 +3105,10 @@ test("production managed socket accepts abort without a current Herdr resource",
             sessionId: "parent-session",
             sessionName: "parent",
             capabilities: {},
-            state: {},
+            state: {
+              model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+              thinkingLevel: "medium",
+            },
           },
         }),
       );
@@ -3161,7 +3221,10 @@ test("production managed socket accepts abort without a current Herdr resource",
             sessionId: "abort-child",
             sessionName: "abort-child",
             capabilities: {},
-            state: {},
+            state: {
+              model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+              thinkingLevel: "medium",
+            },
           },
         }),
       );
@@ -3271,7 +3334,10 @@ test("production managed cancellation falls back to one exact Herdr stop", async
             sessionId: "parent-session",
             sessionName: "parent",
             capabilities: {},
-            state: {},
+            state: {
+              model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+              thinkingLevel: "medium",
+            },
           },
         }),
       );
@@ -3402,7 +3468,10 @@ test("production managed cancellation falls back to one exact Herdr stop", async
             sessionId: "fallback-child",
             sessionName: "fallback-child",
             capabilities: {},
-            state: {},
+            state: {
+              model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+              thinkingLevel: "medium",
+            },
           },
         }),
       );
@@ -3527,7 +3596,10 @@ test("held adapter abort skips stop after replacement or resource-byte mutation"
             sessionId: "parent-session",
             sessionName: "parent",
             capabilities: {},
-            state: {},
+            state: {
+              model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+              thinkingLevel: "medium",
+            },
           },
         }),
       );
@@ -3640,7 +3712,10 @@ test("held adapter abort skips stop after replacement or resource-byte mutation"
             sessionId: "held-child",
             sessionName: "held-child",
             capabilities: {},
-            state: {},
+            state: {
+              model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+              thinkingLevel: "medium",
+            },
           },
         }),
       );
@@ -3910,7 +3985,10 @@ async function runHeldGuardCase(guardCase: HeldGuardCase): Promise<void> {
           sessionId: "parent-session",
           sessionName: "parent",
           capabilities: {},
-          state: {},
+          state: {
+            model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+            thinkingLevel: "medium",
+          },
         },
       }),
     );
@@ -4023,7 +4101,10 @@ async function runHeldGuardCase(guardCase: HeldGuardCase): Promise<void> {
           sessionId: "guard-child",
           sessionName: "guard-child",
           capabilities: {},
-          state: {},
+          state: {
+            model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+            thinkingLevel: "medium",
+          },
         },
       }),
     );

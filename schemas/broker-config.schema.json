@@ -173,6 +173,36 @@
         }
       }
     },
+    "modelPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "profiles": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "manager": { "$ref": "#/$defs/modelSelection" },
+            "subagent": { "$ref": "#/$defs/modelSelection" }
+          }
+        },
+        "allowlist": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/modelSelection" }
+        },
+        "compatibility": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[a-z][a-z0-9_-]{0,63}$" },
+          "additionalProperties": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "enum": ["manager", "subagent"] }
+          }
+        }
+      }
+    },
     "ui": {
       "type": "object",
       "additionalProperties": false,
@@ -206,6 +236,20 @@
           "minimum": 1,
           "maximum": 50,
           "default": 5
+        }
+      }
+    }
+  },
+  "$defs": {
+    "modelSelection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "modelId", "thinkingLevel"],
+      "properties": {
+        "provider": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "modelId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "thinkingLevel": {
+          "enum": ["off", "minimal", "low", "medium", "high", "xhigh"]
         }
       }
     }

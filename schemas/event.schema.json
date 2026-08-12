@@ -64,6 +64,10 @@
           "type": "string",
           "maxLength": 64
         },
+        "groupId": {
+          "type": "string",
+          "pattern": "^grp_[0-9A-HJKMNP-TV-Z]{26}$"
+        },
         "taskId": {
           "type": "string",
           "maxLength": 64

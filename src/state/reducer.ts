@@ -30,6 +30,7 @@ export const emptyState = (): OrchestrationState => ({
   workflows: {},
   results: {},
   questions: {},
+  groups: {},
   herdrResources: {},
   idempotency: {},
 });
@@ -79,6 +80,9 @@ const known = new Set([
   "question.answered",
   "question.timed_out",
   "question.cancelled",
+  "group.created",
+  "group.stopped",
+  "group.closed",
   "workflow.created",
   "workflow.state_changed",
   "scheduler.admitted",
@@ -100,6 +104,7 @@ export function reduce(
     lastEventHash: "hash" in event ? event.hash : state.lastEventHash,
     results: state.results ?? {},
     questions: state.questions ?? {},
+    groups: state.groups ?? {},
   };
   const p = event.payload as Record<string, unknown>;
   const taskId = event.entityRefs?.taskId;
@@ -208,6 +213,18 @@ export function reduce(
           ...(typeof p.profileId === "string"
             ? { profileId: p.profileId }
             : {}),
+          ...(p.requestedModel && typeof p.requestedModel === "object"
+            ? { requestedModel: p.requestedModel }
+            : {}),
+          ...(p.effectiveModel && typeof p.effectiveModel === "object"
+            ? { effectiveModel: p.effectiveModel }
+            : {}),
+          ...(p.actualModel && typeof p.actualModel === "object"
+            ? { actualModel: p.actualModel }
+            : {}),
+          ...(typeof p.modelPolicyHash === "string"
+            ? { modelPolicyHash: p.modelPolicyHash }
+            : {}),
           ...(typeof p.paneId === "string" ? { paneId: p.paneId } : {}),
           ...(typeof p.terminalId === "string"
             ? { terminalId: p.terminalId }
@@ -260,6 +277,9 @@ export function reduce(
           ...(typeof p.cwd === "string" ? { cwd: p.cwd } : {}),
           ...(typeof p.worktreeId === "string"
             ? { worktreeId: p.worktreeId }
+            : {}),
+          ...(p.actualModel && typeof p.actualModel === "object"
+            ? { actualModel: p.actualModel }
             : {}),
           ...(typeof p.piSessionId === "string"
             ? { piSessionId: p.piSessionId }
@@ -632,6 +652,50 @@ export function reduce(
     case "scheduler.blocked":
     case "task.collected":
       break;
+    case "group.created": {
+      const id = event.entityRefs?.groupId ?? String(p.groupId);
+      if (
+        !id ||
+        next.groups![id] ||
+        typeof p.name !== "string" ||
+        !Array.isArray(p.agentIds) ||
+        p.agentIds.length === 0 ||
+        p.agentIds.some((agentId) => typeof agentId !== "string") ||
+        typeof p.createdAt !== "string"
+      )
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Group payload is invalid.",
+        );
+      next.groups = { ...next.groups };
+      next.groups[id] = {
+        id,
+        name: p.name,
+        agentIds: [...p.agentIds] as string[],
+        state: "open",
+        createdAt: p.createdAt,
+        createdBy: event.actor.principalId,
+      };
+      break;
+    }
+    case "group.stopped":
+    case "group.closed": {
+      const id = event.entityRefs?.groupId ?? String(p.groupId);
+      const group = next.groups![id];
+      const closed = event.type === "group.closed";
+      if (!group || group.state === "closed" || (closed && p.confirm !== true))
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Group transition is invalid.",
+        );
+      next.groups = { ...next.groups };
+      next.groups[id] = {
+        ...group,
+        state: closed ? "closed" : "stopped",
+        ...(closed ? { closedAt: String(p.at) } : { stoppedAt: String(p.at) }),
+      };
+      break;
+    }
     case "workflow.created": {
       const id = String(p.workflowId);
       if (!id || next.workflows[id])

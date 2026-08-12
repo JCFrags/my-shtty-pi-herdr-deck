@@ -104,7 +104,7 @@ test("M6 deck integration applies a snapshot and ordered replay without duplicat
       client.store.state,
       120,
     ).join("\n"),
-    /Result: not available/,
+    /Result: evt-result/,
   );
 
   broker.publish(blocked);
@@ -168,7 +168,11 @@ test("M6 deck actions preserve target identity and closure does not issue a work
   await actions.run("focus", agentTarget());
   await actions.run("stop", agentTarget());
   await actions.run("cancelTask", taskTarget());
-  await actions.run("answer", { questionId: "question-1" }, "yes");
+  await actions.run(
+    "answer",
+    { questionId: "question-1" },
+    { optionId: "yes", text: null },
+  );
   client.stop("Deck closed.");
 
   assert.deepEqual(
@@ -176,7 +180,7 @@ test("M6 deck actions preserve target identity and closure does not issue a work
     [
       "events.subscribe",
       "herdr.focus",
-      "herdr.stop",
+      "agent.stop",
       "task.cancel",
       "question.answer",
     ],
@@ -187,10 +191,113 @@ test("M6 deck actions preserve target identity and closure does not issue a work
     sessionId: "session-main",
     generation: 2,
   });
+  assert.deepEqual(broker.requests[2]!.params as Record<string, unknown>, {
+    agentId: "agt_alpha",
+    reason: "Stopped from Pi Herdr Deck.",
+    force: false,
+  });
+  assert.deepEqual(broker.requests[3]!.params as Record<string, unknown>, {
+    taskId: "tsk_build",
+    reason: "Cancelled from Pi Herdr Deck.",
+    cascade: false,
+  });
+  assert.deepEqual(broker.requests[4]!.params as Record<string, unknown>, {
+    questionId: "question-1",
+    answer: { optionId: "yes", text: null },
+  });
   assert.equal(
-    broker.requests.some((request) => request.method === "herdr.close"),
+    broker.requests.some((request) => request.method === "agent.close"),
     false,
   );
+});
+
+test("deck actions use the managed broker control methods", async () => {
+  const broker = new FakeDeckBroker();
+  const client = new BrokerClient({
+    socketPath: "/tmp/m6-managed-actions.sock",
+    secret: "fixture-secret",
+    socketFactory: () => broker.createSocket(),
+  });
+  await client.start();
+  await waitForM6(() => client.status === "connected");
+  const actions = new DeckActions(client);
+  const target = agentTarget();
+
+  await actions.run("prompt", target, "Implement this.");
+  await actions.run("ask", target, "Which option?");
+  await actions.run("interrupt", target, "Operator request.");
+  await actions.run("setModel", target, "openai-codex/gpt-5.6-sol");
+  await actions.run("setThinking", target, "medium");
+  await actions.run("close", target);
+
+  assert.deepEqual(
+    broker.requests.slice(1).map((request) => request.method),
+    [
+      "agent.prompt",
+      "agent.ask",
+      "agent.interrupt",
+      "agent.set_model",
+      "agent.set_thinking",
+      "agent.close",
+    ],
+  );
+  assert.deepEqual(broker.requests[1]!.params as Record<string, unknown>, {
+    agentId: "agt_alpha",
+    generation: 2,
+    message: "Implement this.",
+    timeoutMs: 10_000,
+  });
+  assert.deepEqual(broker.requests[2]!.params as Record<string, unknown>, {
+    agentId: "agt_alpha",
+    message: "Which option?",
+    timeoutMs: 120_000,
+  });
+  assert.deepEqual(broker.requests[6]!.params as Record<string, unknown>, {
+    agentId: "agt_alpha",
+    reason: "Closed from Pi Herdr Deck.",
+    confirm: true,
+  });
+  client.stop();
+});
+
+test("broker deck keyboard entry prompts and confirms close", async () => {
+  const broker = new FakeDeckBroker();
+  const client = new BrokerClient({
+    socketPath: "/tmp/m6-keyboard-actions.sock",
+    secret: "fixture-secret",
+    socketFactory: () => broker.createSocket(),
+  });
+  await client.start();
+  await waitForM6(() => client.status === "connected");
+  const app = new BrokerDeckApp({
+    client,
+    requestRender: () => undefined,
+    getHeight: () => 60,
+  });
+
+  app.handleInput("p");
+  assert.match(app.render(120).join("\n"), /PROMPT: /);
+  app.handleInput("Build now.");
+  app.handleInput("\r");
+  await waitForM6(() =>
+    broker.requests.some((request) => request.method === "agent.prompt"),
+  );
+  assert.equal(
+    (
+      broker.requests.find((request) => request.method === "agent.prompt")
+        ?.params as { message: string }
+    ).message,
+    "Build now.",
+  );
+
+  app.handleInput("x");
+  assert.match(app.render(120).join("\n"), /Press x again to close Alpha/);
+  app.handleInput("x");
+  await waitForM6(() =>
+    broker.requests.some((request) => request.method === "agent.close"),
+  );
+  app.dispose();
+  client.stop();
 });
 
 test("M6 keyboard and mouse activation have the same enabled-control result", () => {

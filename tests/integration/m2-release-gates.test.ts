@@ -37,6 +37,7 @@ import {
 import { HerdrProvisioner } from "../../src/herdr/provisioner.js";
 
 const agentId = () => createId("agt");
+const modelValidator = { validate: async () => undefined };
 
 test("managed token file is owner-only and verifies by digest", async () => {
   const root = await mkdtemp(join(tmpdir(), "m2-token-"));
@@ -90,7 +91,15 @@ test("registration retention inventory is redacted and bounded", async () => {
   const root = await mkdtemp(join(tmpdir(), "m2-retention-budget-"));
   for (let i = 0; i < 127; i += 1)
     await writeFile(join(root, `.prompt-${i}`), "retained\n", { mode: 0o600 });
-  const provisioner = new HerdrProvisioner({} as never, root);
+  const provisioner = new HerdrProvisioner(
+    {} as never,
+    root,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    modelValidator,
+  );
   const status = await provisioner.registrationRetentionStatus();
   assert.equal(status.files, 127);
   assert.equal(status.unsafeFiles, 0);
@@ -122,10 +131,26 @@ test("registration retention admission serializes concurrent provisions", async 
     },
     startPi: async (input: { paneId: string }) => ({ pane_id: input.paneId }),
   } as never;
-  const provisioner = new HerdrProvisioner(cli, root, () => [], true);
+  const provisioner = new HerdrProvisioner(
+    cli,
+    root,
+    () => [],
+    true,
+    undefined,
+    undefined,
+    modelValidator,
+  );
   const aliasRoot = `${root}-alias`;
   await symlink(root, aliasRoot);
-  const aliasProvisioner = new HerdrProvisioner(cli, aliasRoot, () => [], true);
+  const aliasProvisioner = new HerdrProvisioner(
+    cli,
+    aliasRoot,
+    () => [],
+    true,
+    undefined,
+    undefined,
+    modelValidator,
+  );
   const attempts = await Promise.allSettled(
     Array.from({ length: 65 }, (_, index) =>
       (index % 2 === 0 ? provisioner : aliasProvisioner).provision({
@@ -159,7 +184,15 @@ test("registration retention age and unsafe files fail provisioning closed", asy
   await writeFile(old, "retained\n", { mode: 0o600 });
   const expired = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
   await utimes(old, expired, expired);
-  const provisioner = new HerdrProvisioner({} as never, root);
+  const provisioner = new HerdrProvisioner(
+    {} as never,
+    root,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    modelValidator,
+  );
   await assert.rejects(
     () =>
       provisioner.provision({

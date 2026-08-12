@@ -48,22 +48,81 @@ function boundedText(value: unknown, max: number): value is string {
 function validTaskProject(value: unknown): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const project = value as Record<string, unknown>;
-  const values =
-    boundedText(project.cwd, 4096) && boundedText(project.workspaceId, 256);
-  if (!values) return false;
-  if (exactKeys(project, ["cwd", "workspaceId"])) return true;
-  if (
-    exactKeys(project, ["cwd", "workspaceId", "isolation"]) &&
-    (project.isolation === "shared-readonly" ||
-      project.isolation === "worktree")
-  )
-    return true;
-  if (!exactKeys(project, ["cwd", "workspaceId", "worktreeId", "isolation"]))
+  if (!boundedText(project.cwd, 4096) || !boundedText(project.workspaceId, 256))
     return false;
+  const hasModelPolicy = Object.hasOwn(project, "requestedSpawnPolicy");
+  const modelPolicyKeys = hasModelPolicy
+    ? ["requestedSpawnPolicy", "effectiveSpawnPolicy", "modelPolicyHash"]
+    : [];
+  const baseKeys = ["cwd", "workspaceId"];
+  if (
+    !exactKeys(project, [...baseKeys, ...modelPolicyKeys]) &&
+    !exactKeys(project, [...baseKeys, "isolation", ...modelPolicyKeys]) &&
+    !exactKeys(project, [
+      ...baseKeys,
+      "worktreeId",
+      "isolation",
+      ...modelPolicyKeys,
+    ])
+  )
+    return false;
+  if (
+    project.isolation !== undefined &&
+    project.isolation !== "shared-readonly" &&
+    project.isolation !== "worktree"
+  )
+    return false;
+  if (project.worktreeId !== undefined && !boundedText(project.worktreeId, 256))
+    return false;
+  if (!hasModelPolicy) return true;
+  const requested = project.requestedSpawnPolicy;
+  const effective = project.effectiveSpawnPolicy;
+  if (
+    !requested ||
+    typeof requested !== "object" ||
+    Array.isArray(requested) ||
+    !effective ||
+    typeof effective !== "object" ||
+    Array.isArray(effective) ||
+    typeof project.modelPolicyHash !== "string" ||
+    !/^[0-9a-f]{64}$/u.test(project.modelPolicyHash)
+  )
+    return false;
+  const requestedRecord = requested as Record<string, unknown>;
+  if (
+    !exactKeys(
+      requestedRecord,
+      ["placement", "modelProfileId"].filter((key) =>
+        Object.hasOwn(requestedRecord, key),
+      ),
+    ) ||
+    (requestedRecord.placement !== undefined &&
+      requestedRecord.placement !== "current-workspace" &&
+      requestedRecord.placement !== "new-workspace") ||
+    (requestedRecord.modelProfileId !== undefined &&
+      requestedRecord.modelProfileId !== "manager" &&
+      requestedRecord.modelProfileId !== "subagent")
+  )
+    return false;
+  const effectiveRecord = effective as Record<string, unknown>;
+  const model = effectiveRecord.model;
   return (
-    boundedText(project.worktreeId, 256) &&
-    (project.isolation === "shared-readonly" ||
-      project.isolation === "worktree")
+    exactKeys(effectiveRecord, ["placement", "modelProfileId", "model"]) &&
+    (effectiveRecord.placement === "current-workspace" ||
+      effectiveRecord.placement === "new-workspace") &&
+    (effectiveRecord.modelProfileId === "manager" ||
+      effectiveRecord.modelProfileId === "subagent") &&
+    !!model &&
+    typeof model === "object" &&
+    !Array.isArray(model) &&
+    exactKeys(model as Record<string, unknown>, [
+      "provider",
+      "modelId",
+      "thinkingLevel",
+    ]) &&
+    boundedText((model as Record<string, unknown>).provider, 128) &&
+    boundedText((model as Record<string, unknown>).modelId, 256) &&
+    boundedText((model as Record<string, unknown>).thinkingLevel, 32)
   );
 }
 const EVENT_KEYS = [
@@ -871,6 +930,9 @@ export class EventStore {
         "question.answered",
         "question.timed_out",
         "question.cancelled",
+        "group.created",
+        "group.stopped",
+        "group.closed",
         "workflow.created",
         "workflow.state_changed",
         "scheduler.admitted",
@@ -884,7 +946,8 @@ export class EventStore {
         refs.runId ??
         refs.workflowId ??
         refs.resultId ??
-        refs.questionId;
+        refs.questionId ??
+        refs.groupId;
       valid =
         typeof refId === "string" &&
         Object.keys(p).every(

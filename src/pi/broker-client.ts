@@ -530,6 +530,15 @@ export class PiBrokerClient {
       ...(state.currentTool !== undefined
         ? { currentTool: state.currentTool }
         : {}),
+      ...(state.model
+        ? {
+            model: {
+              provider: state.model.provider,
+              modelId: state.model.id,
+            },
+          }
+        : {}),
+      ...(state.thinkingLevel ? { thinkingLevel: state.thinkingLevel } : {}),
     };
     const result = await this.request(
       this.#options.token ? "agent.register_managed" : "agent.register_adopted",

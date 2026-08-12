@@ -7,6 +7,9 @@ import { ensurePrivateDirectory, resolveHerdrPaths } from "../shared/paths.js";
 import { brokerStatus, ensureBroker, stopBroker } from "../broker/startup.js";
 import { brokerRequest } from "./client.js";
 import { readPrivateRegular } from "../shared/private-fs.js";
+import { access } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { createProductionHerdrService } from "../herdr/service.js";
 import { loadConfig } from "../ops/config.js";
 import { exportState, planRetention } from "../ops/retention.js";
@@ -139,13 +142,24 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     const config = await loadConfig(file, {
       trustedProject: process.env.PI_HERDR_ORCH_PROJECT_TRUSTED === "1",
     });
-    const policy = new ConfigPolicy({ user: config });
+    const policy = new ConfigPolicy({
+      user: {
+        version: config.version,
+        ...(config.scheduler ? { scheduler: config.scheduler } : {}),
+        ...(config.timeouts ? { timeouts: config.timeouts } : {}),
+        ...(config.retention ? { retention: config.retention } : {}),
+        ...(config.security ? { security: config.security } : {}),
+        ...(config.ui ? { ui: config.ui } : {}),
+        ...(config.logging ? { logging: config.logging } : {}),
+      },
+    });
     console.log(
       JSON.stringify({
         valid: true,
         version: config.version,
         generation: policy.snapshot.generation,
         hash: policy.snapshot.hash,
+        modelPolicy: config.modelPolicy ? "configured" : "default",
       }),
     );
     return;
@@ -319,9 +333,30 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     );
     return;
   }
+  const defaultBrokerConfigPath = join(
+    homedir(),
+    ".config",
+    "pi-herdr-orchestrator",
+    "config.json",
+  );
+  const brokerConfigPath =
+    process.env.PI_HERDR_ORCH_CONFIG_PATH ??
+    ((await access(defaultBrokerConfigPath)
+      .then(() => true)
+      .catch(() => false))
+      ? defaultBrokerConfigPath
+      : undefined);
+  const brokerConfig = brokerConfigPath
+    ? await loadConfig(brokerConfigPath, {
+        trustedProject: process.env.PI_HERDR_ORCH_PROJECT_TRUSTED === "1",
+      })
+    : undefined;
   const broker = new Broker(paths, {
     herdrFactory: (store, resolved) =>
       createProductionHerdrService(store, resolved),
+    ...(brokerConfig?.modelPolicy
+      ? { modelPolicy: brokerConfig.modelPolicy }
+      : {}),
   });
   if (
     command === "recovery" &&

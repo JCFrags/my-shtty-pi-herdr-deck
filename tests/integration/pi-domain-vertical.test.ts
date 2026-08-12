@@ -171,7 +171,11 @@ function piBoundary(
       idle.value = true;
     },
     compact: (options) => options?.onComplete?.(),
-    model: { provider: "test", id: "model", name: "model" },
+    model: {
+      provider: "openai-codex",
+      id: "gpt-5.6-luna",
+      name: "gpt-5.6-luna",
+    },
     thinkingLevel: "medium",
   };
   return { api, context };

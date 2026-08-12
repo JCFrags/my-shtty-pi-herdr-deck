@@ -5,7 +5,16 @@ export type ParentToolName =
   | "agent_get"
   | "agent_prompt"
   | "agent_steer"
+  | "agent_ask"
   | "agent_wait"
+  | "coordination_wait"
+  | "coordination_signal"
+  | "group_create"
+  | "group_list"
+  | "group_get"
+  | "group_wait"
+  | "group_stop"
+  | "group_close"
   | "agent_result"
   | "agent_answer"
   | "agent_interrupt"
@@ -106,6 +115,27 @@ import { parentToolMethod } from "./parent-tool-schema.js";
 function methodForTool(tool: ParentToolName): string {
   return parentToolMethod(tool);
 }
+
+/** Map public tool fields to the broker contract without forwarding aliases. */
+export function mapParentToolInput(
+  tool: ParentToolName,
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  if (
+    tool !== "agent_interrupt" &&
+    tool !== "agent_stop" &&
+    tool !== "agent_close"
+  )
+    return { ...input };
+  const { assignmentGeneration, agentId, runId, reason, ...operation } = input;
+  return {
+    agentId,
+    ...(runId !== undefined ? { runId } : {}),
+    ...(assignmentGeneration !== undefined ? { assignmentGeneration } : {}),
+    ...(reason !== undefined ? { reason } : {}),
+    ...operation,
+  };
+}
 export class ParentToolService {
   readonly #broker: ParentToolBroker;
   readonly #limits: ParentToolLimits;
@@ -146,7 +176,7 @@ export class ParentToolService {
       const result = safeProjection(
         await this.#broker.invoke(
           methodForTool(request.tool),
-          request.input,
+          mapParentToolInput(request.tool, request.input),
           principal,
           request.idempotencyKey,
         ),

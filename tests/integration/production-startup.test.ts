@@ -208,6 +208,7 @@ test("built separate processes start, reuse, adopt, expose tools, and stop the p
   const temporary = await mkdtemp(join(tmpdir(), "orch-production-startup-"));
   const herdrSocket = join(temporary, "herdr.sock");
   const fakeBinary = join(temporary, "fake-herdr.mjs");
+  const fakePiBinary = join(temporary, "pi");
   const fakeState = join(temporary, "fake-herdr-state.json");
   const runtimeBase = join(temporary, "runtime");
   const stateBase = join(temporary, "state");
@@ -280,6 +281,23 @@ test("built separate processes start, reuse, adopt, expose tools, and stop the p
   };
   await writeFile(fakeBinary, fakeHerdrProgram(), { mode: 0o700 });
   await writeFile(
+    fakePiBinary,
+    `#!/usr/bin/env node
+if (process.argv.includes("--help")) {
+  console.log("  --thinking <level> off minimal low medium high");
+  process.exit(0);
+}
+if (process.argv.includes("--list-models")) {
+  console.log("provider model context output reasoning images");
+  console.log("openai-codex gpt-5.6-luna 1m 128k yes no");
+  console.log("openai-codex gpt-5.6-sol 1m 128k yes no");
+  process.exit(0);
+}
+process.exit(1);
+`,
+    { mode: 0o700 },
+  );
+  await writeFile(
     fakeState,
     JSON.stringify({ schema: fixture, snapshot, calls: [], provisions: [] }),
     { mode: 0o600 },
@@ -318,7 +336,7 @@ test("built separate processes start, reuse, adopt, expose tools, and stop the p
   await chmod(herdrSocket, 0o600);
 
   const environment: NodeJS.ProcessEnv = {
-    PATH: process.env.PATH,
+    PATH: `${temporary}:${process.env.PATH ?? ""}`,
     HOME: process.env.HOME,
     USER: process.env.USER,
     LOGNAME: process.env.LOGNAME,
@@ -1370,4 +1388,4 @@ test("fresh readiness finalization failure stops its exact child and preserves r
   }
 });
 
-const PARENT_TOOL_COUNT = 16;
+const PARENT_TOOL_COUNT = 25;
