@@ -25,6 +25,7 @@ export interface DeckResult {
   status: "accepted" | "failed" | "missing" | "pending";
   summary?: string;
   evidence?: string[];
+  findings?: string[];
   tests?: string[];
   artifacts?: string[];
   unresolved?: string[];

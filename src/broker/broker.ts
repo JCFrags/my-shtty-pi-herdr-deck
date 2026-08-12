@@ -1534,10 +1534,22 @@ export class Broker {
                   tasks: Object.values(this.store.state.tasks).filter((item) =>
                     this.#canAccessTaskSync(principal, item.id),
                   ),
+                  runs: Object.values(this.store.state.runs).filter(
+                    (item) =>
+                      this.#canAccessTaskSync(principal, item.taskId) &&
+                      (!item.agentId ||
+                        this.#canAccessAgentSync(principal, item.agentId)),
+                  ),
                   workflows: Object.values(this.store.state.workflows).filter(
                     (item) =>
                       item.taskIds.some((taskId) =>
                         this.#canAccessTaskSync(principal, taskId),
+                      ),
+                  ),
+                  groups: Object.values(this.store.state.groups ?? {}).filter(
+                    (item) =>
+                      item.agentIds.some((agentId) =>
+                        this.#canAccessAgentSync(principal, agentId),
                       ),
                   ),
                   questions: Object.values(

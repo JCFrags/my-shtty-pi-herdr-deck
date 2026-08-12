@@ -92,12 +92,12 @@ export class DeckActions {
         return this.client.request("herdr.focus", this.paneGuard(target));
       case "interrupt":
         return this.client.request("agent.interrupt", {
-          ...identity,
+          ...this.controlIdentity(target),
           ...(typeof value === "string" && value ? { reason: value } : {}),
         });
       case "stop":
         return this.client.request("agent.stop", {
-          ...identity,
+          ...this.controlIdentity(target),
           reason:
             typeof value === "string" && value
               ? value
@@ -106,7 +106,7 @@ export class DeckActions {
         });
       case "close":
         return this.client.request("agent.close", {
-          ...identity,
+          ...this.controlIdentity(target),
           reason:
             typeof value === "string" && value
               ? value
@@ -140,8 +140,9 @@ export class DeckActions {
         });
       case "ask":
         return this.client.request("agent.ask", {
-          ...identity,
-          question: typeof value === "string" ? value : "",
+          agentId: target.agent!.id,
+          message: typeof value === "string" ? value : "",
+          timeoutMs: 120_000,
         });
       case "steer":
       case "followUp":
@@ -196,6 +197,17 @@ export class DeckActions {
       ...(target.generation === undefined
         ? {}
         : { generation: target.generation }),
+    };
+  }
+
+  private controlIdentity(target: ActionTarget): Record<string, unknown> {
+    const runId = target.runId ?? target.agent?.currentRunId;
+    const assignmentGeneration = target.agent?.currentAssignmentGeneration;
+    return {
+      agentId: target.agent!.id,
+      ...(runId && assignmentGeneration !== undefined
+        ? { runId, assignmentGeneration }
+        : {}),
     };
   }
 

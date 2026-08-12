@@ -319,9 +319,18 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     );
     return;
   }
+  const brokerConfigPath = process.env.PI_HERDR_ORCH_CONFIG_PATH;
+  const brokerConfig = brokerConfigPath
+    ? await loadConfig(brokerConfigPath, {
+        trustedProject: process.env.PI_HERDR_ORCH_PROJECT_TRUSTED === "1",
+      })
+    : undefined;
   const broker = new Broker(paths, {
     herdrFactory: (store, resolved) =>
       createProductionHerdrService(store, resolved),
+    ...(brokerConfig?.modelPolicy
+      ? { modelPolicy: brokerConfig.modelPolicy }
+      : {}),
   });
   if (
     command === "recovery" &&

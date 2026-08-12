@@ -30,6 +30,22 @@ const array = <T>(value: unknown): T[] =>
   Array.isArray(value)
     ? (value as T[]).slice(0, LIMITS.maxCollectionItems)
     : [];
+const displayArray = (value: unknown): string[] =>
+  array<unknown>(value).flatMap((item) => {
+    if (typeof item === "string") return [item];
+    const record = asRecord(item);
+    if (!record) return [];
+    const parts = [
+      idFrom(record.title),
+      idFrom(record.description),
+      idFrom(record.command),
+      idFrom(record.path),
+      idFrom(record.subject),
+      idFrom(record.status),
+      idFrom(record.evidence),
+    ].filter((part): part is string => part !== undefined);
+    return parts.length > 0 ? [parts.join(" — ")] : [];
+  });
 const stringArray = (value: unknown): string[] =>
   array<unknown>(value).filter(
     (item): item is string => typeof item === "string",
@@ -77,6 +93,7 @@ const cloneState = (state: DeckState): DeckState => ({
       {
         ...value,
         ...(value.evidence ? { evidence: [...value.evidence] } : {}),
+        ...(value.findings ? { findings: [...value.findings] } : {}),
         ...(value.tests ? { tests: [...value.tests] } : {}),
         ...(value.artifacts ? { artifacts: [...value.artifacts] } : {}),
         ...(value.unresolved ? { unresolved: [...value.unresolved] } : {}),
@@ -339,11 +356,12 @@ export class DeckStore {
         value.status === "pending"
           ? value.status
           : "accepted",
-      ...(value.evidence ? { evidence: stringArray(value.evidence) } : {}),
-      ...(value.tests ? { tests: stringArray(value.tests) } : {}),
-      ...(value.artifacts ? { artifacts: stringArray(value.artifacts) } : {}),
+      ...(value.evidence ? { evidence: displayArray(value.evidence) } : {}),
+      ...(value.findings ? { findings: displayArray(value.findings) } : {}),
+      ...(value.tests ? { tests: displayArray(value.tests) } : {}),
+      ...(value.artifacts ? { artifacts: displayArray(value.artifacts) } : {}),
       ...(value.unresolved
-        ? { unresolved: stringArray(value.unresolved) }
+        ? { unresolved: displayArray(value.unresolved) }
         : {}),
     };
   }
@@ -376,16 +394,19 @@ export class DeckStore {
           ? { summary: String(data.summary ?? body.summary) }
           : {}),
         ...(data.evidence !== undefined || body.evidence !== undefined
-          ? { evidence: stringArray(data.evidence ?? body.evidence) }
+          ? { evidence: displayArray(data.evidence ?? body.evidence) }
+          : {}),
+        ...(data.findings !== undefined || body.findings !== undefined
+          ? { findings: displayArray(data.findings ?? body.findings) }
           : {}),
         ...(data.tests !== undefined || body.tests !== undefined
-          ? { tests: stringArray(data.tests ?? body.tests) }
+          ? { tests: displayArray(data.tests ?? body.tests) }
           : {}),
         ...(data.artifacts !== undefined || body.artifacts !== undefined
-          ? { artifacts: stringArray(data.artifacts ?? body.artifacts) }
+          ? { artifacts: displayArray(data.artifacts ?? body.artifacts) }
           : {}),
         ...(data.unresolved !== undefined || body.unresolved !== undefined
-          ? { unresolved: stringArray(data.unresolved ?? body.unresolved) }
+          ? { unresolved: displayArray(data.unresolved ?? body.unresolved) }
           : {}),
       }),
     );
@@ -505,8 +526,14 @@ function normalizeResult(value: unknown): DeckResult | undefined {
   }
   const summary = idFrom(source.summary) ?? idFrom(payload.summary);
   if (summary) result.summary = summary;
-  for (const key of ["evidence", "tests", "artifacts", "unresolved"] as const) {
-    const items = stringArray(source[key] ?? payload[key]);
+  for (const key of [
+    "evidence",
+    "findings",
+    "tests",
+    "artifacts",
+    "unresolved",
+  ] as const) {
+    const items = displayArray(source[key] ?? payload[key]);
     if (items.length > 0) result[key] = items;
   }
   return result;

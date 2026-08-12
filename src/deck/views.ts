@@ -131,10 +131,12 @@ export function renderAgents(
       visited.add(agent.id);
       const marker = selectedId === agent.id ? ">" : " ";
       const meta = record(agent);
+      const actual = record(meta.actualModel);
+      const effective = record(meta.effectiveModel);
       const actualModel =
-        modelText(meta.actualModel ?? meta.model) ?? "unavailable";
+        modelText(actual ?? effective ?? meta.model) ?? "unavailable";
       const thinking =
-        text(meta.actualThinking, meta.thinkingLevel) ?? "unavailable";
+        text(actual?.thinkingLevel, effective?.thinkingLevel) ?? "unavailable";
       const placement = `${agent.workspaceId ?? "-"}/${agent.tabId ?? "-"}/${agent.paneId ?? "-"}`;
       const task = agent.currentRunId ? `run:${agent.currentRunId}` : "no run";
       lines.push(
@@ -239,16 +241,23 @@ export function renderAgentInspector(
         (item) => item.assignedAgentId === agent.id,
       );
   const meta = record(agent);
+  const requested = record(meta.requestedModel);
+  const effective = record(meta.effectiveModel);
+  const actual = record(meta.actualModel);
   const requestedModel =
-    modelText(meta.requestedModel) ??
-    text(meta.requestedModelId) ??
-    "unavailable";
-  const actualModel =
-    modelText(meta.actualModel ?? meta.model) ?? "unavailable";
+    modelText(requested) ?? text(requested?.profileId) ?? "placement default";
+  const effectiveModel = modelText(effective) ?? "unavailable";
+  const actualModel = modelText(actual ?? meta.model) ?? "unavailable";
   const requestedThinking =
-    text(meta.requestedThinking, meta.requestedThinkingLevel) ?? "unavailable";
+    text(
+      requested?.thinkingLevel,
+      effective?.thinkingLevel,
+      meta.requestedThinking,
+      meta.requestedThinkingLevel,
+    ) ?? "unavailable";
   const actualThinking =
-    text(meta.actualThinking, meta.thinkingLevel) ?? "unavailable";
+    text(actual?.thinkingLevel, meta.actualThinking, meta.thinkingLevel) ??
+    "unavailable";
   const blocked =
     text(meta.blockedReason) ??
     questionForAgent(agent, state)?.prompt ??
@@ -263,6 +272,7 @@ export function renderAgentInspector(
       `Terminal/session: ${agent.terminalId ?? "unavailable"} / ${agent.piSessionId ?? "unavailable"}`,
       `CWD/worktree: ${agent.cwd ?? "unavailable"} / ${agent.worktreeId ?? "unavailable"}`,
       `Requested model: ${requestedModel}`,
+      `Effective model: ${effectiveModel}`,
       `Actual model: ${actualModel}`,
       `Thinking requested/actual: ${requestedThinking} / ${actualThinking}`,
       `Task: ${task?.id ?? run?.taskId ?? "none"} ${task ? `(${task.title}; ${task.state})` : ""}`,
@@ -362,6 +372,7 @@ function renderResultLines(result: DeckResult | undefined): string[] {
     `Result status: ${result.status}`,
     `Summary: ${result.summary ?? "none"}`,
     `Evidence: ${result.evidence?.join(", ") ?? "none"}`,
+    `Findings: ${result.findings?.join(", ") ?? "none"}`,
     `Tests: ${result.tests?.join(", ") ?? "none"}`,
     `Artifacts: ${result.artifacts?.join(", ") ?? "none"}`,
     `Unresolved: ${result.unresolved?.join(", ") ?? "none"}`,

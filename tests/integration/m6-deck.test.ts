@@ -193,7 +193,6 @@ test("M6 deck actions preserve target identity and closure does not issue a work
   });
   assert.deepEqual(broker.requests[2]!.params as Record<string, unknown>, {
     agentId: "agt_alpha",
-    generation: 2,
     reason: "Stopped from Pi Herdr Deck.",
     force: false,
   });
@@ -248,9 +247,13 @@ test("deck actions use the managed broker control methods", async () => {
     message: "Implement this.",
     timeoutMs: 10_000,
   });
+  assert.deepEqual(broker.requests[2]!.params as Record<string, unknown>, {
+    agentId: "agt_alpha",
+    message: "Which option?",
+    timeoutMs: 120_000,
+  });
   assert.deepEqual(broker.requests[6]!.params as Record<string, unknown>, {
     agentId: "agt_alpha",
-    generation: 2,
     reason: "Closed from Pi Herdr Deck.",
     confirm: true,
   });
