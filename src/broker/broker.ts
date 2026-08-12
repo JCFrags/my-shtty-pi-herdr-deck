@@ -497,6 +497,7 @@ export class Broker {
   #clients = new Set<Client>();
   #questionTimers = new Map<string, NodeJS.Timeout>();
   #deadlineTimers = new Map<string, NodeJS.Timeout>();
+  #coordinationSignals = new Map<string, number>();
   #now: () => number;
   #setTimeout: (callback: () => void, delayMs: number) => NodeJS.Timeout;
   #clearTimeout: (timer: NodeJS.Timeout) => void;
@@ -2447,7 +2448,10 @@ export class Broker {
           (p.generation !== undefined &&
             (!Number.isSafeInteger(p.generation) ||
               Number(p.generation) < 1)) ||
-          (p.runId !== undefined && !safeText(p.runId))
+          (p.runId !== undefined && !safeText(p.runId)) ||
+          (p.assignmentGeneration !== undefined &&
+            (!Number.isSafeInteger(p.assignmentGeneration) ||
+              Number(p.assignmentGeneration) < 1))
         )
           throw new OrchestratorError(
             "INVALID_REQUEST",
@@ -2460,6 +2464,56 @@ export class Broker {
             "Agent was not found.",
           );
         const target = p.agentId as string;
+        if (
+          request.method === "agent.interrupt" ||
+          request.method === "agent.stop" ||
+          request.method === "agent.close"
+        ) {
+          const allowed =
+            request.method === "agent.interrupt"
+              ? ["agentId", "runId", "assignmentGeneration", "reason"]
+              : request.method === "agent.stop"
+                ? [
+                    "agentId",
+                    "runId",
+                    "assignmentGeneration",
+                    "reason",
+                    "force",
+                  ]
+                : [
+                    "agentId",
+                    "runId",
+                    "assignmentGeneration",
+                    "reason",
+                    "confirm",
+                  ];
+          if (
+            !exactKeys(p, allowed) ||
+            (p.reason !== undefined && !safeText(p.reason, 16_384)) ||
+            (p.force !== undefined && typeof p.force !== "boolean") ||
+            (p.confirm !== undefined && typeof p.confirm !== "boolean") ||
+            (request.method === "agent.close" && p.confirm !== true)
+          )
+            throw new OrchestratorError(
+              "INVALID_REQUEST",
+              "Agent control request is invalid.",
+            );
+          if (p.runId !== undefined || p.assignmentGeneration !== undefined) {
+            const correlated =
+              typeof p.runId === "string"
+                ? this.store.state.runs[p.runId]
+                : undefined;
+            if (
+              !correlated ||
+              correlated.agentId !== target ||
+              p.assignmentGeneration !== correlated.assignmentGeneration
+            )
+              throw new OrchestratorError(
+                "RUN_MISMATCH",
+                "Agent control run identity does not match.",
+              );
+          }
+        }
         if (
           principal.kind === "pi_parent" &&
           !(await this.#isDescendant(principal.agentId, target))
@@ -2554,6 +2608,8 @@ export class Broker {
           delete params.agentId;
           delete params.generation;
           delete params.runId;
+          delete params.assignmentGeneration;
+          delete params.reason;
           result = await this.#sendAdapterRequest(
             target,
             method,
@@ -2565,6 +2621,359 @@ export class Broker {
             },
             typeof p.timeoutMs === "number" ? p.timeoutMs : 10_000,
           );
+        }
+      } else if (request.method === "agent.ask") {
+        requirePermission(principal, "manage:self");
+        const p = request.params;
+        if (
+          !exactKeys(p, ["agentId", "message", "followUps", "timeoutMs"]) ||
+          !safeText(p.agentId) ||
+          !safeText(p.message, 16_384) ||
+          !Number.isSafeInteger(p.timeoutMs) ||
+          Number(p.timeoutMs) < 1 ||
+          Number(p.timeoutMs) > 120_000 ||
+          (p.followUps !== undefined &&
+            (!Array.isArray(p.followUps) ||
+              p.followUps.length > 3 ||
+              p.followUps.some((item) => !safeText(item, 16_384))))
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Peer question thread is invalid.",
+          );
+        const target = p.agentId as string;
+        const agent = this.store.state.agents[target];
+        if (!agent)
+          throw new OrchestratorError(
+            "AGENT_NOT_FOUND",
+            "Agent was not found.",
+          );
+        if (!(await this.#canAccessAgent(principal, target)))
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "Agent is outside the descendant scope.",
+          );
+        const messages = [
+          p.message,
+          ...((p.followUps as string[] | undefined) ?? []),
+        ] as string[];
+        const deliveries: unknown[] = [];
+        for (let index = 0; index < messages.length; index++)
+          deliveries.push(
+            await this.#sendAdapterRequest(
+              target,
+              index === 0 ? "control.prompt" : "control.steer",
+              {
+                message: messages[index],
+                delivery: index === 0 ? "normal" : "follow_up",
+              },
+              {
+                generation: agent.generation,
+                ...(agent.piSessionId
+                  ? { piSessionId: agent.piSessionId }
+                  : {}),
+                ...(agent.currentRunId ? { runId: agent.currentRunId } : {}),
+              },
+              p.timeoutMs as number,
+            ),
+          );
+        result = {
+          threadId: createId("evt"),
+          agentId: target,
+          messageCount: messages.length,
+          followUpCount: messages.length - 1,
+          deliveries,
+        };
+      } else if (request.method === "coordination.signal") {
+        requirePermission(principal, "manage:self");
+        if (
+          !exactKeys(request.params, ["targetId"]) ||
+          !safeText(request.params.targetId, 256)
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Signal ID is invalid.",
+          );
+        this.#coordinationSignals.set(request.params.targetId, this.#now());
+        result = { targetId: request.params.targetId, signaled: true };
+      } else if (request.method === "coordination.wait") {
+        requirePermission(principal, "read:state");
+        const p = request.params;
+        if (
+          !exactKeys(p, [
+            "kind",
+            "targetId",
+            "until",
+            "durationMs",
+            "startedAt",
+            "timeoutMs",
+            "pollMs",
+          ]) ||
+          ![
+            "timer",
+            "signal",
+            "agent",
+            "task",
+            "result",
+            "question",
+            "group",
+          ].includes(p.kind as string) ||
+          (p.targetId !== undefined && !safeText(p.targetId, 256)) ||
+          (p.until !== undefined &&
+            (!Array.isArray(p.until) ||
+              p.until.length < 1 ||
+              p.until.length > 16 ||
+              p.until.some((item) => !safeText(item, 64))))
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Coordination wait target is invalid.",
+          );
+        const until = new Set((p.until as string[] | undefined) ?? []);
+        let state: string | undefined;
+        let value: unknown;
+        if (p.kind === "timer") {
+          const startedAt =
+            typeof p.startedAt === "string" ? Date.parse(p.startedAt) : NaN;
+          if (
+            !Number.isFinite(startedAt) ||
+            !Number.isSafeInteger(p.durationMs) ||
+            Number(p.durationMs) < 1 ||
+            Number(p.durationMs) > 86_400_000
+          )
+            throw new OrchestratorError(
+              "INVALID_REQUEST",
+              "Timer wait is invalid.",
+            );
+          state =
+            this.#now() >= startedAt + Number(p.durationMs)
+              ? "elapsed"
+              : "pending";
+        } else if (p.kind === "signal") {
+          if (!safeText(p.targetId, 256))
+            throw new OrchestratorError(
+              "INVALID_REQUEST",
+              "Signal ID is invalid.",
+            );
+          state = this.#coordinationSignals.has(p.targetId)
+            ? "signaled"
+            : "pending";
+        } else {
+          if (!safeText(p.targetId, 256))
+            throw new OrchestratorError(
+              "INVALID_REQUEST",
+              "Target ID is invalid.",
+            );
+          if (p.kind === "agent") value = this.store.state.agents[p.targetId];
+          else if (p.kind === "task")
+            value = this.store.state.tasks[p.targetId];
+          else if (p.kind === "result")
+            value = this.store.state.results?.[p.targetId];
+          else if (p.kind === "question")
+            value = this.store.state.questions?.[p.targetId];
+          else value = this.store.state.groups?.[p.targetId];
+          if (!value)
+            throw new OrchestratorError(
+              "TARGET_NOT_FOUND",
+              "Wait target was not found.",
+            );
+          state = String(
+            (value as Record<string, unknown>).state ?? "available",
+          );
+        }
+        const ready = until.size > 0 ? until.has(state) : state !== "pending";
+        result = {
+          kind: p.kind,
+          targetId: p.targetId ?? null,
+          state,
+          ready,
+          value,
+        };
+      } else if (request.method === "group.create") {
+        requirePermission(principal, "manage:self");
+        const p = request.params;
+        if (
+          !exactKeys(p, ["name", "agentIds"]) ||
+          !safeText(p.name, 256) ||
+          !Array.isArray(p.agentIds) ||
+          p.agentIds.length < 1 ||
+          p.agentIds.length > 64 ||
+          p.agentIds.some((id) => !safeText(id, 256)) ||
+          new Set(p.agentIds).size !== p.agentIds.length
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Group definition is invalid.",
+          );
+        for (const agentId of p.agentIds as string[]) {
+          if (!this.store.state.agents[agentId])
+            throw new OrchestratorError(
+              "AGENT_NOT_FOUND",
+              "A group agent was not found.",
+            );
+          if (!(await this.#canAccessAgent(principal, agentId)))
+            throw new OrchestratorError(
+              "PERMISSION_DENIED",
+              "A group agent is outside the descendant scope.",
+            );
+        }
+        const groupId = createId("grp");
+        committedEvent = await this.store.append({
+          type: "group.created",
+          actor: { principalId: principal.id, kind: principal.kind },
+          entityRefs: { groupId },
+          payload: {
+            groupId,
+            name: p.name,
+            agentIds: p.agentIds,
+            createdAt: new Date(this.#now()).toISOString(),
+          },
+        });
+        result = this.store.state.groups![groupId];
+      } else if (
+        request.method === "group.list" ||
+        request.method === "group.get" ||
+        request.method === "group.wait" ||
+        request.method === "group.stop" ||
+        request.method === "group.close"
+      ) {
+        requirePermission(
+          principal,
+          request.method === "group.list" ||
+            request.method === "group.get" ||
+            request.method === "group.wait"
+            ? "read:state"
+            : "manage:self",
+        );
+        if (request.method === "group.list") {
+          if (!exactKeys(request.params, []))
+            throw new OrchestratorError(
+              "INVALID_REQUEST",
+              "Group list input is invalid.",
+            );
+          const items = [];
+          for (const group of Object.values(this.store.state.groups ?? {}))
+            if (
+              await Promise.all(
+                group.agentIds.map((id) => this.#canAccessAgent(principal, id)),
+              ).then((access) => access.every(Boolean))
+            )
+              items.push(group);
+          result = {
+            items,
+            nextCursor: null,
+            snapshotSeq: this.store.state.lastEventSeq,
+          };
+        } else {
+          const p = request.params;
+          if (!safeText(p.groupId, 256))
+            throw new OrchestratorError(
+              "INVALID_REQUEST",
+              "Group ID is invalid.",
+            );
+          const group = this.store.state.groups?.[p.groupId];
+          if (!group)
+            throw new OrchestratorError(
+              "GROUP_NOT_FOUND",
+              "Group was not found.",
+            );
+          for (const agentId of group.agentIds)
+            if (!(await this.#canAccessAgent(principal, agentId)))
+              throw new OrchestratorError(
+                "PERMISSION_DENIED",
+                "Group is outside the descendant scope.",
+              );
+          if (request.method === "group.get") {
+            if (!exactKeys(p, ["groupId"]))
+              throw new OrchestratorError(
+                "INVALID_REQUEST",
+                "Group get input is invalid.",
+              );
+            result = group;
+          } else if (request.method === "group.wait") {
+            if (
+              !exactKeys(p, ["groupId", "until", "mode", "timeoutMs"]) ||
+              !Array.isArray(p.until) ||
+              p.until.length < 1 ||
+              p.until.length > 16 ||
+              p.until.some((item) => !safeText(item, 64)) ||
+              !["all", "any"].includes(p.mode as string)
+            )
+              throw new OrchestratorError(
+                "INVALID_REQUEST",
+                "Group wait input is invalid.",
+              );
+            const until = new Set(p.until as string[]);
+            const members = group.agentIds.map((agentId) => ({
+              agentId,
+              state: this.store.state.agents[agentId]?.state ?? "missing",
+            }));
+            const matches = members.map((member) => until.has(member.state));
+            result = {
+              groupId: group.id,
+              state: group.state,
+              members,
+              ready:
+                p.mode === "all"
+                  ? matches.every(Boolean)
+                  : matches.some(Boolean),
+            };
+          } else {
+            const close = request.method === "group.close";
+            const allowed = close
+              ? ["groupId", "reason", "confirm"]
+              : ["groupId", "reason", "force"];
+            if (
+              !exactKeys(p, allowed) ||
+              (close
+                ? p.reason !== undefined && !safeText(p.reason, 16_384)
+                : !safeText(p.reason, 16_384)) ||
+              (close
+                ? p.confirm !== true
+                : p.force !== undefined && typeof p.force !== "boolean")
+            )
+              throw new OrchestratorError(
+                "INVALID_REQUEST",
+                "Group control input is invalid.",
+              );
+            if (!this.#herdr)
+              throw new OrchestratorError(
+                "AGENT_DISCONNECTED",
+                "Herdr is unavailable.",
+              );
+            const outcomes = [];
+            for (const agentId of group.agentIds) {
+              const resource = this.store.state.herdrResources?.[agentId];
+              if (!resource?.paneId) {
+                outcomes.push({ agentId, state: "unavailable" });
+                continue;
+              }
+              const guard = {
+                paneId: resource.paneId,
+                ...(resource.terminalId
+                  ? { terminalId: resource.terminalId }
+                  : {}),
+                ...(resource.sessionId
+                  ? { sessionId: resource.sessionId }
+                  : {}),
+              } as never;
+              if (close) await this.#herdr.close(guard);
+              else await this.#herdr.stop(guard);
+              outcomes.push({ agentId, state: close ? "closed" : "stopped" });
+            }
+            const type = close ? "group.closed" : "group.stopped";
+            committedEvent = await this.store.append({
+              type,
+              actor: { principalId: principal.id, kind: principal.kind },
+              entityRefs: { groupId: group.id },
+              payload: {
+                groupId: group.id,
+                at: new Date(this.#now()).toISOString(),
+                ...(close ? { confirm: true } : {}),
+              },
+            });
+            result = { ...this.store.state.groups![group.id], outcomes };
+          }
         }
       } else if (request.method === "result.publish") {
         requirePermission(principal, "manage:self");

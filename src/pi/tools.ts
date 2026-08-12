@@ -293,7 +293,24 @@ const parentInputKeys: Readonly<Record<ParentToolName, readonly string[]>> =
       "runId",
       "assignmentGeneration",
     ],
+    agent_ask: ["agentId", "message", "followUps", "timeoutMs"],
     agent_wait: ["agentId", "taskId", "runId", "until", "timeoutMs"],
+    coordination_wait: [
+      "kind",
+      "targetId",
+      "until",
+      "durationMs",
+      "startedAt",
+      "timeoutMs",
+      "pollMs",
+    ],
+    coordination_signal: ["targetId"],
+    group_create: ["name", "agentIds"],
+    group_list: [],
+    group_get: ["groupId"],
+    group_wait: ["groupId", "until", "mode", "timeoutMs"],
+    group_stop: ["groupId", "reason", "force"],
+    group_close: ["groupId", "reason", "confirm"],
     agent_result: ["taskId", "resultId", "include", "maxBytes"],
     agent_answer: ["questionId", "answer"],
     agent_interrupt: ["agentId", "runId", "assignmentGeneration", "reason"],
@@ -365,7 +382,15 @@ const parentRequired: Readonly<
   agent_get: ["agentId"],
   agent_prompt: ["agentId", "message", "delivery", "timeoutMs"],
   agent_steer: ["agentId", "message", "delivery"],
+  agent_ask: ["agentId", "message", "timeoutMs"],
   agent_wait: ["agentId", "taskId", "runId", "until", "timeoutMs"],
+  coordination_wait: ["kind", "timeoutMs"],
+  coordination_signal: ["targetId"],
+  group_create: ["name", "agentIds"],
+  group_get: ["groupId"],
+  group_wait: ["groupId", "until", "mode", "timeoutMs"],
+  group_stop: ["groupId", "reason"],
+  group_close: ["groupId", "confirm"],
   agent_result: ["taskId"],
   agent_answer: ["questionId", "answer"],
   agent_interrupt: ["agentId"],
@@ -403,7 +428,14 @@ function assertExactObject(
     throw new Error("INVALID_REQUEST");
 }
 function validateExactNested(input: Record<string, unknown>): void {
-  const arrayFields = new Set(["ids", "taskIds", "include", "select"]);
+  const arrayFields = new Set([
+    "ids",
+    "taskIds",
+    "include",
+    "select",
+    "agentIds",
+    "followUps",
+  ]);
   const stringFields = new Set([
     "title",
     "parentAgentId",
@@ -417,6 +449,11 @@ function validateExactNested(input: Record<string, unknown>): void {
     "message",
     "reason",
     "cursor",
+    "name",
+    "groupId",
+    "targetId",
+    "kind",
+    "startedAt",
   ]);
   for (const [key, value] of Object.entries(input)) {
     if (arrayFields.has(key)) {
@@ -425,7 +462,7 @@ function validateExactNested(input: Record<string, unknown>): void {
         value.length > 64 ||
         value.some((item) => {
           try {
-            assertInputString(item, 256);
+            assertInputString(item, key === "followUps" ? MAX_TEXT_BYTES : 256);
             return false;
           } catch {
             return true;
@@ -570,7 +607,14 @@ function validateExactNested(input: Record<string, unknown>): void {
       continue;
     }
     if (
-      ["timeoutMs", "maxBytes", "limit", "assignmentGeneration"].includes(key)
+      [
+        "timeoutMs",
+        "maxBytes",
+        "limit",
+        "assignmentGeneration",
+        "durationMs",
+        "pollMs",
+      ].includes(key)
     ) {
       if (
         !Number.isSafeInteger(value) ||
@@ -636,15 +680,27 @@ function validateParentInput(
     )
       throw new Error("INVALID_REQUEST");
     if (
-      ["timeoutMs", "maxBytes", "limit", "assignmentGeneration"].includes(
-        key,
-      ) &&
+      [
+        "timeoutMs",
+        "maxBytes",
+        "limit",
+        "assignmentGeneration",
+        "durationMs",
+        "pollMs",
+      ].includes(key) &&
       (!Number.isSafeInteger(value) ||
         (value as number) < 1 ||
         (key === "timeoutMs" &&
-          (value as number) > (tool === "agent_wait" ? 30_000 : 1_800_000)) ||
+          (value as number) >
+            (tool === "agent_wait"
+              ? 30_000
+              : tool === "agent_ask"
+                ? 120_000
+                : 1_800_000)) ||
         (key === "maxBytes" && (value as number) > 262_144) ||
-        (key === "limit" && (value as number) > 500))
+        (key === "limit" && (value as number) > 500) ||
+        (key === "durationMs" && (value as number) > 86_400_000) ||
+        (key === "pollMs" && (value as number) > 60_000))
     )
       throw new Error("INVALID_REQUEST");
     if (
@@ -656,10 +712,19 @@ function validateParentInput(
         "steps",
         "waitUntil",
         "until",
+        "agentIds",
+        "followUps",
       ].includes(key) &&
       !Array.isArray(value)
     )
       throw new Error("INVALID_REQUEST");
+    if (key === "followUps" && (value as unknown[]).length > 3)
+      throw new Error("LIMIT_EXCEEDED");
+    if (
+      key === "agentIds" &&
+      ((value as unknown[]).length < 1 || (value as unknown[]).length > 64)
+    )
+      throw new Error("LIMIT_EXCEEDED");
     if (key === "steps" && (value as unknown[]).length > 32)
       throw new Error("LIMIT_EXCEEDED");
     if (key === "task") {
@@ -688,6 +753,7 @@ function validateParentInput(
     }
     if (
       key === "mode" &&
+      tool !== "group_wait" &&
       !["single", "parallel", "chain", "dag", "implement_review_fix"].includes(
         value as string,
       )
@@ -696,6 +762,25 @@ function validateParentInput(
     if (
       key === "delivery" &&
       !["normal", "steer", "follow_up"].includes(value as string)
+    )
+      throw new Error("INVALID_REQUEST");
+    if (
+      key === "kind" &&
+      ![
+        "timer",
+        "signal",
+        "agent",
+        "task",
+        "result",
+        "question",
+        "group",
+      ].includes(value as string)
+    )
+      throw new Error("INVALID_REQUEST");
+    if (
+      key === "mode" &&
+      tool === "group_wait" &&
+      !["all", "any"].includes(value as string)
     )
       throw new Error("INVALID_REQUEST");
     if (
@@ -739,6 +824,7 @@ function validateParentInput(
       throw new Error("INVALID_REQUEST");
     if (
       key === "until" &&
+      tool === "agent_wait" &&
       (value as unknown[]).some(
         (item) =>
           ![
@@ -770,7 +856,16 @@ function schemaForKey(key: string): unknown {
     ].includes(key)
   )
     return { type: "boolean" };
-  if (["timeoutMs", "maxBytes", "limit", "assignmentGeneration"].includes(key))
+  if (
+    [
+      "timeoutMs",
+      "maxBytes",
+      "limit",
+      "assignmentGeneration",
+      "durationMs",
+      "pollMs",
+    ].includes(key)
+  )
     return { type: "integer", minimum: 1, maximum: 1_800_000 };
   if (["mode"].includes(key))
     return {
@@ -797,7 +892,11 @@ function schemaForKey(key: string): unknown {
         enum: ["succeeded", "failed", "cancelled", "timed_out", "blocked"],
       },
     };
-  if (["ids", "taskIds", "include", "select"].includes(key))
+  if (
+    ["ids", "taskIds", "include", "select", "agentIds", "followUps"].includes(
+      key,
+    )
+  )
     return {
       type: "array",
       maxItems: 64,
@@ -893,7 +992,37 @@ function parentInputSchema(tool: ParentToolName): unknown {
           key,
           key === "timeoutMs" && tool === "agent_wait"
             ? { type: "integer", minimum: 1, maximum: 30_000 }
-            : schemaForKey(key),
+            : key === "timeoutMs" && tool === "agent_ask"
+              ? { type: "integer", minimum: 1, maximum: 120_000 }
+              : key === "mode" && tool === "group_wait"
+                ? { type: "string", enum: ["all", "any"] }
+                : key === "kind" && tool === "coordination_wait"
+                  ? {
+                      type: "string",
+                      enum: [
+                        "timer",
+                        "signal",
+                        "agent",
+                        "task",
+                        "result",
+                        "question",
+                        "group",
+                      ],
+                    }
+                  : key === "until" && tool !== "agent_wait"
+                    ? {
+                        type: "array",
+                        minItems: 1,
+                        maxItems: 16,
+                        items: { type: "string", minLength: 1, maxLength: 64 },
+                      }
+                    : key === "followUps"
+                      ? {
+                          type: "array",
+                          maxItems: 3,
+                          items: boundedString(MAX_TEXT_BYTES),
+                        }
+                      : schemaForKey(key),
         ]),
       ),
       idempotencyKey: { type: "string", minLength: 1, maxLength: 256 },
@@ -1623,7 +1752,17 @@ export function registerParentTools(
       description: `Use broker method for ${tool}. The broker checks current state and parent scope on every call.`,
       parameters: parentInputSchema(tool as ParentToolName),
       async execute(_id, params, signal) {
-        const { idempotencyKey, ...raw } = params;
+        const { idempotencyKey, ...provided } = params;
+        const raw =
+          tool === "coordination_wait" && provided.kind === "timer"
+            ? {
+                ...provided,
+                startedAt:
+                  typeof provided.startedAt === "string"
+                    ? provided.startedAt
+                    : new Date().toISOString(),
+              }
+            : provided;
         if (idempotencyKey !== undefined)
           assertInputString(idempotencyKey, 256);
         const principal = principalFromClient();
@@ -1640,8 +1779,14 @@ export function registerParentTools(
         };
         if (!isParentToolRequest(request)) throw new Error("INVALID_REQUEST");
         let response: ParentToolResponse;
-        if (tool === "agent_wait") {
-          const until = new Set(raw.until as string[]);
+        if (
+          tool === "agent_wait" ||
+          tool === "coordination_wait" ||
+          tool === "group_wait"
+        ) {
+          const until = new Set(
+            Array.isArray(raw.until) ? (raw.until as string[]) : [],
+          );
           const deadline = Date.now() + (raw.timeoutMs as number);
           const initial = await executeParentWaitRequest(
             service,
@@ -1658,11 +1803,15 @@ export function registerParentTools(
           };
           while (
             response.ok &&
-            !until.has(
-              String(
-                (response.result as Record<string, unknown> | undefined)?.state,
-              ),
-            ) &&
+            (tool === "agent_wait"
+              ? !until.has(
+                  String(
+                    (response.result as Record<string, unknown> | undefined)
+                      ?.state,
+                  ),
+                )
+              : (response.result as Record<string, unknown> | undefined)
+                  ?.ready !== true) &&
             Date.now() < deadline
           ) {
             await waitForParentPoll(

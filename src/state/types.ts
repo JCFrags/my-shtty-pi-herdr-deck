@@ -142,6 +142,16 @@ export interface Workflow {
     "created" | "running" | "blocked" | "succeeded" | "failed" | "cancelled";
   taskIds: string[];
 }
+export interface AgentGroup {
+  id: string;
+  name: string;
+  agentIds: string[];
+  state: "open" | "stopped" | "closed";
+  createdAt: string;
+  createdBy: string;
+  stoppedAt?: string;
+  closedAt?: string;
+}
 export interface OrchestrationState {
   schemaVersion: number;
   lastEventSeq: number;
@@ -152,6 +162,7 @@ export interface OrchestrationState {
   workflows: Record<string, Workflow>;
   results?: Record<string, ResultRecord>;
   questions?: Record<string, QuestionRecord>;
+  groups?: Record<string, AgentGroup>;
   herdrResources?: Record<
     string,
     {

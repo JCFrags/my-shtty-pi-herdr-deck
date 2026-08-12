@@ -29,6 +29,12 @@ const inputs: Record<string, Record<string, unknown>> = {
     timeoutMs: 1000,
   },
   agent_steer: { agentId: "child", message: "x", delivery: "steer" },
+  agent_ask: {
+    agentId: "child",
+    message: "x",
+    followUps: ["y", "z"],
+    timeoutMs: 1000,
+  },
   agent_wait: {
     agentId: "child",
     taskId: "task",
@@ -36,6 +42,23 @@ const inputs: Record<string, Record<string, unknown>> = {
     until: ["blocked"],
     timeoutMs: 1000,
   },
+  coordination_wait: {
+    kind: "signal",
+    targetId: "ready",
+    timeoutMs: 1000,
+  },
+  coordination_signal: { targetId: "ready" },
+  group_create: { name: "pair", agentIds: ["child"] },
+  group_list: {},
+  group_get: { groupId: "group" },
+  group_wait: {
+    groupId: "group",
+    until: ["stopped"],
+    mode: "all",
+    timeoutMs: 1000,
+  },
+  group_stop: { groupId: "group", reason: "done", force: false },
+  group_close: { groupId: "group", confirm: true },
   agent_result: { taskId: "task" },
   agent_answer: {
     questionId: "question",
@@ -97,7 +120,11 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
       options?: Record<string, unknown>,
     ) => {
       calls.push({ method, params, ...(options ? { options } : {}) });
-      return method === "agent.wait" ? { state: "blocked" } : {};
+      return method === "agent.wait"
+        ? { state: "blocked" }
+        : method === "coordination.wait" || method === "group.wait"
+          ? { ready: true }
+          : {};
     },
   };
   const adapter = { safeState: () => state };
@@ -113,7 +140,7 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
       {},
     );
   }
-  assert.equal(calls.length, 16);
+  assert.equal(calls.length, 25);
   assert.deepEqual(
     calls.map((call) => call.method),
     [
@@ -123,7 +150,16 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
       "agent.get",
       "agent.prompt",
       "agent.steer",
+      "agent.ask",
       "agent.wait",
+      "coordination.wait",
+      "coordination.signal",
+      "group.create",
+      "group.list",
+      "group.get",
+      "group.wait",
+      "group.stop",
+      "group.close",
       "result.get",
       "question.answer",
       "agent.interrupt",

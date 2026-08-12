@@ -871,6 +871,9 @@ export class EventStore {
         "question.answered",
         "question.timed_out",
         "question.cancelled",
+        "group.created",
+        "group.stopped",
+        "group.closed",
         "workflow.created",
         "workflow.state_changed",
         "scheduler.admitted",
@@ -884,7 +887,8 @@ export class EventStore {
         refs.runId ??
         refs.workflowId ??
         refs.resultId ??
-        refs.questionId;
+        refs.questionId ??
+        refs.groupId;
       valid =
         typeof refId === "string" &&
         Object.keys(p).every(
