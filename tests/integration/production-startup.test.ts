@@ -208,7 +208,7 @@ test("built separate processes start, reuse, adopt, expose tools, and stop the p
   const temporary = await mkdtemp(join(tmpdir(), "orch-production-startup-"));
   const herdrSocket = join(temporary, "herdr.sock");
   const fakeBinary = join(temporary, "fake-herdr.mjs");
-  const fakePiBinary = join(temporary, "fake-pi.mjs");
+  const fakePiBinary = join(temporary, "pi");
   const fakeState = join(temporary, "fake-herdr-state.json");
   const runtimeBase = join(temporary, "runtime");
   const stateBase = join(temporary, "state");
@@ -336,7 +336,7 @@ process.exit(1);
   await chmod(herdrSocket, 0o600);
 
   const environment: NodeJS.ProcessEnv = {
-    PATH: process.env.PATH,
+    PATH: `${temporary}:${process.env.PATH ?? ""}`,
     HOME: process.env.HOME,
     USER: process.env.USER,
     LOGNAME: process.env.LOGNAME,
@@ -345,7 +345,6 @@ process.exit(1);
     HERDR_SOCKET_PATH: herdrSocket,
     HERDR_BIN_PATH: fakeBinary,
     HERDR_CONFIG_PATH: fakeState,
-    PI_BIN_PATH: fakePiBinary,
     HERDR_PANE_ID: "pane-root",
     HERDR_TERMINAL_ID: "terminal-root",
     HERDR_WORKSPACE_ID: "workspace-root",
