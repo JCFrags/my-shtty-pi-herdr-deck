@@ -133,23 +133,34 @@ export class HerdrCli {
     timeoutMs?: number;
   }) {
     this.capabilities.require(["agent.start"]);
-    return commandResult(
-      await this.runner.json([
-        "agent",
-        "start",
-        input.name,
-        "--kind",
-        "pi",
-        "--pane",
-        input.paneId,
-        "--timeout",
-        String(input.timeoutMs ?? 30_000),
-        "--",
-        ...input.args,
-      ]),
-      "cli:agent:start",
-      "agent_started",
-    );
+    const argv = [
+      "agent",
+      "start",
+      input.name,
+      "--kind",
+      "pi",
+      "--pane",
+      input.paneId,
+      "--timeout",
+      String(input.timeoutMs ?? 30_000),
+      "--",
+      ...input.args,
+    ];
+    let response: unknown;
+    try {
+      response = await this.runner.json(argv);
+    } catch (error) {
+      if (
+        !(error instanceof HerdrProcessError) ||
+        error.code !== "HERDR_COMMAND_FAILED"
+      )
+        throw error;
+      // A new tab can be visible before its shell is ready for agent.start.
+      // One bounded retry closes that native Herdr readiness race.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      response = await this.runner.json(argv);
+    }
+    return commandResult(response, "cli:agent:start", "agent_started");
   }
   async createWorktree(input: {
     workspaceId: string;
