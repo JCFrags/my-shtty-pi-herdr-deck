@@ -1391,96 +1391,104 @@ export function registerManagedChildTools(
       if (!assignment) throw new Error("RUN_MISMATCH");
       validateQuestionInput(params);
       assertBoundedBody(params);
-      const waiter = client.registerQuestionWaiter(
-        _id,
-        assignment.runId,
-        params.timeoutMs as number,
-        signal,
-      );
-      void waiter.catch(() => undefined);
-      let openPromise: Promise<unknown>;
+      api.events?.emit("herdr:blocked", {
+        active: true,
+        label: "Waiting for an orchestrator answer",
+      });
       try {
-        openPromise = client.request("question.open", {
-          agentId: assignment.agentId,
-          taskId: assignment.taskId,
-          runId: assignment.runId,
-          assignmentGeneration: assignment.assignmentGeneration,
-          toolCallId: _id,
-          question: params,
-        });
-      } catch (error) {
-        client.discardQuestionWaiter(_id);
-        throw error;
-      }
-      void openPromise.catch(() => undefined);
-      let ack: unknown;
-      try {
-        const first = await Promise.race([
-          openPromise.then((value) => ({ kind: "ack" as const, value })),
-          waiter.then((value) => ({ kind: "waiter" as const, value })),
-        ]);
-        if (first.kind === "waiter") {
-          const earlyQuestionId =
-            typeof client.questionIdForToolCall === "function"
-              ? client.questionIdForToolCall(_id)
-              : undefined;
-          void openPromise.then(
-            (lateAck) => {
-              try {
-                const parsedLateAck = validateQuestionAck(
-                  lateAck,
-                  assignment,
-                  _id,
-                );
-                if (
-                  earlyQuestionId !== undefined &&
-                  parsedLateAck.questionId !== earlyQuestionId
-                )
-                  throw new Error("QUESTION_DELIVERY_INVALID");
-              } catch {
-                client.close();
-              } finally {
-                client.discardQuestionWaiter(_id);
-              }
-            },
-            () => {
-              client.discardQuestionWaiter(_id);
-            },
-          );
-          return textResult(first.value);
+        const waiter = client.registerQuestionWaiter(
+          _id,
+          assignment.runId,
+          params.timeoutMs as number,
+          signal,
+        );
+        void waiter.catch(() => undefined);
+        let openPromise: Promise<unknown>;
+        try {
+          openPromise = client.request("question.open", {
+            agentId: assignment.agentId,
+            taskId: assignment.taskId,
+            runId: assignment.runId,
+            assignmentGeneration: assignment.assignmentGeneration,
+            toolCallId: _id,
+            question: params,
+          });
+        } catch (error) {
+          client.discardQuestionWaiter(_id);
+          throw error;
         }
-        ack = first.value;
-      } catch (error) {
-        client.discardQuestionWaiter(_id);
-        throw error;
-      }
-      let parsedAck: ReturnType<typeof validateQuestionAck>;
-      try {
-        parsedAck = validateQuestionAck(ack, assignment, _id);
-      } catch (error) {
-        client.discardQuestionWaiter(_id);
-        throw error;
-      }
-      if (parsedAck.state !== "open") {
-        client.discardQuestionWaiter(_id);
-        return textResult({
-          state: parsedAck.state,
-          ...(parsedAck.state === "answered"
-            ? { answer: parsedAck.answer }
-            : {}),
-        });
-      }
-      try {
-        client.bindQuestionWaiter(_id, parsedAck.questionId);
-      } catch (error) {
-        client.discardQuestionWaiter(_id);
-        throw error;
-      }
-      try {
-        const answer = await waiter;
-        return textResult(answer);
+        void openPromise.catch(() => undefined);
+        let ack: unknown;
+        try {
+          const first = await Promise.race([
+            openPromise.then((value) => ({ kind: "ack" as const, value })),
+            waiter.then((value) => ({ kind: "waiter" as const, value })),
+          ]);
+          if (first.kind === "waiter") {
+            const earlyQuestionId =
+              typeof client.questionIdForToolCall === "function"
+                ? client.questionIdForToolCall(_id)
+                : undefined;
+            void openPromise.then(
+              (lateAck) => {
+                try {
+                  const parsedLateAck = validateQuestionAck(
+                    lateAck,
+                    assignment,
+                    _id,
+                  );
+                  if (
+                    earlyQuestionId !== undefined &&
+                    parsedLateAck.questionId !== earlyQuestionId
+                  )
+                    throw new Error("QUESTION_DELIVERY_INVALID");
+                } catch {
+                  client.close();
+                } finally {
+                  client.discardQuestionWaiter(_id);
+                }
+              },
+              () => {
+                client.discardQuestionWaiter(_id);
+              },
+            );
+            return textResult(first.value);
+          }
+          ack = first.value;
+        } catch (error) {
+          client.discardQuestionWaiter(_id);
+          throw error;
+        }
+        let parsedAck: ReturnType<typeof validateQuestionAck>;
+        try {
+          parsedAck = validateQuestionAck(ack, assignment, _id);
+        } catch (error) {
+          client.discardQuestionWaiter(_id);
+          throw error;
+        }
+        if (parsedAck.state !== "open") {
+          client.discardQuestionWaiter(_id);
+          return textResult({
+            state: parsedAck.state,
+            ...(parsedAck.state === "answered"
+              ? { answer: parsedAck.answer }
+              : {}),
+          });
+        }
+        try {
+          client.bindQuestionWaiter(_id, parsedAck.questionId);
+        } catch (error) {
+          client.discardQuestionWaiter(_id);
+          throw error;
+        }
+        try {
+          const answer = await waiter;
+          return textResult(answer);
+        } finally {
+          client.discardQuestionWaiter(_id);
+        }
       } finally {
-        client.discardQuestionWaiter(_id);
+        api.events?.emit("herdr:blocked", { active: false });
       }
     },
   });

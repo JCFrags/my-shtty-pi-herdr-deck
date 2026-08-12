@@ -27,7 +27,7 @@ import {
   siblingSecretPath,
 } from "../src/pi/token-file.js";
 import { resolveHerdrPaths } from "../src/shared/paths.js";
-const ORCHESTRATION_TOOLS = new Set([
+export const ORCHESTRATION_TOOLS = new Set([
   "orchestrator_result",
   "orchestrator_ask",
   "delegate",
@@ -47,6 +47,18 @@ const ORCHESTRATION_TOOLS = new Set([
   "task_collect",
   "task_cancel",
 ]);
+const LEGACY_ORCHESTRATION_TOOLS = new Set([
+  "agent_start_or_reuse",
+  "agent_attach",
+  "agent_dispatch",
+  "agent_status",
+  "agent_question",
+  "agent_report",
+  "agent_plan",
+  "agent_progress",
+  "agent_events",
+  "agent_cancel",
+]);
 const KEY = Symbol.for("pi-herdr-orchestrator.runtime.v1");
 const CREDENTIAL_KEY = Symbol.for("pi-herdr-orchestrator.credential.v1");
 const TOOL_KEY = Symbol.for("pi-herdr-orchestrator.tools.v1");
@@ -64,9 +76,42 @@ function inactive(context: PiContextLike): void {
     "Orchestrator inactive: Pi is outside a Herdr pane.",
   );
 }
-function reconcileActiveTools(pi: PiApiLike, allowed: readonly string[]): void {
+export function reconcileActiveTools(
+  pi: PiApiLike,
+  allowed: readonly string[],
+): void {
   if (!pi.setActiveTools) return;
   const current = pi.getActiveTools?.() ?? [];
+  const definitions = pi.getAllTools?.() ?? [];
+  const counts = new Map<string, number>();
+  for (const tool of definitions)
+    counts.set(tool.name, (counts.get(tool.name) ?? 0) + 1);
+  const conflicts = [
+    ...new Set([
+      ...definitions
+        .filter((tool) => LEGACY_ORCHESTRATION_TOOLS.has(tool.name))
+        .map((tool) => tool.name),
+      ...[...counts]
+        .filter(([name, count]) => ORCHESTRATION_TOOLS.has(name) && count > 1)
+        .map(([name]) => name),
+      ...allowed.filter(
+        (name, index) =>
+          !ORCHESTRATION_TOOLS.has(name) || allowed.indexOf(name) !== index,
+      ),
+    ]),
+  ].sort();
+  if (conflicts.length > 0) {
+    pi.setActiveTools(
+      current.filter(
+        (name) =>
+          !ORCHESTRATION_TOOLS.has(name) &&
+          !LEGACY_ORCHESTRATION_TOOLS.has(name),
+      ),
+    );
+    throw new Error(
+      `ORCHESTRATION_TOOL_OWNERSHIP_CONFLICT:${conflicts.join(",")}`,
+    );
+  }
   const next = [
     ...current.filter((name) => !ORCHESTRATION_TOOLS.has(name)),
     ...allowed,

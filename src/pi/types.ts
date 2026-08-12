@@ -67,6 +67,9 @@ export interface PiApiLike {
     handler: (event: unknown, context: PiContextLike) => void | Promise<void>,
   ): void;
   appendEntry?(customType: string, data?: unknown): void;
+  events?: {
+    emit(event: string, data: unknown): void;
+  };
   registerCommand(
     name: string,
     command: {

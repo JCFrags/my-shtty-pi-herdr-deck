@@ -1,0 +1,4 @@
+f1d03f64c23da9cb6c527c388d80cd0879e92819559f924429c216d3bbaf1b9c  pi-agent-orchestration/coordination-core.ts
+a66cd0a6a2bc674f355baca5ab2de89328118a25571f7af3e7dd7b90a6382ea6  pi-agent-orchestration/extension-bootstrap.mjs
+f0a23e879938c33fbbd7e6a133db2db0f5509d2069fcd290faec779b01ba97c9  pi-agent-orchestration/index.ts
+c46d197b5768ea359a282eac2a72ecc9371b73a7f78dde38e52692c591e66ffb  pi-agent-orchestration/tool-composition.mjs

@@ -157,7 +157,7 @@ The extension does not serialize credentials, environment variables, prompts, to
 
 Retained registration files have count, size, age, type, ownership, mode, symlink, replacement, and hard-link admission checks. Normal uninstall preserves state. Data deletion is a separate owner-approved operation after the broker and managed agents stop.
 
-See [docs/OPERATIONS_M7.md](docs/OPERATIONS_M7.md) for recovery, export, retention, and operation-plan details. See [docs/OPERATIONS_M7_RELEASE.md](docs/OPERATIONS_M7_RELEASE.md) for the non-live release rehearsal.
+See [docs/OPERATIONS_M7.md](docs/OPERATIONS_M7.md) for recovery, export, retention, and operation-plan details. See [docs/OPERATIONS_M7_RELEASE.md](docs/OPERATIONS_M7_RELEASE.md) for the non-live release rehearsal. See [docs/INSTALL_CONFIG_ARCHIVE.md](docs/INSTALL_CONFIG_ARCHIVE.md) for concise local install, reload, configuration, and legacy archive rules.
 
 ## Roll back a local package change
 

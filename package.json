@@ -27,6 +27,7 @@
     "SECURITY.md",
     "LICENSE",
     "docs",
+    "archive",
     "scripts"
   ],
   "scripts": {
