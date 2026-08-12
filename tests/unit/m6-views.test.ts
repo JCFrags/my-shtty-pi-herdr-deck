@@ -5,6 +5,8 @@ import { BrokerClient } from "../../src/deck/broker-client.js";
 import {
   renderAgentInspector,
   renderAgents,
+  renderGroupDetail,
+  renderGroups,
   renderNotifications,
   renderResultDetail,
   renderTaskDetail,
@@ -53,6 +55,19 @@ const state: DeckState = {
     ],
   ]),
   workflows: new Map(),
+  groups: new Map([
+    [
+      "grp_1",
+      {
+        id: "grp_1",
+        name: "Deck workers",
+        state: "blocked",
+        agentIds: ["agt_1"],
+        taskIds: ["tsk_1"],
+        blockedReason: "Awaiting review",
+      },
+    ],
+  ]),
   questions: new Map(),
   results: new Map([
     [
@@ -69,10 +84,23 @@ const state: DeckState = {
   ]),
 };
 
+Object.assign(state.agents.get("agt_1")!, {
+  workspaceId: "w1",
+  tabId: "w1:t1",
+  requestedModel: { provider: "openai-codex", id: "gpt-5.6-sol" },
+  actualModel: { provider: "openai-codex", id: "gpt-5.6-sol" },
+  requestedThinkingLevel: "medium",
+  thinkingLevel: "medium",
+  modelChoices: [{ provider: "openai-codex", id: "gpt-5.6-sol", name: "Sol" }],
+  allowedThinkingLevels: ["low", "medium", "high"],
+});
+
 test("views keep every line within narrow terminal widths", () => {
   const views = [
     renderAgents(state, 1),
     renderTaskDetail(state.tasks.get("tsk_1"), state, 1),
+    renderGroups(state, 1),
+    renderGroupDetail(state.groups.get("grp_1"), 1),
     renderAgentInspector(state.agents.get("agt_1"), state, 1),
     renderResultDetail(state.results.get("res_1"), 1),
     renderNotifications(
@@ -86,6 +114,22 @@ test("views keep every line within narrow terminal widths", () => {
   assert.match(
     renderTaskDetail(state.tasks.get("tsk_1"), state, 120).join("\n"),
     /Result status: accepted/,
+  );
+});
+
+test("views expose placement, model, thinking, and group detail", () => {
+  const inspector = renderAgentInspector(
+    state.agents.get("agt_1"),
+    state,
+    160,
+  ).join("\n");
+  assert.match(inspector, /workspace w1; tab w1:t1; pane p1/);
+  assert.match(inspector, /Requested model: openai-codex\/gpt-5.6-sol/);
+  assert.match(inspector, /Thinking requested\/actual: medium \/ medium/);
+  assert.match(renderGroups(state, 120, "grp_1").join("\n"), /Deck workers/);
+  assert.match(
+    renderGroupDetail(state.groups.get("grp_1"), 120).join("\n"),
+    /Blocked reason: Awaiting review/,
   );
 });
 
@@ -115,11 +159,14 @@ test("every action has a keyboard-safe authorization result", () => {
   const actionNames: DeckAction[] = [
     "focus",
     "prompt",
+    "ask",
     "steer",
     "followUp",
     "answer",
     "interrupt",
     "compact",
+    "setModel",
+    "setThinking",
     "restart",
     "stop",
     "close",
@@ -134,12 +181,9 @@ test("every action has a keyboard-safe authorization result", () => {
   assert.equal(actions.authorize("refresh", {}), undefined);
   const worker = state.agents.get("agt_1");
   assert.ok(worker);
-  assert.equal(
-    actions.authorize("compact", { agent: worker, paneId: "p1" }),
-    undefined,
-  );
+  assert.equal(actions.authorize("compact", { agent: worker }), undefined);
   assert.match(
-    actions.authorize("compact", { agent: worker }) ?? "",
+    actions.authorize("focus", { agent: worker }) ?? "",
     /Pane identity/,
   );
 });

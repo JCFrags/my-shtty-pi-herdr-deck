@@ -122,8 +122,8 @@ test("events map entities and normalize questions and results", () => {
     data: { status: "pending", evidence: ["a", 3], tests: ["ok"] },
   });
   assert.deepEqual(store.state.questions.get("question_1")?.options, [
-    "a",
-    "b",
+    { id: "a", label: "a" },
+    { id: "b", label: "b" },
   ]);
   assert.equal(store.state.results.get("result_1")?.status, "pending");
   assert.deepEqual(store.state.results.get("result_1")?.evidence, ["a"]);

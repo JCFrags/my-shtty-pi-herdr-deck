@@ -4,6 +4,7 @@ import { readPrivateRegular } from "../shared/private-fs.js";
 import { sessionKey, siblingPath } from "../shared/paths.js";
 import { encodeFrame, NdjsonDecoder } from "../shared/protocol/codec.js";
 import type { DeckEvent } from "./types.js";
+import type { QuestionAnswer } from "./actions.js";
 import { DeckStore, snapshotFromBroker } from "./store.js";
 
 export type BrokerStatus =
@@ -146,7 +147,7 @@ export class BrokerClient {
     this.#applySnapshot(result.snapshot);
     return result;
   }
-  async answer(questionId: string, answer: string): Promise<unknown> {
+  async answer(questionId: string, answer: QuestionAnswer): Promise<unknown> {
     return await this.request("question.answer", { questionId, answer });
   }
   #connect(): void {

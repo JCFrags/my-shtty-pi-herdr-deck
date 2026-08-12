@@ -2,9 +2,11 @@ import { LIMITS } from "../shared/limits.js";
 import type { Agent, Run, Task, Workflow } from "../state/types.js";
 import type {
   DeckEvent,
+  DeckGroup,
   DeckNotification,
   DeckNotificationKind,
   DeckQuestion,
+  DeckQuestionOption,
   DeckResult,
   DeckSnapshot,
   DeckState,
@@ -16,6 +18,7 @@ const empty = (): DeckState => ({
   tasks: new Map(),
   runs: new Map(),
   workflows: new Map(),
+  groups: new Map(),
   questions: new Map(),
   results: new Map(),
 });
@@ -45,10 +48,27 @@ const cloneState = (state: DeckState): DeckState => ({
       { ...value, taskIds: [...value.taskIds] },
     ]),
   ),
+  groups: new Map(
+    [...state.groups].map(([id, value]) => [
+      id,
+      {
+        ...value,
+        ...(value.agentIds ? { agentIds: [...value.agentIds] } : {}),
+        ...(value.taskIds ? { taskIds: [...value.taskIds] } : {}),
+        ...(value.questionIds ? { questionIds: [...value.questionIds] } : {}),
+        ...(value.resultIds ? { resultIds: [...value.resultIds] } : {}),
+      },
+    ]),
+  ),
   questions: new Map(
     [...state.questions].map(([id, value]) => [
       id,
-      { ...value, ...(value.options ? { options: [...value.options] } : {}) },
+      {
+        ...value,
+        ...(value.options
+          ? { options: value.options.map((option) => ({ ...option })) }
+          : {}),
+      },
     ]),
   ),
   results: new Map(
@@ -100,11 +120,28 @@ export class DeckStore {
           ...value,
           taskIds: array<string>(value.taskIds),
         });
+    for (const value of array<DeckGroup>(snapshot.groups))
+      if (idFrom(value.id))
+        next.groups.set(value.id, {
+          ...value,
+          ...(value.agentIds
+            ? { agentIds: array<string>(value.agentIds) }
+            : {}),
+          ...(value.taskIds ? { taskIds: array<string>(value.taskIds) } : {}),
+          ...(value.questionIds
+            ? { questionIds: array<string>(value.questionIds) }
+            : {}),
+          ...(value.resultIds
+            ? { resultIds: array<string>(value.resultIds) }
+            : {}),
+        });
     for (const value of array<DeckQuestion>(snapshot.questions))
       if (idFrom(value.id))
         next.questions.set(value.id, {
           ...value,
-          ...(value.options ? { options: array<string>(value.options) } : {}),
+          ...(value.options
+            ? { options: value.options.map((option) => ({ ...option })) }
+            : {}),
         });
     for (const value of array<DeckResult>(snapshot.results))
       if (idFrom(value.id))
@@ -123,8 +160,9 @@ export class DeckStore {
     const taskId = idFrom(refs.taskId) ?? idFrom(data.taskId);
     const runId = idFrom(refs.runId) ?? idFrom(data.runId);
     const workflowId = idFrom(refs.workflowId) ?? idFrom(data.workflowId);
+    const groupId = idFrom(refs.groupId) ?? idFrom(data.groupId);
     const entityId =
-      agentId ?? taskId ?? runId ?? workflowId ?? idFrom(data.id);
+      agentId ?? taskId ?? runId ?? workflowId ?? groupId ?? idFrom(data.id);
 
     if (event.event === "task.created" && entityId)
       next.tasks.set(entityId, {
@@ -144,8 +182,10 @@ export class DeckStore {
       this.#patchRun(next, runId, data);
     else if (event.event.startsWith("workflow.") && workflowId)
       this.#patchWorkflow(next, workflowId, data);
+    else if (event.event.startsWith("group.") && groupId)
+      this.#patchGroup(next, groupId, data);
     else if (event.event.includes("question") || event.event === "task.blocked")
-      this.#question(next, event, data, taskId, agentId);
+      this.#question(next, event, data, taskId, runId, agentId);
     else if (event.event.includes("result"))
       this.#result(next, event, data, taskId, runId);
 
@@ -212,30 +252,77 @@ export class DeckStore {
           : {}),
       });
   }
+  #patchGroup(
+    state: DeckState,
+    id: string,
+    data: Record<string, unknown>,
+  ): void {
+    const old = state.groups.get(id);
+    const next = { ...(old ?? { id, state: "unknown" }), ...data } as DeckGroup;
+    state.groups.set(id, {
+      ...next,
+      id,
+      state: typeof data.state === "string" ? data.state : next.state,
+      ...(Array.isArray(data.agentIds)
+        ? { agentIds: stringArray(data.agentIds) }
+        : {}),
+      ...(Array.isArray(data.taskIds)
+        ? { taskIds: stringArray(data.taskIds) }
+        : {}),
+      ...(Array.isArray(data.questionIds)
+        ? { questionIds: stringArray(data.questionIds) }
+        : {}),
+      ...(Array.isArray(data.resultIds)
+        ? { resultIds: stringArray(data.resultIds) }
+        : {}),
+    });
+  }
   #question(
     state: DeckState,
     event: DeckEvent,
     data: Record<string, unknown>,
     taskId?: string,
+    runId?: string,
     agentId?: string,
   ): void {
     const id = String(data.id ?? event.refs.questionId ?? event.id);
     const old = state.questions.get(id);
+    const body = asRecord(data.payload) ?? {};
+    const terminalState =
+      event.event === "question.answered"
+        ? "answered"
+        : event.event === "question.timed_out"
+          ? "timed_out"
+          : event.event === "question.cancelled"
+            ? "cancelled"
+            : undefined;
     state.questions.set(id, {
       ...old,
       id,
       ...(taskId ? { taskId } : {}),
+      ...(runId ? { runId } : {}),
       ...(agentId ? { agentId } : {}),
       prompt: String(
         data.prompt ??
           data.question ??
+          body.prompt ??
+          body.question ??
           old?.prompt ??
           "Blocked task requires attention.",
       ),
-      ...(Array.isArray(data.options)
-        ? { options: stringArray(data.options) }
+      ...(Array.isArray(data.options ?? body.options)
+        ? { options: normalizeQuestionOptions(data.options ?? body.options) }
         : {}),
-      answered: data.answered === true || old?.answered === true,
+      ...(body.allowFreeform === true ? { allowFreeform: true } : {}),
+      ...(terminalState
+        ? { state: terminalState }
+        : old?.state
+          ? { state: old.state }
+          : { state: "open" }),
+      answered:
+        data.answered === true ||
+        terminalState === "answered" ||
+        old?.answered === true,
       ...(typeof data.timeoutAt === "string"
         ? { timeoutAt: data.timeoutAt }
         : old?.timeoutAt
@@ -269,6 +356,7 @@ export class DeckStore {
   ): void {
     const id = String(data.id ?? event.refs.resultId ?? event.id);
     const old = state.results.get(id);
+    const body = asRecord(data.payload) ?? {};
     state.results.set(
       id,
       this.#normalizeResult({
@@ -284,16 +372,20 @@ export class DeckStore {
               : data.status === "pending"
                 ? "pending"
                 : "accepted",
-        ...(typeof data.summary === "string" ? { summary: data.summary } : {}),
-        ...(data.evidence !== undefined
-          ? { evidence: stringArray(data.evidence) }
+        ...(typeof (data.summary ?? body.summary) === "string"
+          ? { summary: String(data.summary ?? body.summary) }
           : {}),
-        ...(data.tests !== undefined ? { tests: stringArray(data.tests) } : {}),
-        ...(data.artifacts !== undefined
-          ? { artifacts: stringArray(data.artifacts) }
+        ...(data.evidence !== undefined || body.evidence !== undefined
+          ? { evidence: stringArray(data.evidence ?? body.evidence) }
           : {}),
-        ...(data.unresolved !== undefined
-          ? { unresolved: stringArray(data.unresolved) }
+        ...(data.tests !== undefined || body.tests !== undefined
+          ? { tests: stringArray(data.tests ?? body.tests) }
+          : {}),
+        ...(data.artifacts !== undefined || body.artifacts !== undefined
+          ? { artifacts: stringArray(data.artifacts ?? body.artifacts) }
+          : {}),
+        ...(data.unresolved !== undefined || body.unresolved !== undefined
+          ? { unresolved: stringArray(data.unresolved ?? body.unresolved) }
           : {}),
       }),
     );
@@ -310,11 +402,20 @@ export class DeckStore {
     else if (event.event.includes("recover")) kind = "recovery";
     if (!kind || this.#seenNotifications.has(event.id)) return;
     this.#seenNotifications.add(event.id);
+    const body = asRecord(data.payload) ?? {};
     this.#notifications.unshift({
       id: event.id,
       kind,
       seq: event.seq,
-      text: String(data.message ?? data.summary ?? event.event),
+      text: String(
+        data.message ??
+          data.summary ??
+          data.prompt ??
+          body.message ??
+          body.summary ??
+          body.prompt ??
+          event.event,
+      ),
     });
     this.#notifications = this.#notifications.slice(0, 32);
     while (this.#seenNotifications.size > 64) {
@@ -328,6 +429,120 @@ export class DeckStore {
   }
 }
 
+function present<T>(value: T | undefined): value is T {
+  return value !== undefined;
+}
+
+function normalizeQuestionOptions(value: unknown): DeckQuestionOption[] {
+  return array<unknown>(value).flatMap((item, index) => {
+    if (typeof item === "string") return [{ id: item, label: item }];
+    const option = asRecord(item);
+    if (!option) return [];
+    const id =
+      idFrom(option.id) ?? idFrom(option.optionId) ?? String(index + 1);
+    const label =
+      idFrom(option.label) ?? idFrom(option.text) ?? idFrom(option.title) ?? id;
+    return [{ id, label }];
+  });
+}
+
+function normalizeQuestion(value: unknown): DeckQuestion | undefined {
+  const source = asRecord(value);
+  if (!source) return undefined;
+  const id = idFrom(source.id);
+  if (!id) return undefined;
+  const payload = asRecord(source.payload) ?? {};
+  const state = typeof source.state === "string" ? source.state : undefined;
+  const question: DeckQuestion = {
+    id,
+    prompt: String(
+      source.prompt ??
+        payload.prompt ??
+        payload.question ??
+        "Question details are unavailable.",
+    ),
+    answered: source.answered === true || state === "answered",
+  };
+  for (const key of ["taskId", "runId", "agentId", "timeoutAt"] as const) {
+    const field = idFrom(source[key]);
+    if (field) question[key] = field;
+  }
+  if (
+    state === "open" ||
+    state === "answered" ||
+    state === "cancelled" ||
+    state === "timed_out"
+  )
+    question.state = state;
+  const options = normalizeQuestionOptions(source.options ?? payload.options);
+  if (options.length > 0) question.options = options;
+  if (source.allowFreeform === true || payload.allowFreeform === true)
+    question.allowFreeform = true;
+  return question;
+}
+
+function normalizeResult(value: unknown): DeckResult | undefined {
+  const source = asRecord(value);
+  if (!source) return undefined;
+  const id = idFrom(source.id);
+  if (!id) return undefined;
+  const payload = asRecord(source.payload) ?? {};
+  const rawStatus = source.status ?? payload.status;
+  const result: DeckResult = {
+    id,
+    status:
+      rawStatus === "failed"
+        ? "failed"
+        : rawStatus === "missing"
+          ? "missing"
+          : rawStatus === "pending"
+            ? "pending"
+            : "accepted",
+  };
+  for (const key of ["taskId", "runId"] as const) {
+    const field = idFrom(source[key]);
+    if (field) result[key] = field;
+  }
+  const summary = idFrom(source.summary) ?? idFrom(payload.summary);
+  if (summary) result.summary = summary;
+  for (const key of ["evidence", "tests", "artifacts", "unresolved"] as const) {
+    const items = stringArray(source[key] ?? payload[key]);
+    if (items.length > 0) result[key] = items;
+  }
+  return result;
+}
+
+function normalizeGroup(value: unknown): DeckGroup | undefined {
+  const source = asRecord(value);
+  if (!source) return undefined;
+  const id = idFrom(source.id) ?? idFrom(source.groupId);
+  if (!id) return undefined;
+  const group: DeckGroup = {
+    id,
+    state: idFrom(source.state) ?? idFrom(source.status) ?? "unknown",
+  };
+  for (const key of [
+    "name",
+    "title",
+    "parentAgentId",
+    "objective",
+    "blockedReason",
+  ] as const) {
+    const field = idFrom(source[key]);
+    if (field) group[key] = field;
+  }
+  for (const key of [
+    "agentIds",
+    "taskIds",
+    "questionIds",
+    "resultIds",
+  ] as const) {
+    const items = stringArray(source[key]);
+    if (items.length > 0) group[key] = items;
+  }
+  return group;
+}
+
 export function snapshotFromBroker(value: unknown): DeckSnapshot {
   const record = asRecord(value) ?? {};
   return {
@@ -339,7 +554,12 @@ export function snapshotFromBroker(value: unknown): DeckSnapshot {
     tasks: array<Task>(record.tasks),
     runs: array<Run>(record.runs),
     workflows: array<Workflow>(record.workflows),
-    questions: array<DeckQuestion>(record.questions),
-    results: array<DeckResult>(record.results),
+    groups: array<unknown>(record.groups).map(normalizeGroup).filter(present),
+    questions: array<unknown>(record.questions)
+      .map(normalizeQuestion)
+      .filter(present),
+    results: array<unknown>(record.results)
+      .map(normalizeResult)
+      .filter(present),
   };
 }

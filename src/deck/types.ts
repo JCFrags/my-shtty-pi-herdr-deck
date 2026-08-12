@@ -1,12 +1,20 @@
 import type { Agent, Run, Task, Workflow } from "../state/types.js";
 
+export interface DeckQuestionOption {
+  id: string;
+  label: string;
+}
+
 export interface DeckQuestion {
   id: string;
   taskId?: string;
+  runId?: string;
   agentId?: string;
   prompt: string;
-  options?: string[];
+  options?: DeckQuestionOption[];
+  allowFreeform?: boolean;
   answered?: boolean;
+  state?: "open" | "answered" | "cancelled" | "timed_out";
   timeoutAt?: string;
 }
 
@@ -22,12 +30,28 @@ export interface DeckResult {
   unresolved?: string[];
 }
 
+/** A deck-only compatibility view of the lightweight group broker surface. */
+export interface DeckGroup {
+  id: string;
+  name?: string;
+  title?: string;
+  state: string;
+  agentIds?: string[];
+  taskIds?: string[];
+  questionIds?: string[];
+  resultIds?: string[];
+  parentAgentId?: string;
+  objective?: string;
+  blockedReason?: string;
+}
+
 export interface DeckSnapshot {
   seq: number;
   agents: Agent[];
   tasks: Task[];
   runs?: Run[];
   workflows: Workflow[];
+  groups?: DeckGroup[];
   questions?: DeckQuestion[];
   results?: DeckResult[];
 }
@@ -47,6 +71,7 @@ export interface DeckState {
   tasks: Map<string, Task>;
   runs: Map<string, Run>;
   workflows: Map<string, Workflow>;
+  groups: Map<string, DeckGroup>;
   questions: Map<string, DeckQuestion>;
   results: Map<string, DeckResult>;
 }
