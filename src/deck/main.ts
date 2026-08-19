@@ -3,20 +3,34 @@ import type {
   ProcessTerminal as ProcessTerminalType,
   TUI as TuiType,
 } from "@pi-herdr-deck/tui";
-import {
-  hasComponentMouseApi,
-  PI_COMPATIBILITY_MESSAGE,
-} from "../bridge/capabilities.js";
 import { BrokerClient } from "./broker-client.js";
 import { BrokerDeckApp } from "./broker-app.js";
 import { resolveBrokerContext } from "./socket.js";
 
+interface DeckTui extends TuiType {
+  setLayoutRoot(component: Component | undefined): void;
+}
+
 interface TuiRuntimeModule {
-  TUI: new (
+  TuiAltScreen: new (
     terminal: ProcessTerminalType,
     showHardwareCursor?: boolean,
-  ) => TuiType;
+    logDirectory?: string,
+    options?: { mouse?: boolean },
+  ) => DeckTui;
   ProcessTerminal: new () => ProcessTerminalType;
+}
+
+export const DECK_TUI_COMPATIBILITY_MESSAGE =
+  "Pi Herdr Deck requires Pi TUI with TuiAltScreen and ProcessTerminal.";
+
+export function hasDeckTuiApi(value: unknown): value is TuiRuntimeModule {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.TuiAltScreen === "function" &&
+    typeof candidate.ProcessTerminal === "function"
+  );
 }
 
 function conciseError(error: unknown): string {
@@ -36,7 +50,7 @@ export async function main(): Promise<void> {
   ] as const) {
     try {
       const candidate: unknown = await import(specifier);
-      if (hasComponentMouseApi(candidate)) {
+      if (hasDeckTuiApi(candidate)) {
         imported = candidate;
         break;
       }
@@ -45,17 +59,18 @@ export async function main(): Promise<void> {
     }
   }
   if (!imported) {
-    console.error(PI_COMPATIBILITY_MESSAGE);
+    console.error(DECK_TUI_COMPATIBILITY_MESSAGE);
     process.exitCode = 2;
     return;
   }
 
   const tuiModule = imported as TuiRuntimeModule;
   const terminal = new tuiModule.ProcessTerminal();
-  const tui = new tuiModule.TUI(terminal, true);
+  const tui = new tuiModule.TuiAltScreen(terminal, true, undefined, {
+    mouse: true,
+  });
   terminal.setTitle("Pi Herdr Deck");
   tui.start();
-  tui.setMouseTracking(true);
   const requestRender = (): void => tui.requestRender();
   let client: BrokerClient | undefined;
   let app: BrokerDeckApp | undefined;
@@ -71,8 +86,8 @@ export async function main(): Promise<void> {
       getHeight: () => terminal.rows,
       onClose: close,
     });
-    tui.addChild(app as Component);
-    tui.setFocus(app as Component);
+    tui.setLayoutRoot(app);
+    tui.setFocus(app);
     client.start();
     await client.waitForReady();
     requestRender();
@@ -88,7 +103,7 @@ export async function main(): Promise<void> {
   } finally {
     app?.dispose();
     client?.stop("Deck closed.");
-    tui.setMouseTracking(false);
+    tui.setLayoutRoot(undefined);
     tui.stop();
   }
 }
