@@ -163,6 +163,53 @@ export interface AgentGroup {
   stoppedAt?: string;
   closedAt?: string;
 }
+export type HerdrMetadataState =
+  | "requested"
+  | "compiling"
+  | "validated"
+  | "scheduled"
+  | "creating"
+  | "starting"
+  | "working"
+  | "blocked"
+  | "settling"
+  | "settled"
+  | "exited"
+  | "cleanup_pending"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "orphaned"
+  | "conflict"
+  | "closed";
+export interface HerdrTaskMetadata {
+  schemaVersion: 1;
+  metadataId: string;
+  orchestrationId: string;
+  workflowId: string;
+  taskId: string;
+  runId: string;
+  agentId: string;
+  parentAgentId?: string;
+  profileId: string;
+  state: HerdrMetadataState;
+  placement: "background";
+  transcriptPolicy: "retain-tab";
+  workspaceId: string;
+  tabId: string;
+  paneId: string;
+  terminalId: string;
+  piSessionRef: string;
+  startedAt: string;
+  updatedAt: string;
+  settledAt: string | null;
+  exitedAt: string | null;
+  transcriptRef: string | null;
+  resultRef: string | null;
+  questionRef: string | null;
+  errorCode: string | null;
+  metadataDigest: string;
+}
 export interface OrchestrationState {
   schemaVersion: number;
   lastEventSeq: number;
@@ -174,6 +221,7 @@ export interface OrchestrationState {
   results?: Record<string, ResultRecord>;
   questions?: Record<string, QuestionRecord>;
   groups?: Record<string, AgentGroup>;
+  herdrMetadata?: Record<string, HerdrTaskMetadata>;
   herdrResources?: Record<
     string,
     {

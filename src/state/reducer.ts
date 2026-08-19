@@ -1,4 +1,6 @@
 import { OrchestratorError } from "../shared/errors.js";
+import { canonicalJson, sha256 } from "../shared/canonical-json.js";
+import type { HerdrTaskMetadata } from "./types.js";
 import type { EventInput, OrchestrationState, StoredEvent } from "./types.js";
 import type {
   TaskState,
@@ -31,6 +33,7 @@ export const emptyState = (): OrchestrationState => ({
   results: {},
   questions: {},
   groups: {},
+  herdrMetadata: {},
   herdrResources: {},
   idempotency: {},
 });
@@ -58,6 +61,7 @@ const known = new Set([
   "herdr.provision.intent",
   "herdr.provision.outcome",
   "herdr.reconciled",
+  "herdr.metadata_projected",
   "agent.registered",
   "agent.heartbeat",
   "agent.state_changed",
@@ -105,6 +109,7 @@ export function reduce(
     results: state.results ?? {},
     questions: state.questions ?? {},
     groups: state.groups ?? {},
+    herdrMetadata: state.herdrMetadata ?? {},
   };
   const p = event.payload as Record<string, unknown>;
   const taskId = event.entityRefs?.taskId;
@@ -824,6 +829,126 @@ export function reduce(
             event.type === "question.cancelled" ? "cancelled" : "timed_out",
         },
       };
+      break;
+    }
+    case "herdr.metadata_projected": {
+      const allowed = new Set([
+        "schemaVersion",
+        "metadataId",
+        "orchestrationId",
+        "workflowId",
+        "taskId",
+        "runId",
+        "agentId",
+        "parentAgentId",
+        "profileId",
+        "state",
+        "placement",
+        "transcriptPolicy",
+        "workspaceId",
+        "tabId",
+        "paneId",
+        "terminalId",
+        "piSessionRef",
+        "startedAt",
+        "updatedAt",
+        "settledAt",
+        "exitedAt",
+        "transcriptRef",
+        "resultRef",
+        "questionRef",
+        "errorCode",
+        "metadataDigest",
+      ]);
+      if (Object.keys(p).some((key) => !allowed.has(key)))
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Herdr metadata contains a forbidden field.",
+        );
+      const metadata = p as unknown as HerdrTaskMetadata;
+      const states = new Set([
+        "requested",
+        "compiling",
+        "validated",
+        "scheduled",
+        "creating",
+        "starting",
+        "working",
+        "blocked",
+        "settling",
+        "settled",
+        "exited",
+        "cleanup_pending",
+        "completed",
+        "failed",
+        "cancelled",
+        "orphaned",
+        "conflict",
+        "closed",
+      ]);
+      const id = metadata.metadataId;
+      const withoutDigest = Object.fromEntries(
+        Object.entries(p).filter(([key]) => key !== "metadataDigest"),
+      );
+      if (
+        metadata.schemaVersion !== 1 ||
+        !/^hmd_[A-Za-z0-9_-]{1,128}$/u.test(id) ||
+        !states.has(metadata.state) ||
+        metadata.placement !== "background" ||
+        metadata.transcriptPolicy !== "retain-tab" ||
+        sha256(canonicalJson(withoutDigest)) !== metadata.metadataDigest ||
+        [
+          metadata.orchestrationId,
+          metadata.workflowId,
+          metadata.taskId,
+          metadata.runId,
+          metadata.agentId,
+          metadata.profileId,
+          metadata.workspaceId,
+          metadata.tabId,
+          metadata.paneId,
+          metadata.terminalId,
+          metadata.piSessionRef,
+          metadata.startedAt,
+          metadata.updatedAt,
+        ].some(
+          (value) =>
+            typeof value !== "string" ||
+            value.length === 0 ||
+            value.length > 256,
+        ) ||
+        [metadata.transcriptRef, metadata.resultRef, metadata.questionRef].some(
+          (value) =>
+            value !== null &&
+            (typeof value !== "string" ||
+              !/^[A-Za-z][A-Za-z0-9_-]{1,255}$/u.test(value)),
+        )
+      )
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Herdr metadata projection is invalid.",
+        );
+      const current = next.herdrMetadata![id];
+      const terminal = new Set([
+        "completed",
+        "failed",
+        "cancelled",
+        "orphaned",
+        "conflict",
+        "closed",
+      ]);
+      if (
+        current &&
+        (current.taskId !== metadata.taskId ||
+          current.runId !== metadata.runId ||
+          current.agentId !== metadata.agentId ||
+          (terminal.has(current.state) && current.state !== metadata.state))
+      )
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Herdr metadata identity or terminal state changed.",
+        );
+      next.herdrMetadata = { ...next.herdrMetadata, [id]: { ...metadata } };
       break;
     }
     case "herdr.provision.intent": {

@@ -1388,4 +1388,4 @@ test("fresh readiness finalization failure stops its exact child and preserves r
   }
 });
 
-const PARENT_TOOL_COUNT = 25;
+const PARENT_TOOL_COUNT = 26;

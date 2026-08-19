@@ -1,6 +1,7 @@
 import type { ParentToolName, ParentToolRequest } from "./parent-tools.js";
 
 export const PARENT_TOOL_NAMES = [
+  "delegate_compact",
   "delegate",
   "agent_spawn",
   "agent_list",
@@ -38,6 +39,13 @@ export interface ParentToolMetadata {
 }
 
 const METADATA: Record<ParentToolName, ParentToolMetadata> = {
+  delegate_compact: {
+    method: "compact.delegate",
+    targetParameters: [],
+    requiresTarget: false,
+    requiresDelegation: true,
+    mutating: true,
+  },
   delegate: {
     method: "delegate.execute",
     targetParameters: [],

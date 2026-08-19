@@ -242,6 +242,7 @@ const questionSchema = {
 };
 const parentInputKeys: Readonly<Record<ParentToolName, readonly string[]>> =
   Object.freeze({
+    delegate_compact: ["text", "accept", "workflowDigest"],
     delegate: [
       "mode",
       "title",

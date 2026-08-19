@@ -1,4 +1,10 @@
+import {
+  acceptedCompactWorkflow,
+  compileCompactDelegation,
+} from "../broker/compact-delegation.js";
+
 export type ParentToolName =
+  | "delegate_compact"
   | "delegate"
   | "agent_spawn"
   | "agent_list"
@@ -161,7 +167,7 @@ export class ParentToolService {
         error: { code: "CANCELLED", message: "The request was cancelled." },
       };
     if (
-      request.tool === "delegate" &&
+      (request.tool === "delegate" || request.tool === "delegate_compact") &&
       !principal.permissions.includes("delegate") &&
       !principal.permissions.includes("manage:all")
     )
@@ -173,10 +179,57 @@ export class ParentToolService {
         },
       };
     try {
+      let brokerMethod = methodForTool(request.tool);
+      let brokerInput = mapParentToolInput(request.tool, request.input);
+      if (request.tool === "delegate_compact") {
+        const text = request.input.text;
+        if (typeof text !== "string")
+          throw Object.assign(
+            new Error("Compact delegation text is required."),
+            { code: "COMPACT_INPUT_INVALID" },
+          );
+        const trusted = new Set([
+          "implementer",
+          "planner",
+          "reviewer",
+          "scout",
+          "test-runner",
+        ]);
+        const compiled = compileCompactDelegation(text, (profileId) =>
+          trusted.has(profileId) ? { profileId } : undefined,
+        );
+        if (request.input.accept !== true) {
+          return {
+            ok: true,
+            result: safeProjection(
+              {
+                schemaVersion: compiled.schemaVersion,
+                workflowDigest: compiled.workflowDigest,
+                stepCount: compiled.stepCount,
+                steps: compiled.steps,
+              },
+              this.#limits,
+            ),
+          };
+        }
+        const workflow = acceptedCompactWorkflow(
+          compiled,
+          typeof request.input.workflowDigest === "string"
+            ? request.input.workflowDigest
+            : undefined,
+        );
+        brokerMethod = "delegate.execute";
+        brokerInput = {
+          ...workflow,
+          ...(request.input.parentAgentId !== undefined
+            ? { parentAgentId: request.input.parentAgentId }
+            : {}),
+        };
+      }
       const result = safeProjection(
         await this.#broker.invoke(
-          methodForTool(request.tool),
-          mapParentToolInput(request.tool, request.input),
+          brokerMethod,
+          brokerInput,
           principal,
           request.idempotencyKey,
         ),
