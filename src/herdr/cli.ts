@@ -126,6 +126,37 @@ export class HerdrCli {
     this.capabilities.require(["agent.stop"]);
     await this.runner.run(["agent", "stop", id]);
   }
+  async quitAgent(id: string) {
+    this.capabilities.require(["agent.prompt"]);
+    await this.runner.run(["agent", "prompt", id, "/quit"]);
+  }
+  async reportPaneMetadata(input: {
+    paneId: string;
+    title: string;
+    tokens: Readonly<Record<string, string>>;
+    sequence: number;
+  }) {
+    this.capabilities.require(["pane.report_metadata"]);
+    await this.runner.run([
+      "pane",
+      "report-metadata",
+      input.paneId,
+      "--source",
+      "pi.herdr.orchestrator",
+      "--agent",
+      "pi",
+      "--applies-to-source",
+      "herdr:pi",
+      "--title",
+      input.title,
+      ...Object.entries(input.tokens).flatMap(([key, value]) => [
+        "--token",
+        `${key}=${value}`,
+      ]),
+      "--seq",
+      String(input.sequence),
+    ]);
+  }
   async startPi(input: {
     name: string;
     paneId: string;

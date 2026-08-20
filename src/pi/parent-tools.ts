@@ -1,4 +1,5 @@
 export type ParentToolName =
+  | "delegate_compact"
   | "delegate"
   | "agent_spawn"
   | "agent_list"
@@ -23,7 +24,9 @@ export type ParentToolName =
   | "task_list"
   | "task_get"
   | "task_collect"
-  | "task_cancel";
+  | "task_cancel"
+  | "task_metadata"
+  | "task_transcript_close";
 export interface ToolPrincipal {
   readonly id: string;
   readonly kind: "human" | "pi_parent" | "pi_child";
@@ -161,7 +164,7 @@ export class ParentToolService {
         error: { code: "CANCELLED", message: "The request was cancelled." },
       };
     if (
-      request.tool === "delegate" &&
+      (request.tool === "delegate" || request.tool === "delegate_compact") &&
       !principal.permissions.includes("delegate") &&
       !principal.permissions.includes("manage:all")
     )

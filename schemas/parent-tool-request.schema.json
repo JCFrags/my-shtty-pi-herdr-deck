@@ -8,6 +8,7 @@
   "properties": {
     "tool": {
       "enum": [
+        "delegate_compact",
         "delegate",
         "agent_spawn",
         "agent_list",
@@ -32,7 +33,9 @@
         "task_list",
         "task_get",
         "task_collect",
-        "task_cancel"
+        "task_cancel",
+        "task_metadata",
+        "task_transcript_close"
       ]
     },
     "input": {

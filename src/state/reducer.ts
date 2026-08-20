@@ -1,4 +1,6 @@
 import { OrchestratorError } from "../shared/errors.js";
+import { canonicalJson, sha256 } from "../shared/canonical-json.js";
+import type { HerdrTaskMetadata } from "./types.js";
 import type { EventInput, OrchestrationState, StoredEvent } from "./types.js";
 import type {
   TaskState,
@@ -31,6 +33,7 @@ export const emptyState = (): OrchestrationState => ({
   results: {},
   questions: {},
   groups: {},
+  herdrMetadata: {},
   herdrResources: {},
   idempotency: {},
 });
@@ -58,6 +61,8 @@ const known = new Set([
   "herdr.provision.intent",
   "herdr.provision.outcome",
   "herdr.reconciled",
+  "herdr.metadata_projected",
+  "compact.delegation_scheduled",
   "agent.registered",
   "agent.heartbeat",
   "agent.state_changed",
@@ -105,6 +110,7 @@ export function reduce(
     results: state.results ?? {},
     questions: state.questions ?? {},
     groups: state.groups ?? {},
+    herdrMetadata: state.herdrMetadata ?? {},
   };
   const p = event.payload as Record<string, unknown>;
   const taskId = event.entityRefs?.taskId;
@@ -143,6 +149,173 @@ export function reduce(
           response: p.response,
         };
       }
+      break;
+    }
+    case "compact.delegation_scheduled": {
+      const workflowId = p.workflowId;
+      const parentAgentId = p.parentAgentId;
+      const key = p.idempotencyKey;
+      const paramsHash = p.paramsHash;
+      const definitions = p.tasks;
+      const response = p.response as Record<string, unknown> | undefined;
+      const responseTasks = response?.tasks;
+      if (
+        typeof workflowId !== "string" ||
+        event.entityRefs?.workflowId !== workflowId ||
+        next.workflows[workflowId] ||
+        typeof parentAgentId !== "string" ||
+        !next.agents[parentAgentId] ||
+        p.mode !== "dag" ||
+        Object.keys(p).length !== 7 ||
+        ![
+          "workflowId",
+          "parentAgentId",
+          "mode",
+          "idempotencyKey",
+          "paramsHash",
+          "response",
+          "tasks",
+        ].every((field) => Object.hasOwn(p, field)) ||
+        typeof key !== "string" ||
+        key.length < 1 ||
+        key.length > 256 ||
+        typeof paramsHash !== "string" ||
+        !/^[a-f0-9]{64}$/u.test(paramsHash) ||
+        next.idempotency[key] ||
+        !Array.isArray(definitions) ||
+        definitions.length < 1 ||
+        definitions.length > 16 ||
+        !response ||
+        Object.keys(response).length !== 3 ||
+        !["workflowId", "state", "tasks"].every((field) =>
+          Object.hasOwn(response, field),
+        ) ||
+        response.workflowId !== workflowId ||
+        response.state !== "scheduled" ||
+        !Array.isArray(responseTasks) ||
+        responseTasks.length !== definitions.length
+      )
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Compact delegation schedule is invalid.",
+        );
+      const taskIds: string[] = [];
+      const tasks: Record<string, Task> = { ...next.tasks };
+      for (let index = 0; index < definitions.length; index++) {
+        const definition = definitions[index] as Record<string, unknown>;
+        const responseTask = responseTasks[index] as
+          Record<string, unknown> | undefined;
+        const taskId = definition.taskId;
+        const project = definition.project as
+          Record<string, unknown> | undefined;
+        const compact = project?.compact as
+          { workflowDigest?: unknown; transcriptPolicy?: unknown } | undefined;
+        if (
+          typeof taskId !== "string" ||
+          !/^tsk_[A-Za-z0-9_-]{1,128}$/u.test(taskId) ||
+          Object.keys(definition).length !== 10 ||
+          ![
+            "taskId",
+            "title",
+            "objective",
+            "createdAt",
+            "parentAgentId",
+            "workflowId",
+            "profileId",
+            "dependencies",
+            "project",
+            "timeoutAt",
+          ].every((field) => Object.hasOwn(definition, field)) ||
+          tasks[taskId] ||
+          definition.workflowId !== workflowId ||
+          definition.parentAgentId !== parentAgentId ||
+          typeof definition.title !== "string" ||
+          definition.title.length < 1 ||
+          definition.title.length > 256 ||
+          typeof definition.objective !== "string" ||
+          definition.objective.length < 1 ||
+          Buffer.byteLength(definition.objective, "utf8") > 65_536 ||
+          typeof definition.createdAt !== "string" ||
+          !Number.isFinite(Date.parse(definition.createdAt)) ||
+          typeof definition.profileId !== "string" ||
+          !Array.isArray(definition.dependencies) ||
+          definition.dependencies.some((item) => typeof item !== "string") ||
+          !project ||
+          Object.keys(project).length !== 7 ||
+          ![
+            "cwd",
+            "workspaceId",
+            "isolation",
+            "requestedSpawnPolicy",
+            "effectiveSpawnPolicy",
+            "modelPolicyHash",
+            "compact",
+          ].every((field) => Object.hasOwn(project, field)) ||
+          typeof project.cwd !== "string" ||
+          typeof project.workspaceId !== "string" ||
+          !compact ||
+          Object.keys(compact).length !== 2 ||
+          !Object.hasOwn(compact, "workflowDigest") ||
+          !Object.hasOwn(compact, "transcriptPolicy") ||
+          !/^[a-f0-9]{64}$/u.test(String(compact.workflowDigest)) ||
+          compact.transcriptPolicy !== "retain-tab" ||
+          typeof definition.timeoutAt !== "string" ||
+          !Number.isFinite(Date.parse(definition.timeoutAt)) ||
+          !responseTask ||
+          Object.keys(responseTask).length !== 3 ||
+          !["key", "taskId", "state"].every((field) =>
+            Object.hasOwn(responseTask, field),
+          ) ||
+          responseTask.taskId !== taskId ||
+          responseTask.state !== "queued" ||
+          typeof responseTask.key !== "string"
+        )
+          throw new OrchestratorError(
+            "STATE_CORRUPT",
+            "Compact delegation task definition is invalid.",
+          );
+        taskIds.push(taskId);
+        tasks[taskId] = {
+          id: taskId,
+          title: definition.title,
+          objective: definition.objective,
+          state: "queued",
+          createdAt: definition.createdAt,
+          parentAgentId,
+          workflowId,
+          profileId: definition.profileId,
+          dependencies: [...(definition.dependencies as string[])],
+          timeoutAt: definition.timeoutAt,
+          project,
+          runIds: [],
+        };
+      }
+      if (
+        new Set(taskIds).size !== taskIds.length ||
+        definitions.some((definition) =>
+          (definition as { dependencies: string[] }).dependencies.some(
+            (dependency) => !taskIds.includes(dependency),
+          ),
+        )
+      )
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Compact delegation dependency correlation is invalid.",
+        );
+      next.workflows = {
+        ...next.workflows,
+        [workflowId]: { id: workflowId, state: "created", taskIds },
+      };
+      next.tasks = tasks;
+      next.idempotency = {
+        ...next.idempotency,
+        [key]: {
+          principalId: event.actor.principalId,
+          method: "compact.delegate",
+          paramsHash,
+          response,
+        },
+      };
       break;
     }
     case "task.state_changed": {
@@ -824,6 +997,212 @@ export function reduce(
             event.type === "question.cancelled" ? "cancelled" : "timed_out",
         },
       };
+      break;
+    }
+    case "herdr.metadata_projected": {
+      const allowed = new Set([
+        "schemaVersion",
+        "metadataId",
+        "orchestrationId",
+        "workflowId",
+        "taskId",
+        "runId",
+        "agentId",
+        "parentAgentId",
+        "profileId",
+        "state",
+        "placement",
+        "transcriptPolicy",
+        "workspaceId",
+        "tabId",
+        "paneId",
+        "terminalId",
+        "piSessionRef",
+        "startedAt",
+        "updatedAt",
+        "settledAt",
+        "exitedAt",
+        "transcriptRef",
+        "resultRef",
+        "questionRef",
+        "errorCode",
+        "metadataDigest",
+      ]);
+      if (
+        Object.keys(p).some((key) => !allowed.has(key)) ||
+        [...allowed].some(
+          (key) => key !== "parentAgentId" && !Object.hasOwn(p, key),
+        )
+      )
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Herdr metadata fields are not exact.",
+        );
+      const metadata = p as unknown as HerdrTaskMetadata;
+      const states = new Set([
+        "requested",
+        "compiling",
+        "validated",
+        "scheduled",
+        "creating",
+        "starting",
+        "working",
+        "blocked",
+        "settling",
+        "settled",
+        "exited",
+        "cleanup_pending",
+        "completed",
+        "failed",
+        "cancelled",
+        "orphaned",
+        "conflict",
+        "closed",
+      ]);
+      const id = metadata.metadataId;
+      const withoutDigest = Object.fromEntries(
+        Object.entries(p).filter(([key]) => key !== "metadataDigest"),
+      );
+      if (
+        metadata.schemaVersion !== 1 ||
+        !/^hmd_[A-Za-z0-9_-]{1,128}$/u.test(id) ||
+        !states.has(metadata.state) ||
+        metadata.placement !== "background" ||
+        metadata.transcriptPolicy !== "retain-tab" ||
+        sha256(canonicalJson(withoutDigest)) !== metadata.metadataDigest ||
+        [
+          metadata.orchestrationId,
+          metadata.workflowId,
+          metadata.taskId,
+          metadata.runId,
+          metadata.agentId,
+          metadata.profileId,
+          metadata.workspaceId,
+          metadata.tabId,
+          metadata.paneId,
+          metadata.terminalId,
+          metadata.piSessionRef,
+          metadata.startedAt,
+          metadata.updatedAt,
+        ].some(
+          (value) =>
+            typeof value !== "string" ||
+            value.length === 0 ||
+            value.length > 256,
+        ) ||
+        [metadata.transcriptRef, metadata.resultRef, metadata.questionRef].some(
+          (value) =>
+            value !== null &&
+            (typeof value !== "string" ||
+              !/^[A-Za-z][A-Za-z0-9_-]{1,255}$/u.test(value)),
+        ) ||
+        [metadata.startedAt, metadata.updatedAt].some(
+          (value) => !Number.isFinite(Date.parse(value)),
+        ) ||
+        [metadata.settledAt, metadata.exitedAt].some(
+          (value) =>
+            value !== null &&
+            (typeof value !== "string" || !Number.isFinite(Date.parse(value))),
+        ) ||
+        (metadata.parentAgentId !== undefined &&
+          (typeof metadata.parentAgentId !== "string" ||
+            metadata.parentAgentId.length > 256)) ||
+        (metadata.errorCode !== null &&
+          (typeof metadata.errorCode !== "string" ||
+            !/^[A-Z][A-Z0-9_]{0,127}$/u.test(metadata.errorCode))) ||
+        event.entityRefs?.taskId !== metadata.taskId ||
+        event.entityRefs?.runId !== metadata.runId ||
+        event.entityRefs?.agentId !== metadata.agentId ||
+        event.entityRefs?.workflowId !== metadata.workflowId ||
+        !/^[a-f0-9]{64}$/u.test(event.entityRefs?.workflowDigest ?? "")
+      )
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Herdr metadata projection is invalid.",
+        );
+      const workflow = next.workflows[metadata.workflowId];
+      const task = next.tasks[metadata.taskId];
+      const run = next.runs[metadata.runId];
+      const agent = next.agents[metadata.agentId];
+      const resource = next.herdrResources?.[metadata.agentId];
+      const compact = task?.project?.compact as
+        { workflowDigest?: unknown; transcriptPolicy?: unknown } | undefined;
+      const result = metadata.resultRef
+        ? next.results?.[metadata.resultRef]
+        : undefined;
+      const question = metadata.questionRef
+        ? next.questions?.[metadata.questionRef]
+        : undefined;
+      if (
+        !workflow ||
+        !workflow.taskIds.includes(metadata.taskId) ||
+        !task ||
+        task.workflowId !== metadata.workflowId ||
+        task.profileId !== metadata.profileId ||
+        task.parentAgentId !== metadata.parentAgentId ||
+        !run ||
+        run.taskId !== metadata.taskId ||
+        run.agentId !== metadata.agentId ||
+        !agent ||
+        !resource ||
+        resource.agentId !== metadata.agentId ||
+        resource.workspaceId !== metadata.workspaceId ||
+        resource.tabId !== metadata.tabId ||
+        resource.paneId !== metadata.paneId ||
+        resource.terminalId !== metadata.terminalId ||
+        !resource.sessionId ||
+        `pis_${sha256(resource.sessionId).slice(0, 26)}` !==
+          metadata.piSessionRef ||
+        compact?.transcriptPolicy !== "retain-tab" ||
+        compact.workflowDigest !== event.entityRefs?.workflowDigest ||
+        (metadata.resultRef !== null &&
+          (!result ||
+            result.taskId !== metadata.taskId ||
+            result.runId !== metadata.runId ||
+            result.agentId !== metadata.agentId)) ||
+        (metadata.questionRef !== null &&
+          (!question ||
+            question.taskId !== metadata.taskId ||
+            question.runId !== metadata.runId ||
+            question.agentId !== metadata.agentId)) ||
+        Object.values(next.herdrMetadata ?? {}).some(
+          (item) =>
+            item.metadataId !== metadata.metadataId &&
+            item.runId === metadata.runId,
+        )
+      )
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Herdr metadata correlation is invalid.",
+        );
+      const current = next.herdrMetadata![id];
+      const terminal = new Set([
+        "completed",
+        "failed",
+        "cancelled",
+        "orphaned",
+        "conflict",
+        "closed",
+      ]);
+      if (
+        current &&
+        (current.taskId !== metadata.taskId ||
+          current.runId !== metadata.runId ||
+          current.agentId !== metadata.agentId ||
+          (terminal.has(current.state) &&
+            current.state !== metadata.state &&
+            metadata.state !== "cleanup_pending" &&
+            metadata.state !== "closed") ||
+          (current.state === "cleanup_pending" &&
+            metadata.state !== "cleanup_pending" &&
+            metadata.state !== "closed" &&
+            metadata.state !== "conflict"))
+      )
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Herdr metadata identity or terminal state changed.",
+        );
+      next.herdrMetadata = { ...next.herdrMetadata, [id]: { ...metadata } };
       break;
     }
     case "herdr.provision.intent": {

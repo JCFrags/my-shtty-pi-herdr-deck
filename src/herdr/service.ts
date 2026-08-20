@@ -1,5 +1,5 @@
 import type { EventStore } from "../state/event-store.js";
-import type { Agent } from "../state/types.js";
+import type { Agent, HerdrTaskMetadata } from "../state/types.js";
 import { reconcileAgents, type Reconciliation } from "./reconciler.js";
 import {
   HerdrProvisioner,
@@ -57,6 +57,61 @@ interface ExactPiPaneIdentity {
   worktreeId?: string;
   worktreePath?: string;
   generation?: number;
+}
+export interface RetainedTabGuard extends OccupantGuard {
+  workspaceId: string;
+  tabId: string;
+}
+function exactRetainedPane(
+  snapshot: HerdrSnapshot,
+  guard: RetainedTabGuard,
+  requireVacant: boolean,
+): void {
+  const panes = snapshot.panes.filter((item) => item.id === guard.paneId);
+  const tabs = snapshot.tabs.filter((item) => item.id === guard.tabId);
+  const workspaces = snapshot.workspaces.filter(
+    (item) => item.id === guard.workspaceId,
+  );
+  const pane = panes[0];
+  const occupants = snapshot.agents.filter(
+    (item) =>
+      item.paneId === guard.paneId || item.terminalId === guard.terminalId,
+  );
+  if (
+    panes.length !== 1 ||
+    tabs.length !== 1 ||
+    workspaces.length !== 1 ||
+    !pane ||
+    pane.terminalId !== guard.terminalId ||
+    pane.workspaceId !== guard.workspaceId ||
+    pane.tabId !== guard.tabId ||
+    snapshot.panes.filter((item) => item.terminalId === guard.terminalId)
+      .length !== 1 ||
+    (requireVacant && occupants.length !== 0) ||
+    (!requireVacant && occupants.length !== 1)
+  )
+    throw new Error("HERDR_IDENTITY_MISMATCH");
+}
+function exactRetainedTabAbsent(
+  snapshot: HerdrSnapshot,
+  guard: RetainedTabGuard,
+): boolean {
+  const exactWorkspace = snapshot.workspaces.filter(
+    (item) => item.id === guard.workspaceId,
+  );
+  const conflictingResource =
+    snapshot.tabs.some((item) => item.id === guard.tabId) ||
+    snapshot.panes.some(
+      (item) =>
+        item.id === guard.paneId || item.terminalId === guard.terminalId,
+    ) ||
+    snapshot.agents.some(
+      (item) =>
+        item.paneId === guard.paneId || item.terminalId === guard.terminalId,
+    );
+  if (exactWorkspace.length > 1 || conflictingResource)
+    throw new Error("HERDR_IDENTITY_MISMATCH");
+  return true;
 }
 function exactPiPane(
   snapshot: HerdrSnapshot,
@@ -601,6 +656,142 @@ export class HerdrService {
       );
       if (!agentId.startsWith("pane:"))
         await this.recordLifecycle(agentId, "stopped", "stop_succeeded");
+    });
+  }
+  async reportTaskMetadata(
+    guard: RetainedTabGuard,
+    metadata: HerdrTaskMetadata,
+    eventSequence: number,
+  ): Promise<void> {
+    const safe = /^[A-Za-z0-9_.:-]{1,128}$/u;
+    const tokens = {
+      task: metadata.taskId,
+      run: metadata.runId,
+      parent: metadata.parentAgentId ?? "root",
+      profile: metadata.profileId,
+      placement: metadata.placement,
+      transcript: metadata.transcriptPolicy,
+      lifecycle: metadata.state,
+    };
+    if (
+      !Number.isSafeInteger(eventSequence) ||
+      eventSequence < 1 ||
+      Object.values(tokens).some((value) => !safe.test(value))
+    )
+      throw new Error("HERDR_METADATA_INVALID");
+    await this.withAgentLock(metadata.agentId, async () => {
+      await this.#preflight?.();
+      this.#cli.requireMutationCapabilities([
+        "pane.report_metadata",
+        "session.snapshot",
+      ]);
+      exactPiPane(
+        await this.#cli.snapshot(),
+        guard.paneId,
+        guard.terminalId,
+        undefined,
+        undefined,
+        guard.sessionId,
+      );
+      await this.#cli.reportPaneMetadata({
+        paneId: guard.paneId,
+        title: `Task ${metadata.taskId.slice(-8)} · ${metadata.state}`,
+        tokens,
+        sequence: eventSequence,
+      });
+      exactPiPane(
+        await this.#cli.snapshot(),
+        guard.paneId,
+        guard.terminalId,
+        undefined,
+        undefined,
+        guard.sessionId,
+      );
+    });
+  }
+  async exitRetainingTab(guard: RetainedTabGuard): Promise<void> {
+    const agentId = this.agentForPane(guard.paneId) ?? `pane:${guard.paneId}`;
+    await this.withAgentLock(agentId, async () => {
+      await this.#preflight?.();
+      this.#cli.requireMutationCapabilities([
+        "agent.prompt",
+        "session.snapshot",
+      ]);
+      const before = await this.#cli.snapshot();
+      const occupants = before.agents.filter(
+        (item) =>
+          item.paneId === guard.paneId || item.terminalId === guard.terminalId,
+      );
+      if (occupants.length === 0) {
+        exactRetainedPane(before, guard, true);
+        if (!agentId.startsWith("pane:"))
+          await this.recordLifecycle(agentId, "stopped", "retained_tab_exit");
+        return;
+      }
+      exactRetainedPane(before, guard, false);
+      exactPiPane(
+        before,
+        guard.paneId,
+        guard.terminalId,
+        undefined,
+        undefined,
+        guard.sessionId,
+      );
+      await this.#cli.quitAgent(guard.paneId);
+      for (let attempt = 0; attempt < 40; attempt++) {
+        const snapshot = await this.#cli.snapshot();
+        const occupants = snapshot.agents.filter(
+          (item) =>
+            item.paneId === guard.paneId ||
+            item.terminalId === guard.terminalId,
+        );
+        if (occupants.length === 0) {
+          exactRetainedPane(snapshot, guard, true);
+          if (!agentId.startsWith("pane:"))
+            await this.recordLifecycle(agentId, "stopped", "retained_tab_exit");
+          return;
+        }
+        exactPiPane(
+          snapshot,
+          guard.paneId,
+          guard.terminalId,
+          undefined,
+          undefined,
+          guard.sessionId,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      throw new Error("HERDR_PROCESS_EXIT_TIMEOUT");
+    });
+  }
+  async closeRetainedTab(guard: RetainedTabGuard): Promise<void> {
+    const agentId = this.agentForPane(guard.paneId) ?? `pane:${guard.paneId}`;
+    await this.withAgentLock(agentId, async () => {
+      await this.#preflight?.();
+      this.#cli.requireMutationCapabilities(["tab.close", "session.snapshot"]);
+      const before = await this.#cli.snapshot();
+      if (!before.tabs.some((item) => item.id === guard.tabId)) {
+        exactRetainedTabAbsent(before, guard);
+        return;
+      }
+      exactRetainedPane(before, guard, true);
+      await this.#cli.closeTab(guard.tabId);
+      const after = await this.#cli.snapshot();
+      if (
+        after.tabs.some((item) => item.id === guard.tabId) ||
+        after.panes.some(
+          (item) =>
+            item.id === guard.paneId || item.terminalId === guard.terminalId,
+        ) ||
+        after.agents.some(
+          (item) =>
+            item.paneId === guard.paneId ||
+            item.terminalId === guard.terminalId,
+        )
+      )
+        throw new Error("HERDR_IDENTITY_MISMATCH");
+      if (!agentId.startsWith("pane:"))
+        await this.recordLifecycle(agentId, "closed", "retained_tab_closed");
     });
   }
   async close(guard: OccupantGuard): Promise<void> {

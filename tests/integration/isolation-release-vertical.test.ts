@@ -4,10 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { Broker } from "../../src/broker/broker.js";
+import type { ModelPolicyConfig } from "../../src/broker/model-policy.js";
 import { digest } from "../../src/broker/authentication.js";
 import { PiAdapter } from "../../src/pi/adapter.js";
 import { PiBrokerClient } from "../../src/pi/broker-client.js";
 import { sessionKey } from "../../src/shared/paths.js";
+import { canonicalJson, sha256 } from "../../src/shared/canonical-json.js";
 import type { PiApiLike, PiContextLike } from "../../src/pi/types.js";
 import { EventStore } from "../../src/state/event-store.js";
 import { HerdrProvisioner } from "../../src/herdr/provisioner.js";
@@ -68,6 +70,10 @@ async function productionParent(
     resourceMode?: "missing" | "wrong-owner" | "stale";
     holdProvisions?: boolean;
     holdReuseProvisions?: boolean;
+    compactLifecycle?: boolean;
+    compactEnabled?: boolean;
+    modelPolicy?: ModelPolicyConfig;
+    restartModelPolicy?: ModelPolicyConfig;
     realReconcileWorktree?:
       | "exact"
       | "missing"
@@ -90,6 +96,9 @@ async function productionParent(
     secret: join(runtime, "secret"),
   };
   const provisions: Array<Record<string, unknown>> = [];
+  const metadataReports: unknown[] = [];
+  const retainedExits: unknown[] = [];
+  const retainedCloses: unknown[] = [];
   const children = new Map<string, PiBrokerClient>();
   type HeldProvision = {
     input: Record<string, unknown>;
@@ -229,6 +238,13 @@ async function productionParent(
           tokenDigest: digest(`${agentId}-token`),
           sessionId: `session-${agentId}`,
           paneId: `pane-${agentId}`,
+          ...(options.compactLifecycle
+            ? {
+                workspaceId: `workspace-${agentId}`,
+                tabId: `tab-${agentId}`,
+                terminalId: `terminal-${agentId}`,
+              }
+            : {}),
           ...((input.isolation === "worktree" ||
             typeof input.reuseWorktreeId === "string") &&
           options.resourceMode !== "missing"
@@ -244,6 +260,13 @@ async function productionParent(
       return {
         name: `child-${agentId}`,
         paneId: `pane-${agentId}`,
+        ...(options.compactLifecycle
+          ? {
+              workspaceId: `workspace-${agentId}`,
+              tabId: `tab-${agentId}`,
+              terminalId: `terminal-${agentId}`,
+            }
+          : {}),
         ...((input.isolation === "worktree" ||
           typeof input.reuseWorktreeId === "string") &&
         options.resourceMode !== "missing"
@@ -302,6 +325,25 @@ async function productionParent(
         cwd: resource?.worktreePath ?? root,
       };
     },
+    async reportTaskMetadata(_guard: unknown, metadata: unknown) {
+      metadataReports.push(metadata);
+    },
+    async exitRetainingTab(guard: unknown) {
+      if (
+        !retainedExits.some(
+          (prior) => JSON.stringify(prior) === JSON.stringify(guard),
+        )
+      )
+        retainedExits.push(guard);
+    },
+    async closeRetainedTab(guard: unknown) {
+      if (
+        !retainedCloses.some(
+          (prior) => JSON.stringify(prior) === JSON.stringify(guard),
+        )
+      )
+        retainedCloses.push(guard);
+    },
     async recordRegistrationMismatch(agentId: string) {
       const resource = store.state.herdrResources?.[agentId];
       await store.append({
@@ -321,6 +363,10 @@ async function productionParent(
   });
   broker = new Broker(paths, {
     herdrFactory: async (store) => herdr(store, ++herdrFactoryCalls) as never,
+    ...(options.compactEnabled !== undefined
+      ? { compactDelegationEnabled: options.compactEnabled }
+      : {}),
+    ...(options.modelPolicy ? { modelPolicy: options.modelPolicy } : {}),
   });
   await broker.start();
   const secret = (await readFile(paths.secret, "utf8")).trim();
@@ -362,6 +408,12 @@ async function productionParent(
     await broker.stop();
     broker = new Broker(paths, {
       herdrFactory: async (store) => herdr(store, ++herdrFactoryCalls) as never,
+      ...(options.compactEnabled !== undefined
+        ? { compactDelegationEnabled: options.compactEnabled }
+        : {}),
+      ...((options.restartModelPolicy ?? options.modelPolicy)
+        ? { modelPolicy: options.restartModelPolicy ?? options.modelPolicy }
+        : {}),
     });
     await broker.start();
     const nextSecret = (await readFile(paths.secret, "utf8")).trim();
@@ -392,6 +444,9 @@ async function productionParent(
     nextProvision,
     paths,
     provisions,
+    metadataReports,
+    retainedExits,
+    retainedCloses,
     children,
     registered,
     cleanup: async () => {
@@ -613,6 +668,655 @@ test("production agent.spawn preserves explicit worktree through exact receipts"
     );
   } finally {
     for (const receipt of owned) receipt.remove();
+    await h.cleanup();
+  }
+});
+
+test("compact rollback switch rejects new work without task or resource creation", async () => {
+  const h = await productionParent({ compactEnabled: false });
+  try {
+    const tasks = Object.keys(h.broker.store.state.tasks).length;
+    await assert.rejects(
+      h.client.request("compact.delegate", {
+        text: "- [ ] blocked: Must not schedule",
+      }),
+      (error: unknown) =>
+        (error as { code?: string }).code === "PERMISSION_DENIED",
+    );
+    assert.equal(Object.keys(h.broker.store.state.tasks).length, tasks);
+    assert.equal(h.provisions.length, 0);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("compact broker preview is mutation-free and acceptance uses the existing delegation path", async () => {
+  const h = await productionParent({ holdProvisions: true });
+  try {
+    const before = h.broker.store.state.lastEventSeq;
+    const text = [
+      "- [ ] implement: Implement safely [profile:implementer] [mode:write]",
+      "- [ ] review: Review independently [profile:reviewer] [mode:read]",
+    ].join("\n");
+    const preview = (await h.client.request("compact.delegate", {
+      text,
+      accept: false,
+    })) as {
+      workflowDigest: string;
+      stepCount: number;
+      steps: Array<{ isolation: string }>;
+    };
+    assert.equal(preview.stepCount, 2);
+    assert.deepEqual(
+      preview.steps.map((step) => step.isolation),
+      ["worktree", "shared-readonly"],
+    );
+    assert.equal(h.broker.store.state.lastEventSeq, before);
+
+    const accepted = h.client.request(
+      "compact.delegate",
+      {
+        text,
+        accept: true,
+        workflowDigest: preview.workflowDigest,
+        parentAgentId: h.registered.agentId,
+      },
+      { idempotencyKey: "compact-preview-accept" },
+    ) as Promise<{ tasks: Array<{ taskId: string }> }>;
+    for (const [profileId, isolation] of [
+      ["implementer", "worktree"],
+      ["reviewer", "shared-readonly"],
+    ] as const) {
+      const entered = await h.nextProvision();
+      assert.equal(entered.input.profileId, profileId);
+      assert.equal(entered.input.isolation, isolation);
+      entered.release();
+    }
+    const response = await accepted;
+    assert.equal(response.tasks.length, 2);
+    for (const task of response.tasks) {
+      const compact = h.broker.store.state.tasks[task.taskId]?.project
+        ?.compact as Record<string, unknown> | undefined;
+      assert.equal(compact?.workflowDigest, preview.workflowDigest);
+      assert.equal(compact?.transcriptPolicy, "retain-tab");
+    }
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("compact preview binds effective model policy and rejects restart drift", async () => {
+  const changedSubagent = {
+    provider: "openai-codex",
+    modelId: "gpt-5.6-luna-policy-change",
+    thinkingLevel: "medium" as const,
+  };
+  const h = await productionParent({
+    restartModelPolicy: {
+      profiles: { subagent: changedSubagent },
+      allowlist: [
+        changedSubagent,
+        {
+          provider: "openai-codex",
+          modelId: "gpt-5.6-sol",
+          thinkingLevel: "medium",
+        },
+      ],
+    },
+  });
+  try {
+    const text = "- [ ] bind: Bind policy [profile:reviewer] [mode:read]";
+    const preview = (await h.client.request("compact.delegate", { text })) as {
+      workflowDigest: string;
+      steps: Array<Record<string, unknown>>;
+    };
+    assert.deepEqual(Object.keys(preview.steps[0]!).sort(), [
+      "dependencyIds",
+      "id",
+      "isolation",
+      "mode",
+      "placement",
+      "profileId",
+    ]);
+    assert.deepEqual(preview.steps[0], {
+      id: "bind",
+      profileId: "reviewer",
+      mode: "read",
+      dependencyIds: [],
+      placement: "current-workspace",
+      isolation: "shared-readonly",
+    });
+    const serializedPreview = JSON.stringify(preview);
+    assert.equal(serializedPreview.includes(h.registered.agentId), false);
+    assert.equal(serializedPreview.includes("parent-workspace"), false);
+    assert.equal(serializedPreview.includes(h.paths.root), false);
+    assert.equal(serializedPreview.includes("modelPolicyHash"), false);
+    assert.equal(serializedPreview.includes("admissionSnapshot"), false);
+    await h.restart();
+    await assert.rejects(
+      h.client.request(
+        "compact.delegate",
+        {
+          text,
+          accept: true,
+          workflowDigest: preview.workflowDigest,
+          parentAgentId: h.registered.agentId,
+        },
+        { idempotencyKey: "compact-policy-drift" },
+      ),
+      (error: unknown) =>
+        (error as { code?: string }).code === "INVALID_REQUEST",
+    );
+    assert.equal(Object.keys(h.broker.store.state.workflows).length, 0);
+    assert.equal(Object.keys(h.broker.store.state.tasks).length, 0);
+    assert.equal(h.provisions.length, 0);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("compact acceptance rejects authenticated parent context drift before mutation", async () => {
+  const h = await productionParent();
+  try {
+    const text =
+      "- [ ] bind: Bind parent policy context [profile:reviewer] [mode:read]";
+    const preview = (await h.client.request("compact.delegate", { text })) as {
+      workflowDigest: string;
+    };
+    const parent = h.broker.store.state.agents[h.registered.agentId]!;
+    parent.generation += 1;
+    parent.workspaceId = "parent-workspace-replaced";
+    await assert.rejects(
+      h.client.request(
+        "compact.delegate",
+        {
+          text,
+          accept: true,
+          workflowDigest: preview.workflowDigest,
+          parentAgentId: h.registered.agentId,
+        },
+        { idempotencyKey: "compact-parent-policy-drift" },
+      ),
+      (error: unknown) =>
+        (error as { code?: string }).code === "INVALID_REQUEST",
+    );
+    assert.equal(Object.keys(h.broker.store.state.workflows).length, 0);
+    assert.equal(Object.keys(h.broker.store.state.tasks).length, 0);
+    assert.equal(h.provisions.length, 0);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("compact acceptance rejects live admission drift before its first mutation", async () => {
+  const h = await productionParent();
+  try {
+    const text =
+      "- [ ] bind: Bind live admission [profile:reviewer] [mode:read]";
+    const preview = (await h.client.request("compact.delegate", { text })) as {
+      workflowDigest: string;
+    };
+    const existingTaskCount = Object.keys(h.broker.store.state.tasks).length;
+    h.broker.store.state.tasks.tsk_admission_drift = {
+      id: "tsk_admission_drift",
+      title: "Existing queued work",
+      objective: "Existing queued work",
+      state: "queued",
+      createdAt: "2026-08-19T00:00:00.000Z",
+      parentAgentId: h.registered.agentId,
+    };
+    await assert.rejects(
+      h.client.request(
+        "compact.delegate",
+        {
+          text,
+          accept: true,
+          workflowDigest: preview.workflowDigest,
+          parentAgentId: h.registered.agentId,
+        },
+        { idempotencyKey: "compact-live-admission-drift" },
+      ),
+      (error: unknown) =>
+        (error as { code?: string }).code === "INVALID_REQUEST",
+    );
+    assert.equal(
+      Object.keys(h.broker.store.state.tasks).length,
+      existingTaskCount + 1,
+    );
+    assert.equal(Object.keys(h.broker.store.state.workflows).length, 0);
+    assert.equal(h.provisions.length, 0);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("committed compact retry returns its frozen response after policy drift", async () => {
+  const changedSubagent = {
+    provider: "openai-codex",
+    modelId: "gpt-5.6-luna-policy-change",
+    thinkingLevel: "medium" as const,
+  };
+  const h = await productionParent({
+    holdProvisions: true,
+    restartModelPolicy: {
+      profiles: { subagent: changedSubagent },
+      allowlist: [
+        changedSubagent,
+        {
+          provider: "openai-codex",
+          modelId: "gpt-5.6-sol",
+          thinkingLevel: "medium",
+        },
+      ],
+    },
+  });
+  try {
+    const text = "- [ ] once: Freeze once [profile:reviewer] [mode:read]";
+    const preview = (await h.client.request("compact.delegate", { text })) as {
+      workflowDigest: string;
+    };
+    const params = {
+      text,
+      accept: true,
+      workflowDigest: preview.workflowDigest,
+      parentAgentId: h.registered.agentId,
+    };
+    const options = { idempotencyKey: "compact-frozen-policy-replay" };
+    const accepted = h.client.request("compact.delegate", params, options);
+    (await h.nextProvision()).release();
+    const frozen = await accepted;
+    await h.restart();
+    assert.deepEqual(
+      await h.client.request("compact.delegate", params, options),
+      frozen,
+    );
+    assert.equal(Object.keys(h.broker.store.state.workflows).length, 1);
+    assert.equal(Object.keys(h.broker.store.state.tasks).length, 1);
+    assert.equal(h.provisions.length, 1);
+    await assert.rejects(
+      h.client.request(
+        "compact.delegate",
+        { ...params, timeoutMs: 1 },
+        options,
+      ),
+      (error: unknown) =>
+        (error as { code?: string }).code === "IDEMPOTENCY_CONFLICT",
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("accepted compact delegation coalesces concurrent retries and survives restart", async () => {
+  const h = await productionParent({ holdProvisions: true });
+  try {
+    const text =
+      "- [ ] once: Create exactly once [profile:implementer] [mode:write]";
+    const preview = (await h.client.request("compact.delegate", { text })) as {
+      workflowDigest: string;
+    };
+    const params = {
+      text,
+      accept: true,
+      workflowDigest: preview.workflowDigest,
+      parentAgentId: h.registered.agentId,
+    };
+    const options = { idempotencyKey: "compact-concurrent-restart" };
+    const first = h.client.request("compact.delegate", params, options);
+    const second = h.client.request("compact.delegate", params, options);
+    const entered = await h.nextProvision();
+    entered.release();
+    const [firstResponse, secondResponse] = await Promise.all([first, second]);
+    assert.deepEqual(secondResponse, firstResponse);
+    assert.equal(Object.keys(h.broker.store.state.workflows).length, 1);
+    assert.equal(Object.keys(h.broker.store.state.tasks).length, 1);
+    assert.equal(h.provisions.length, 1);
+
+    await h.restart();
+    const replay = await h.client.request("compact.delegate", params, options);
+    assert.deepEqual(replay, firstResponse);
+    assert.equal(Object.keys(h.broker.store.state.workflows).length, 1);
+    assert.equal(h.provisions.length, 1);
+    await assert.rejects(
+      h.client.request(
+        "compact.delegate",
+        { ...params, timeoutMs: 123 },
+        options,
+      ),
+      (error: unknown) =>
+        (error as { code?: string }).code === "IDEMPOTENCY_CONFLICT",
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("compact lifecycle persists safe final metadata and closes the retained tab idempotently", async () => {
+  const h = await productionParent({
+    holdProvisions: true,
+    compactLifecycle: true,
+  });
+  let finalReceipt: ReturnType<typeof boundedReceipt> | undefined;
+  try {
+    const text =
+      "- [ ] finish: Finish the bounded canary [profile:implementer] [mode:write]";
+    const preview = (await h.client.request("compact.delegate", {
+      text,
+    })) as { workflowDigest: string };
+    const accepted = h.client.request(
+      "compact.delegate",
+      {
+        text,
+        accept: true,
+        workflowDigest: preview.workflowDigest,
+        parentAgentId: h.registered.agentId,
+      },
+      { idempotencyKey: "compact-lifecycle-accept" },
+    ) as Promise<{
+      tasks: Array<{ taskId: string; runId: string; agentId: string }>;
+    }>;
+    const entered = await h.nextProvision();
+    entered.release();
+    const response = await accepted;
+    const scheduled = response.tasks[0]!;
+    const taskState = h.broker.store.state.tasks[scheduled.taskId]!;
+    const runState = h.broker.store.state.runs[taskState.currentRunId!]!;
+    const task = {
+      ...scheduled,
+      runId: runState.id,
+      agentId: runState.agentId!,
+    };
+    await connectManagedChild(h, task.agentId);
+    finalReceipt = boundedReceipt(h.broker.store, (event) => {
+      const candidate = event as {
+        type?: string;
+        entityRefs?: Record<string, unknown>;
+        payload?: Record<string, unknown>;
+      };
+      return (
+        candidate.type === "herdr.metadata_projected" &&
+        candidate.entityRefs?.taskId === task.taskId &&
+        candidate.payload?.state === "completed" &&
+        typeof candidate.payload?.exitedAt === "string" &&
+        typeof candidate.payload?.transcriptRef === "string"
+      );
+    });
+    await completeManagedChild(h, task.agentId);
+    await finalReceipt.promise;
+
+    const metadata = (await h.client.request("metadata.get", {
+      taskId: task.taskId,
+    })) as Record<string, unknown>;
+    assert.equal(metadata.state, "completed");
+    assert.equal(metadata.resultRef !== null, true);
+    assert.match(String(metadata.transcriptRef), /^trn_[a-f0-9]{26}$/u);
+    assert.match(String(metadata.piSessionRef), /^pis_[a-f0-9]{26}$/u);
+    const serialized = JSON.stringify(metadata);
+    assert.equal(serialized.includes(text), false);
+    assert.equal(serialized.includes(`session-${task.agentId}`), false);
+    assert.equal(h.retainedExits.length, 1);
+    assert.ok(h.metadataReports.length >= 1);
+
+    const close = await h.client.request("transcript.close", {
+      taskId: task.taskId,
+      confirm: true,
+    });
+    assert.equal((close as { state: string }).state, "closed");
+    const repeated = await h.client.request("transcript.close", {
+      taskId: task.taskId,
+      confirm: true,
+    });
+    assert.deepEqual(repeated, close);
+    assert.equal(h.retainedCloses.length, 1);
+  } finally {
+    finalReceipt?.remove();
+    await h.cleanup();
+  }
+});
+
+test("compact metadata retrieves, replays, and closes exact runs after task retry", async () => {
+  const h = await productionParent({
+    holdProvisions: true,
+    compactLifecycle: true,
+  });
+  let firstReceipt: ReturnType<typeof boundedReceipt> | undefined;
+  let secondReceipt: ReturnType<typeof boundedReceipt> | undefined;
+  try {
+    const text =
+      "- [ ] retry: Preserve both run projections [profile:implementer] [mode:write]";
+    const preview = (await h.client.request("compact.delegate", { text })) as {
+      workflowDigest: string;
+    };
+    const accepted = h.client.request(
+      "compact.delegate",
+      {
+        text,
+        accept: true,
+        workflowDigest: preview.workflowDigest,
+        parentAgentId: h.registered.agentId,
+      },
+      { idempotencyKey: "compact-two-run-metadata" },
+    ) as Promise<{ tasks: Array<{ taskId: string }> }>;
+    (await h.nextProvision()).release();
+    const taskId = (await accepted).tasks[0]!.taskId;
+    const task = h.broker.store.state.tasks[taskId]!;
+    const firstRunId = task.currentRunId!;
+    firstReceipt = boundedReceipt(h.broker.store, (event) => {
+      const candidate = event as {
+        type?: string;
+        entityRefs?: Record<string, unknown>;
+      };
+      return (
+        candidate.type === "herdr.metadata_projected" &&
+        candidate.entityRefs?.runId === firstRunId
+      );
+    });
+    const existingFirst = Object.values(
+      h.broker.store.state.herdrMetadata ?? {},
+    ).find((item) => item.runId === firstRunId);
+    if (!existingFirst) await firstReceipt.promise;
+    else firstReceipt.remove();
+    const first = Object.values(h.broker.store.state.herdrMetadata ?? {}).find(
+      (item) => item.runId === firstRunId,
+    )!;
+    h.broker.store.state.runs[firstRunId]!.state = "succeeded";
+    h.broker.store.state.runs[firstRunId]!.settled = true;
+    const secondRunId = `run_${"8".repeat(26)}`;
+    secondReceipt = boundedReceipt(h.broker.store, (event) => {
+      const candidate = event as {
+        type?: string;
+        entityRefs?: Record<string, unknown>;
+      };
+      return (
+        candidate.type === "herdr.metadata_projected" &&
+        candidate.entityRefs?.runId === secondRunId
+      );
+    });
+    await h.broker.store.append({
+      type: "run.created",
+      actor,
+      entityRefs: { taskId, runId: secondRunId, agentId: first.agentId },
+      payload: {
+        runId: secondRunId,
+        taskId,
+        agentId: first.agentId,
+        assignmentId: `asg_${"9".repeat(26)}`,
+        assignmentGeneration: 2,
+        agentGeneration: 1,
+      },
+    });
+    await secondReceipt.promise;
+
+    const exitedAt = "2026-08-19T01:00:00.000Z";
+    const retained = {
+      ...first,
+      state: "completed" as const,
+      updatedAt: exitedAt,
+      settledAt: exitedAt,
+      exitedAt,
+      transcriptRef: `trn_${sha256(firstRunId).slice(0, 26)}`,
+    };
+    delete (retained as Partial<typeof first>).metadataDigest;
+    await h.broker.store.append({
+      type: "herdr.metadata_projected",
+      actor,
+      entityRefs: {
+        workflowId: first.workflowId,
+        taskId,
+        runId: firstRunId,
+        agentId: first.agentId,
+        workflowDigest: preview.workflowDigest,
+      },
+      payload: {
+        ...retained,
+        metadataDigest: sha256(canonicalJson(retained)),
+      },
+    });
+
+    const current = (await h.client.request("metadata.get", {
+      taskId,
+    })) as { runId: string };
+    assert.equal(current.runId, secondRunId);
+    const historical = (await h.client.request("metadata.get", {
+      taskId,
+      runId: firstRunId,
+    })) as { runId: string; state: string };
+    assert.equal(historical.runId, firstRunId);
+    assert.equal(historical.state, "completed");
+    const close = await h.client.request("transcript.close", {
+      taskId,
+      runId: firstRunId,
+      confirm: true,
+    });
+    assert.equal((close as { state: string }).state, "closed");
+    assert.deepEqual(
+      await h.client.request("transcript.close", {
+        taskId,
+        runId: firstRunId,
+        confirm: true,
+      }),
+      close,
+    );
+    assert.equal(h.retainedCloses.length, 1);
+
+    await h.restart();
+    assert.equal(
+      (
+        (await h.client.request("metadata.get", {
+          taskId,
+          runId: firstRunId,
+        })) as { state: string }
+      ).state,
+      "closed",
+    );
+    assert.equal(
+      (
+        (await h.client.request("metadata.get", {
+          taskId,
+          runId: secondRunId,
+        })) as { runId: string }
+      ).runId,
+      secondRunId,
+    );
+  } finally {
+    firstReceipt?.remove();
+    secondReceipt?.remove();
+    await h.cleanup();
+  }
+});
+
+test("retained close append failure converges after restart without a second mutation", async () => {
+  const h = await productionParent({
+    holdProvisions: true,
+    compactLifecycle: true,
+  });
+  let finalReceipt: ReturnType<typeof boundedReceipt> | undefined;
+  try {
+    const text =
+      "- [ ] close: Prove close recovery [profile:implementer] [mode:write]";
+    const preview = (await h.client.request("compact.delegate", { text })) as {
+      workflowDigest: string;
+    };
+    const accepted = h.client.request(
+      "compact.delegate",
+      {
+        text,
+        accept: true,
+        workflowDigest: preview.workflowDigest,
+        parentAgentId: h.registered.agentId,
+      },
+      { idempotencyKey: "compact-close-append-failure" },
+    ) as Promise<{
+      tasks: Array<{ taskId: string; runId: string; agentId: string }>;
+    }>;
+    const entered = await h.nextProvision();
+    entered.release();
+    const scheduled = (await accepted).tasks[0]!;
+    const taskState = h.broker.store.state.tasks[scheduled.taskId]!;
+    const runState = h.broker.store.state.runs[taskState.currentRunId!]!;
+    const task = {
+      ...scheduled,
+      runId: runState.id,
+      agentId: runState.agentId!,
+    };
+    await connectManagedChild(h, task.agentId);
+    finalReceipt = boundedReceipt(h.broker.store, (event) => {
+      const candidate = event as {
+        type?: string;
+        entityRefs?: Record<string, unknown>;
+        payload?: Record<string, unknown>;
+      };
+      return (
+        candidate.type === "herdr.metadata_projected" &&
+        candidate.entityRefs?.taskId === task.taskId &&
+        candidate.payload?.state === "completed"
+      );
+    });
+    await completeManagedChild(h, task.agentId);
+    await finalReceipt.promise;
+
+    const originalAppend = h.broker.store.append.bind(h.broker.store);
+    let injected = false;
+    const mutableStore = h.broker.store as unknown as {
+      append: EventStore["append"];
+    };
+    mutableStore.append = (async (input) => {
+      const candidate = input as {
+        type?: string;
+        payload?: Record<string, unknown>;
+      };
+      if (
+        !injected &&
+        candidate.type === "herdr.metadata_projected" &&
+        candidate.payload?.state === "closed"
+      ) {
+        injected = true;
+        throw new Error("INJECTED_CLOSED_APPEND_FAILURE");
+      }
+      return await originalAppend(input);
+    }) as EventStore["append"];
+
+    await assert.rejects(
+      h.client.request("transcript.close", {
+        taskId: task.taskId,
+        confirm: true,
+      }),
+    );
+    assert.equal(injected, true);
+    assert.equal(h.retainedCloses.length, 1);
+    const pending = Object.values(
+      h.broker.store.state.herdrMetadata ?? {},
+    ).find((item) => item.taskId === task.taskId);
+    assert.equal(pending?.state, "cleanup_pending");
+
+    await h.restart();
+    const recovered = Object.values(
+      h.broker.store.state.herdrMetadata ?? {},
+    ).find((item) => item.taskId === task.taskId);
+    assert.equal(recovered?.state, "closed");
+    assert.equal(h.retainedCloses.length, 1);
+  } finally {
+    finalReceipt?.remove();
     await h.cleanup();
   }
 });

@@ -53,7 +53,12 @@ import {
   payloadHash,
 } from "../results/validation.js";
 import type { ResultBody, QuestionBody } from "../results/types.js";
-import type { QuestionRecord } from "../state/types.js";
+import type {
+  HerdrTaskMetadata,
+  HerdrMetadataState,
+  QuestionRecord,
+  StoredEvent,
+} from "../state/types.js";
 import { DeterministicScheduler } from "../scheduler/scheduler.js";
 import { planAdmission } from "../scheduler/admission.js";
 import {
@@ -70,6 +75,11 @@ import {
   resolveIsolation,
   resolveWorkflowIsolation,
 } from "./isolation-policy.js";
+import {
+  acceptedCompactWorkflow,
+  compileCompactDelegation,
+  type CompactPolicyContext,
+} from "./compact-delegation.js";
 import {
   modelSelectionMatches,
   resolveSpawnPolicy,
@@ -501,6 +511,7 @@ export interface BrokerOptions {
     paths: CanonicalResolvedPaths,
   ) => Promise<HerdrService>;
   modelPolicy?: ModelPolicyConfig;
+  compactDelegationEnabled?: boolean;
 }
 export class Broker {
   readonly store: EventStore;
@@ -529,6 +540,7 @@ export class Broker {
   #clearTimeout: (timer: NodeJS.Timeout) => void;
   #herdr?: HerdrService;
   readonly #modelPolicy: ModelPolicyConfig;
+  readonly #compactDelegationEnabled: boolean;
   readonly #herdrFactory:
     | ((
         store: EventStore,
@@ -552,6 +564,9 @@ export class Broker {
       ((callback, delayMs) => setTimeout(callback, delayMs));
     this.#clearTimeout = options.clearTimeout ?? clearTimeout;
     this.#modelPolicy = options.modelPolicy ?? {};
+    this.#compactDelegationEnabled =
+      options.compactDelegationEnabled ??
+      process.env.PI_HERDR_COMPACT_DELEGATION !== "0";
     this.store = new EventStore(this.paths.events);
     this.store.onAppend((event) => {
       if (
@@ -600,6 +615,10 @@ export class Broker {
           } else if (subscriber.subscribed) this.#sendEvent(subscriber, event);
         }
       }
+      if (event.type !== "herdr.metadata_projected")
+        this.#trackDeferred(() =>
+          this.#enqueueMutation(() => this.#projectCompactMetadata(event)),
+        );
     });
     this.snapshotStore = new SnapshotStore(this.paths.snapshot);
     if (options.herdr) {
@@ -703,6 +722,64 @@ export class Broker {
             principalId: "prn_00000000000000000000000000",
             kind: "system",
           });
+      for (const metadata of Object.values(
+        this.store.state.herdrMetadata ?? {},
+      ))
+        if (metadata.state === "settled" && !metadata.exitedAt)
+          await this.#projectCompactMetadata(
+            {
+              entityRefs: {
+                taskId: metadata.taskId,
+                runId: metadata.runId,
+              },
+            } as unknown as StoredEvent,
+            true,
+          ).catch(() => undefined);
+      for (const metadata of Object.values(
+        this.store.state.herdrMetadata ?? {},
+      ))
+        if (metadata.state === "cleanup_pending" && this.#herdr) {
+          const task = this.store.state.tasks[metadata.taskId];
+          const workflowDigest = String(
+            (task?.project?.compact as { workflowDigest?: unknown } | undefined)
+              ?.workflowDigest ?? "",
+          );
+          if (!/^[a-f0-9]{64}$/u.test(workflowDigest)) continue;
+          try {
+            await this.#herdr.closeRetainedTab({
+              workspaceId: metadata.workspaceId,
+              tabId: metadata.tabId,
+              paneId: metadata.paneId,
+              terminalId: metadata.terminalId,
+            });
+            const closed = {
+              ...metadata,
+              state: "closed" as const,
+              updatedAt: new Date(this.#now()).toISOString(),
+            };
+            delete (closed as Partial<HerdrTaskMetadata>).metadataDigest;
+            await this.store.append({
+              type: "herdr.metadata_projected",
+              actor: {
+                principalId: "prn_00000000000000000000000000",
+                kind: "system",
+              },
+              entityRefs: {
+                workflowId: metadata.workflowId,
+                taskId: metadata.taskId,
+                runId: metadata.runId,
+                agentId: metadata.agentId,
+                workflowDigest,
+              },
+              payload: {
+                ...closed,
+                metadataDigest: sha256(canonicalJson(closed)),
+              },
+            });
+          } catch {
+            // Keep the durable intent. A later recovery can retry exact proof.
+          }
+        }
       this.#server = createServer((socket) => this.#connect(socket));
       await new Promise<void>((resolve, reject) =>
         this.#server
@@ -1194,14 +1271,359 @@ export class Broker {
   }
   async #requestUnlocked(client: Client, request: RequestFrame): Promise<void> {
     const principal = client.principal!;
+    const responseMethod = request.method;
     try {
       let result: unknown;
+      let compactPreview: unknown;
+      let compactReplayResponse: unknown;
+      let compactIdempotency: { key: string; paramsHash: string } | undefined;
+      let compactPolicyContext: CompactPolicyContext | undefined;
+      if (request.method === "compact.delegate") {
+        requirePermission(principal, "delegate");
+        if (!this.#compactDelegationEnabled)
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "Compact delegation is disabled.",
+          );
+        const p = request.params;
+        const allowed = [
+          "text",
+          "accept",
+          "workflowDigest",
+          "parentAgentId",
+          "wait",
+          "waitUntil",
+          "timeoutMs",
+          "failureMode",
+        ];
+        if (
+          !exactKeys(p, allowed) ||
+          typeof p.text !== "string" ||
+          (p.accept !== undefined && typeof p.accept !== "boolean") ||
+          (p.workflowDigest !== undefined && !safeText(p.workflowDigest, 128))
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Compact delegation parameters are invalid.",
+          );
+        if (
+          principal.kind === "pi_parent" &&
+          safeText(p.parentAgentId) &&
+          p.parentAgentId !== principal.agentId
+        )
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "A parent cannot target another parent subtree.",
+          );
+        const compactParentAgentId =
+          principal.kind === "pi_parent"
+            ? principal.agentId
+            : safeText(p.parentAgentId)
+              ? p.parentAgentId
+              : undefined;
+        if (
+          !compactParentAgentId ||
+          !(await this.#canAccessAgent(principal, compactParentAgentId))
+        )
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "A broker-bound parent identity is required.",
+          );
+        const compactRequestFingerprint = sha256(
+          canonicalJson({ method: "compact.delegate", params: p }),
+        );
+        if (p.accept === true) {
+          if (!request.idempotencyKey)
+            throw new OrchestratorError(
+              "INVALID_REQUEST",
+              "Accepted compact delegation requires an idempotency key.",
+            );
+          const prior = this.store.state.idempotency[request.idempotencyKey];
+          if (prior) {
+            if (
+              prior.principalId !== principal.id ||
+              prior.method !== "compact.delegate" ||
+              prior.paramsHash !== compactRequestFingerprint
+            )
+              throw new OrchestratorError(
+                "IDEMPOTENCY_CONFLICT",
+                "Idempotency key is already bound.",
+              );
+            compactReplayResponse = prior.response;
+          }
+        }
+        if (compactReplayResponse === undefined) {
+          const resolveCompactPolicyContext = (
+            requestedTasks: number,
+          ): CompactPolicyContext => {
+            const parent = this.store.state.agents[compactParentAgentId];
+            if (
+              !parent ||
+              !Number.isSafeInteger(parent.generation) ||
+              parent.generation < 1 ||
+              !safeText(parent.workspaceId)
+            )
+              throw new OrchestratorError(
+                "INVALID_REQUEST",
+                "Authenticated parent policy context is unavailable.",
+              );
+            let parentDepth = 0;
+            let ancestorId = parent.parentAgentId;
+            const seen = new Set([parent.id]);
+            while (ancestorId) {
+              if (seen.has(ancestorId))
+                throw new OrchestratorError(
+                  "STATE_CORRUPT",
+                  "Parent delegation ancestry is invalid.",
+                );
+              seen.add(ancestorId);
+              const ancestor = this.store.state.agents[ancestorId];
+              if (!ancestor)
+                throw new OrchestratorError(
+                  "STATE_CORRUPT",
+                  "Parent delegation ancestry is incomplete.",
+                );
+              parentDepth++;
+              ancestorId = ancestor.parentAgentId;
+            }
+            const limits = new DeterministicScheduler().limits;
+            const delegatedDepth = parentDepth + 1;
+            if (delegatedDepth > limits.maxDelegationDepth)
+              throw new OrchestratorError(
+                "PERMISSION_DENIED",
+                "Compact delegation exceeds the delegation-depth policy.",
+              );
+            const admissionLimits = {
+              maxActiveAgents: limits.maxActiveAgents,
+              maxActivePerParent: limits.maxActivePerParent,
+              maxQueuedTasks: limits.maxQueuedTasks,
+              maxTasksPerDelegate: limits.maxTasksPerDelegate,
+              maxProvisioning: limits.maxProvisioning,
+            };
+            const tasks = Object.values(this.store.state.tasks);
+            const activeStates = new Set([
+              "assigned",
+              "provisioning",
+              "running",
+              "blocked",
+            ]);
+            const admissionSnapshot = {
+              queuedTasks: tasks.filter((task) => task.state === "queued")
+                .length,
+              activeTasks: tasks.filter((task) => activeStates.has(task.state))
+                .length,
+              parentActiveTasks: tasks.filter(
+                (task) =>
+                  task.parentAgentId === compactParentAgentId &&
+                  activeStates.has(task.state),
+              ).length,
+              provisioningTasks: tasks.filter(
+                (task) => task.state === "provisioning",
+              ).length,
+            };
+            const queueAfterAcceptance =
+              admissionSnapshot.queuedTasks + requestedTasks;
+            if (
+              requestedTasks > admissionLimits.maxTasksPerDelegate ||
+              queueAfterAcceptance > admissionLimits.maxQueuedTasks
+            )
+              throw new OrchestratorError(
+                "LIMIT_EXCEEDED",
+                "Compact delegation exceeds live task admission capacity.",
+              );
+            const initialDispatch =
+              admissionSnapshot.activeTasks < admissionLimits.maxActiveAgents &&
+              admissionSnapshot.parentActiveTasks <
+                admissionLimits.maxActivePerParent &&
+              admissionSnapshot.provisioningTasks <
+                admissionLimits.maxProvisioning
+                ? "eligible"
+                : "deferred";
+            return {
+              parentContextHash: sha256(
+                canonicalJson({
+                  agentId: parent.id,
+                  generation: parent.generation,
+                  depth: parentDepth,
+                  workspaceId: parent.workspaceId,
+                }),
+              ),
+              workspacePolicyHash: sha256(
+                canonicalJson({
+                  workspaceId: parent.workspaceId,
+                  policy: "authenticated-parent-workspace",
+                }),
+              ),
+              parentGeneration: parent.generation,
+              parentDepth,
+              delegatedDepth,
+              maxDelegationDepth: limits.maxDelegationDepth,
+              depthDecision: "allow",
+              budgetPolicyHash: sha256(canonicalJson(admissionLimits)),
+              admissionLimits,
+              admissionSnapshot,
+              admissionDecision: {
+                decision: "allow",
+                requestedTasks,
+                queueAfterAcceptance,
+                initialDispatch,
+              },
+            };
+          };
+          const preliminaryPolicyContext = resolveCompactPolicyContext(0);
+          const preliminary = compileCompactDelegation(
+            p.text,
+            (profileId, requestedIsolation) => {
+              try {
+                const isolation = resolveIsolation(
+                  profileId,
+                  requestedIsolation,
+                );
+                const spawnPolicy = resolveSpawnPolicy(
+                  { taskProfileId: profileId },
+                  this.#modelPolicy,
+                );
+                const effective = spawnPolicy.effective;
+                return {
+                  profileId,
+                  policy: {
+                    decision: "allow",
+                    placement: effective.placement,
+                    isolation,
+                    modelProfileId: effective.modelProfileId,
+                    providerQualifiedModel: `${effective.model.provider}/${effective.model.modelId}`,
+                    thinkingLevel: effective.model.thinkingLevel,
+                    modelPolicyHash: spawnPolicy.policyHash,
+                    context: preliminaryPolicyContext,
+                  },
+                };
+              } catch {
+                return undefined;
+              }
+            },
+          );
+          const previewPolicyContext = resolveCompactPolicyContext(
+            preliminary.stepCount,
+          );
+          compactPolicyContext = previewPolicyContext;
+          const compiled = compileCompactDelegation(
+            p.text,
+            (profileId, requestedIsolation) => {
+              try {
+                const isolation = resolveIsolation(
+                  profileId,
+                  requestedIsolation,
+                );
+                const spawnPolicy = resolveSpawnPolicy(
+                  { taskProfileId: profileId },
+                  this.#modelPolicy,
+                );
+                const effective = spawnPolicy.effective;
+                return {
+                  profileId,
+                  policy: {
+                    decision: "allow",
+                    placement: effective.placement,
+                    isolation,
+                    modelProfileId: effective.modelProfileId,
+                    providerQualifiedModel: `${effective.model.provider}/${effective.model.modelId}`,
+                    thinkingLevel: effective.model.thinkingLevel,
+                    modelPolicyHash: spawnPolicy.policyHash,
+                    context: previewPolicyContext,
+                  },
+                };
+              } catch {
+                return undefined;
+              }
+            },
+          );
+          if (p.accept !== true) {
+            compactPreview = {
+              schemaVersion: compiled.schemaVersion,
+              workflowDigest: compiled.workflowDigest,
+              stepCount: compiled.stepCount,
+              steps: compiled.steps,
+            };
+          } else {
+            const workflow = acceptedCompactWorkflow(
+              compiled,
+              typeof p.workflowDigest === "string"
+                ? p.workflowDigest
+                : undefined,
+            );
+            if (
+              canonicalJson(resolveCompactPolicyContext(compiled.stepCount)) !==
+              canonicalJson(previewPolicyContext)
+            )
+              throw new OrchestratorError(
+                "INVALID_REQUEST",
+                "Authenticated compact policy context changed before acceptance.",
+              );
+            compactIdempotency = {
+              key: request.idempotencyKey!,
+              paramsHash: compactRequestFingerprint,
+            };
+            request = {
+              ...request,
+              method:
+                compactReplayResponse === undefined
+                  ? "delegate.execute"
+                  : "compact.idempotency_replay",
+              params: {
+                ...workflow,
+                ...(p.parentAgentId !== undefined
+                  ? { parentAgentId: p.parentAgentId }
+                  : {}),
+                ...(p.wait !== undefined ? { wait: p.wait } : {}),
+                ...(p.waitUntil !== undefined
+                  ? { waitUntil: p.waitUntil }
+                  : {}),
+                ...(p.timeoutMs !== undefined
+                  ? { timeoutMs: p.timeoutMs }
+                  : {}),
+                compact: {
+                  workflowDigest: compiled.workflowDigest,
+                  transcriptPolicy: workflow.transcriptPolicy,
+                },
+              },
+            };
+          }
+        } else {
+          request = {
+            ...request,
+            method: "compact.idempotency_replay",
+            params: {},
+          };
+        }
+      }
       let replayEvents: import("../state/types.js").StoredEvent[] = [];
       let committedEvent: import("../state/types.js").StoredEvent | undefined;
       let responseBoundary: (() => Promise<void>) | undefined;
       const deferred: Array<() => Promise<void>> = [];
       let shutdownAfterResponse = false;
-      if (
+      if (compactPreview !== undefined) {
+        result = compactPreview;
+      } else if (compactReplayResponse !== undefined) {
+        const replayWorkflowId =
+          compactReplayResponse &&
+          typeof compactReplayResponse === "object" &&
+          safeText(
+            (compactReplayResponse as Record<string, unknown>).workflowId,
+          )
+            ? ((compactReplayResponse as Record<string, unknown>)
+                .workflowId as string)
+            : undefined;
+        if (replayWorkflowId && this.store.state.workflows[replayWorkflowId]) {
+          for (const taskId of this.store.state.workflows[replayWorkflowId]!
+            .taskIds)
+            this.#scheduleTaskDeadline(this.store.state.tasks[taskId]!);
+          await this.#advanceWorkflow(replayWorkflowId, {
+            principalId: principal.id,
+            kind: principal.kind,
+          });
+        }
+        result = compactReplayResponse;
+      } else if (
         request.method === "system.ping" ||
         request.method === "system.status"
       ) {
@@ -3717,6 +4139,146 @@ export class Broker {
           );
         result = collection;
       } else if (
+        request.method === "metadata.get" ||
+        request.method === "transcript.close"
+      ) {
+        requirePermission(principal, "read:state");
+        const p = request.params;
+        const close = request.method === "transcript.close";
+        if (
+          !exactKeys(
+            p,
+            close ? ["taskId", "runId", "confirm"] : ["taskId", "runId"],
+          ) ||
+          !safeText(p.taskId) ||
+          (p.runId !== undefined && !safeText(p.runId)) ||
+          (close && p.confirm !== true)
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Transcript metadata request is invalid.",
+          );
+        const task = this.store.state.tasks[p.taskId as string];
+        if (!task)
+          throw new OrchestratorError("NOT_FOUND", "Task was not found.");
+        if (!(await this.#canAccessTask(principal, task.id)))
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "Task is outside the authenticated scope.",
+          );
+        const selectedRunId =
+          typeof p.runId === "string" ? p.runId : task.currentRunId;
+        if (
+          !selectedRunId ||
+          this.store.state.runs[selectedRunId]?.taskId !== task.id
+        )
+          throw new OrchestratorError(
+            "NOT_FOUND",
+            "The selected task run was not found.",
+          );
+        const matches = Object.values(
+          this.store.state.herdrMetadata ?? {},
+        ).filter(
+          (item) => item.taskId === task.id && item.runId === selectedRunId,
+        );
+        if (matches.length !== 1)
+          throw new OrchestratorError(
+            matches.length === 0 ? "NOT_FOUND" : "HERDR_IDENTITY_MISMATCH",
+            matches.length === 0
+              ? "Task metadata was not found."
+              : "Task metadata identity is ambiguous.",
+          );
+        const metadata = matches[0]!;
+        const workflowDigest = String(
+          (task.project?.compact as { workflowDigest?: unknown } | undefined)
+            ?.workflowDigest ?? "",
+        );
+        if (!/^[a-f0-9]{64}$/u.test(workflowDigest))
+          throw new OrchestratorError(
+            "STATE_CORRUPT",
+            "Compact task correlation is invalid.",
+          );
+        if (!close) result = metadata;
+        else if (metadata.state === "closed") {
+          result = {
+            taskId: metadata.taskId,
+            metadataId: metadata.metadataId,
+            transcriptRef: metadata.transcriptRef,
+            state: "closed",
+          };
+        } else {
+          if (
+            !this.#herdr ||
+            !metadata.exitedAt ||
+            !metadata.transcriptRef ||
+            metadata.transcriptPolicy !== "retain-tab"
+          )
+            throw new OrchestratorError(
+              "INVALID_REQUEST",
+              "The retained transcript is not ready for close.",
+            );
+          let closeIntent = metadata;
+          if (metadata.state !== "cleanup_pending") {
+            const pendingAt = new Date(this.#now()).toISOString();
+            const pending = {
+              ...metadata,
+              state: "cleanup_pending" as const,
+              updatedAt: pendingAt,
+            };
+            delete (pending as Partial<HerdrTaskMetadata>).metadataDigest;
+            committedEvent = await this.store.append({
+              type: "herdr.metadata_projected",
+              actor: { principalId: principal.id, kind: principal.kind },
+              entityRefs: {
+                workflowId: metadata.workflowId,
+                taskId: metadata.taskId,
+                runId: metadata.runId,
+                agentId: metadata.agentId,
+                workflowDigest,
+              },
+              payload: {
+                ...pending,
+                metadataDigest: sha256(canonicalJson(pending)),
+              },
+            });
+            closeIntent = this.store.state.herdrMetadata![metadata.metadataId]!;
+          }
+          await this.#herdr.closeRetainedTab({
+            workspaceId: closeIntent.workspaceId,
+            tabId: closeIntent.tabId,
+            paneId: closeIntent.paneId,
+            terminalId: closeIntent.terminalId,
+          });
+          const updatedAt = new Date(this.#now()).toISOString();
+          const closed = {
+            ...closeIntent,
+            state: "closed" as const,
+            updatedAt,
+          };
+          delete (closed as Partial<HerdrTaskMetadata>).metadataDigest;
+          committedEvent = await this.store.append({
+            type: "herdr.metadata_projected",
+            actor: { principalId: principal.id, kind: principal.kind },
+            entityRefs: {
+              workflowId: metadata.workflowId,
+              taskId: metadata.taskId,
+              runId: metadata.runId,
+              agentId: metadata.agentId,
+              workflowDigest,
+            },
+            payload: {
+              ...closed,
+              metadataDigest: sha256(canonicalJson(closed)),
+            },
+          });
+          result = {
+            taskId: metadata.taskId,
+            metadataId: metadata.metadataId,
+            transcriptRef: metadata.transcriptRef,
+            state: "closed",
+          };
+        }
+      } else if (
         request.method === "agent.spawn" ||
         request.method === "delegate.execute"
       ) {
@@ -3745,7 +4307,9 @@ export class Broker {
                 "waitUntil",
                 "timeoutMs",
                 "failureMode",
+                "transcriptPolicy",
                 "dryRun",
+                "compact",
               ];
         if (Object.keys(p).some((key) => !allowedKeys.includes(key)))
           throw new OrchestratorError(
@@ -3823,6 +4387,24 @@ export class Broker {
             "INVALID_REQUEST",
             "Spawn placement or model profile is invalid.",
           );
+        const compact =
+          p.compact &&
+          typeof p.compact === "object" &&
+          !Array.isArray(p.compact)
+            ? (p.compact as Record<string, unknown>)
+            : undefined;
+        if (
+          p.compact !== undefined &&
+          (!compact ||
+            !exactKeys(compact, ["workflowDigest", "transcriptPolicy"]) ||
+            !/^[a-f0-9]{64}$/u.test(String(compact.workflowDigest)) ||
+            compact.transcriptPolicy !== "retain-tab" ||
+            p.transcriptPolicy !== compact.transcriptPolicy)
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Compact workflow metadata is invalid.",
+          );
         const dryRun = p.dryRun === true;
         const creationNow = this.#now();
         const createdAt = new Date(creationNow).toISOString();
@@ -3885,7 +4467,9 @@ export class Broker {
         const planned = steps.map((raw) => {
           const record = raw as Record<string, unknown>;
           const profileId = record.profileId as string;
-          const requested = requestedIsolation;
+          const requested = compact
+            ? exactRequestedIsolation({ mode: record.isolation })
+            : requestedIsolation;
           const spawnPolicy = resolveSpawnPolicy(
             {
               taskProfileId: profileId,
@@ -3902,6 +4486,30 @@ export class Broker {
             },
             this.#modelPolicy,
           );
+          if (compact) {
+            if (!compactPolicyContext)
+              throw new OrchestratorError(
+                "INVALID_REQUEST",
+                "Compact policy context is unavailable.",
+              );
+            const expectedPolicy = record.compactPolicy;
+            const effective = spawnPolicy.effective;
+            const currentPolicy = {
+              decision: "allow",
+              placement: effective.placement,
+              isolation: resolveIsolation(profileId, requested),
+              modelProfileId: effective.modelProfileId,
+              providerQualifiedModel: `${effective.model.provider}/${effective.model.modelId}`,
+              thinkingLevel: effective.model.thinkingLevel,
+              modelPolicyHash: spawnPolicy.policyHash,
+              context: compactPolicyContext,
+            };
+            if (canonicalJson(expectedPolicy) !== canonicalJson(currentPolicy))
+              throw new OrchestratorError(
+                "INVALID_REQUEST",
+                "Compact policy changed after preview acceptance.",
+              );
+          }
           return {
             key: safeText(record.key, 64)
               ? (record.key as string)
@@ -3916,6 +4524,9 @@ export class Broker {
               : [],
             dependsOn: Array.isArray(record.dependsOn)
               ? (record.dependsOn as unknown[])
+              : [],
+            resultProjection: Array.isArray(record.resultProjection)
+              ? (record.resultProjection as unknown[])
               : [],
             isolation: resolveIsolation(profileId, requested),
             spawnPolicy,
@@ -3952,7 +4563,9 @@ export class Broker {
               dependsOn: step.dependsOn.filter(
                 (item): item is string => typeof item === "string",
               ),
-              resultProjection: [],
+              resultProjection: step.resultProjection.filter(
+                (item): item is string => typeof item === "string",
+              ),
               isolationMode: step.isolation,
             })),
           });
@@ -3990,6 +4603,64 @@ export class Broker {
               effectiveModel: step.spawnPolicy.effective,
             })),
           };
+        } else if (compact && compactIdempotency) {
+          const frozenResponse = {
+            workflowId,
+            state: "scheduled",
+            tasks: planned.map((step, index) => ({
+              key: step.key,
+              taskId: taskIds[index]!,
+              state: "queued",
+            })),
+          };
+          committedEvent = await this.store.append({
+            type: "compact.delegation_scheduled",
+            actor: { principalId: principal.id, kind: principal.kind },
+            entityRefs: { workflowId },
+            payload: {
+              workflowId,
+              parentAgentId,
+              mode: safeText(p.mode, 32) ? p.mode : "dag",
+              idempotencyKey: compactIdempotency.key,
+              paramsHash: compactIdempotency.paramsHash,
+              response: frozenResponse,
+              tasks: planned.map((step, index) => ({
+                taskId: taskIds[index]!,
+                title: step.title,
+                objective: step.objective,
+                createdAt,
+                parentAgentId,
+                workflowId,
+                profileId: step.profileId,
+                dependencies: step.dependsOn
+                  .map((key) =>
+                    planned.find((candidate) => candidate.key === key),
+                  )
+                  .filter(Boolean)
+                  .map((candidate) => taskIds[planned.indexOf(candidate!)]),
+                project: {
+                  ...inheritedProject,
+                  isolation: step.isolation,
+                  requestedSpawnPolicy: step.spawnPolicy.requested,
+                  effectiveSpawnPolicy: step.spawnPolicy.effective,
+                  modelPolicyHash: step.spawnPolicy.policyHash,
+                  compact: {
+                    workflowDigest: compact.workflowDigest,
+                    transcriptPolicy: compact.transcriptPolicy,
+                  },
+                },
+                timeoutAt: wallDeadline,
+              })),
+            },
+          });
+          for (const taskId of taskIds)
+            this.#scheduleTaskDeadline(this.store.state.tasks[taskId]!);
+          await this.#advanceWorkflow(workflowId, {
+            principalId: principal.id,
+            kind: principal.kind,
+          });
+          result = frozenResponse;
+          compactIdempotency = undefined;
         } else {
           committedEvent = await this.store.append({
             type: "workflow.created",
@@ -4034,6 +4705,14 @@ export class Broker {
                   requestedSpawnPolicy: step.spawnPolicy.requested,
                   effectiveSpawnPolicy: step.spawnPolicy.effective,
                   modelPolicyHash: step.spawnPolicy.policyHash,
+                  ...(compact
+                    ? {
+                        compact: {
+                          workflowDigest: compact.workflowDigest,
+                          transcriptPolicy: compact.transcriptPolicy,
+                        },
+                      }
+                    : {}),
                 },
                 timeoutAt: wallDeadline,
               },
@@ -4624,7 +5303,7 @@ export class Broker {
         v: 1,
         type: "response",
         id: request.id,
-        method: request.method,
+        method: responseMethod,
         ok: true,
         result,
       };
@@ -4661,7 +5340,7 @@ export class Broker {
               kind: principal.kind,
             },
             entityRefs: {},
-            payload: { action: request.method },
+            payload: { action: responseMethod },
           });
         } catch (auditError: unknown) {
           this.#observeBackgroundFailure(auditError);
@@ -4672,13 +5351,222 @@ export class Broker {
         v: 1,
         type: "response",
         id: request.id,
-        method: request.method,
+        method: responseMethod,
         ok: false,
         error: {
           code: typed.code,
           message: typed.message,
           retryable: typed.retryable,
         },
+      });
+    }
+  }
+  async #projectCompactMetadata(
+    event: StoredEvent,
+    forcePublication = false,
+  ): Promise<void> {
+    let taskId = event.entityRefs.taskId;
+    const referencedRun = event.entityRefs.runId
+      ? this.store.state.runs[event.entityRefs.runId]
+      : undefined;
+    if (!taskId && referencedRun) taskId = referencedRun.taskId;
+    if (!taskId && event.entityRefs.agentId) {
+      const agent = this.store.state.agents[event.entityRefs.agentId];
+      const run = agent?.currentRunId
+        ? this.store.state.runs[agent.currentRunId]
+        : undefined;
+      taskId = run?.taskId;
+    }
+    if (!taskId) return;
+    const task = this.store.state.tasks[taskId];
+    const compact = task?.project?.compact as
+      { workflowDigest?: unknown; transcriptPolicy?: unknown } | undefined;
+    if (
+      !task ||
+      !compact ||
+      !/^[a-f0-9]{64}$/u.test(String(compact.workflowDigest)) ||
+      compact.transcriptPolicy !== "retain-tab" ||
+      !task.workflowId
+    )
+      return;
+    const selectedRunId =
+      referencedRun?.taskId === task.id ? referencedRun.id : task.currentRunId;
+    if (!selectedRunId) return;
+    const run = this.store.state.runs[selectedRunId];
+    const agent = run?.agentId
+      ? this.store.state.agents[run.agentId]
+      : undefined;
+    const resource = run?.agentId
+      ? this.store.state.herdrResources?.[run.agentId]
+      : undefined;
+    const workspaceId = resource?.workspaceId ?? agent?.workspaceId;
+    const tabId = resource?.tabId ?? agent?.tabId;
+    const paneId = resource?.paneId ?? agent?.paneId;
+    const terminalId = resource?.terminalId ?? agent?.terminalId;
+    const sessionId = resource?.sessionId ?? agent?.piSessionId;
+    if (
+      !run ||
+      !agent ||
+      !workspaceId ||
+      !tabId ||
+      !paneId ||
+      !terminalId ||
+      !sessionId ||
+      !task.profileId
+    )
+      return;
+    const current = Object.values(this.store.state.herdrMetadata ?? {}).find(
+      (item) => item.taskId === task.id && item.runId === run.id,
+    );
+    if (current?.state === "closed") return;
+    const terminalState = new Map<string, HerdrMetadataState>([
+      ["succeeded", "completed"],
+      ["failed", "failed"],
+      ["cancelled", "cancelled"],
+      ["timed_out", "failed"],
+      ["lost", "failed"],
+    ]);
+    const terminalOutcome = terminalState.get(
+      task.currentRunId === run.id ? task.state : run.state,
+    );
+    const terminal = terminalOutcome !== undefined;
+    const state =
+      terminal && !current?.exitedAt
+        ? "settled"
+        : (terminalOutcome ??
+          (run.state === "result_pending" ||
+          run.state === "result_pending_missing"
+            ? "settling"
+            : run.settled
+              ? "settled"
+              : run.state === "blocked" || task.state === "blocked"
+                ? "blocked"
+                : task.state === "provisioning"
+                  ? "creating"
+                  : task.state === "assigned"
+                    ? "starting"
+                    : "working"));
+    const result = Object.values(this.store.state.results ?? {}).find(
+      (item) => item.taskId === task.id && item.runId === run.id,
+    );
+    const question = Object.values(this.store.state.questions ?? {})
+      .filter((item) => item.taskId === task.id && item.runId === run.id)
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .at(-1);
+    const updatedAt = new Date(this.#now()).toISOString();
+    const metadataId =
+      current?.metadataId ??
+      `hmd_${sha256(`${task.id}:${run.id}`).slice(0, 26)}`;
+    const exitedAt = current?.exitedAt ?? null;
+    const value: Omit<HerdrTaskMetadata, "metadataDigest"> = {
+      schemaVersion: 1,
+      metadataId,
+      orchestrationId: `orc_${sha256(this.paths.sessionKey).slice(0, 26)}`,
+      workflowId: task.workflowId,
+      taskId: task.id,
+      runId: run.id,
+      agentId: agent.id,
+      ...(task.parentAgentId ? { parentAgentId: task.parentAgentId } : {}),
+      profileId: task.profileId,
+      state,
+      placement: "background",
+      transcriptPolicy: "retain-tab",
+      workspaceId,
+      tabId,
+      paneId,
+      terminalId,
+      piSessionRef: `pis_${sha256(sessionId).slice(0, 26)}`,
+      startedAt: current?.startedAt ?? task.createdAt,
+      updatedAt,
+      settledAt: run.settled ? (current?.settledAt ?? updatedAt) : null,
+      exitedAt,
+      transcriptRef: current?.transcriptRef ?? null,
+      resultRef: result?.id ?? null,
+      questionRef: question?.id ?? null,
+      errorCode: task.terminalReason?.code ?? null,
+    };
+    const appendProjection = async (
+      projection: Omit<HerdrTaskMetadata, "metadataDigest">,
+    ): Promise<StoredEvent> =>
+      await this.store.append({
+        type: "herdr.metadata_projected",
+        actor: {
+          principalId: "prn_00000000000000000000000000",
+          kind: "system",
+        },
+        entityRefs: {
+          workflowId: task.workflowId!,
+          taskId: task.id,
+          runId: run.id,
+          agentId: agent.id,
+          workflowDigest: String(compact.workflowDigest),
+        },
+        payload: {
+          ...projection,
+          metadataDigest: sha256(canonicalJson(projection)),
+        },
+      });
+    const semantic = (item: Omit<HerdrTaskMetadata, "metadataDigest">) =>
+      canonicalJson({ ...item, updatedAt: "" });
+    if (!current || semantic(value) !== semantic(current) || forcePublication) {
+      const projectedEvent = await appendProjection(value);
+      if (
+        !value.exitedAt &&
+        this.#herdr &&
+        !(terminal && current?.state === "settled" && !current.exitedAt)
+      )
+        try {
+          await this.#herdr.reportTaskMetadata(
+            { workspaceId, tabId, paneId, terminalId, sessionId },
+            this.store.state.herdrMetadata![metadataId]!,
+            projectedEvent.seq,
+          );
+        } catch (error) {
+          await appendProjection({
+            ...value,
+            state: "conflict",
+            updatedAt: new Date(this.#now()).toISOString(),
+            errorCode: "HERDR_METADATA_PUBLICATION_FAILED",
+          });
+          throw error;
+        }
+    }
+    const latest = this.store.state.herdrMetadata?.[metadataId];
+    if (terminal && !latest?.exitedAt && !this.#herdr) {
+      await appendProjection({
+        ...value,
+        state: "orphaned",
+        updatedAt: new Date(this.#now()).toISOString(),
+        errorCode: "HERDR_UNAVAILABLE",
+      });
+      return;
+    }
+    if (terminal && !latest?.exitedAt && this.#herdr) {
+      try {
+        await this.#herdr.exitRetainingTab({
+          workspaceId,
+          tabId,
+          paneId,
+          terminalId,
+          sessionId,
+        });
+      } catch (error) {
+        await appendProjection({
+          ...value,
+          state: "orphaned",
+          updatedAt: new Date(this.#now()).toISOString(),
+          errorCode: "HERDR_PROCESS_EXIT_FAILED",
+        });
+        throw error;
+      }
+      const finalTime = new Date(this.#now()).toISOString();
+      await appendProjection({
+        ...value,
+        state: terminalOutcome!,
+        updatedAt: finalTime,
+        settledAt: value.settledAt ?? finalTime,
+        exitedAt: finalTime,
+        transcriptRef: `trn_${sha256(`${metadataId}:${sessionId}`).slice(0, 26)}`,
       });
     }
   }

@@ -50,6 +50,26 @@ function validTaskProject(value: unknown): boolean {
   const project = value as Record<string, unknown>;
   if (!boundedText(project.cwd, 4096) || !boundedText(project.workspaceId, 256))
     return false;
+  if (Object.hasOwn(project, "compact")) {
+    const compact = project.compact;
+    if (
+      !compact ||
+      typeof compact !== "object" ||
+      Array.isArray(compact) ||
+      !exactKeys(compact as Record<string, unknown>, [
+        "workflowDigest",
+        "transcriptPolicy",
+      ]) ||
+      !/^[a-f0-9]{64}$/u.test(
+        String((compact as Record<string, unknown>).workflowDigest),
+      ) ||
+      (compact as Record<string, unknown>).transcriptPolicy !== "retain-tab"
+    )
+      return false;
+    const withoutCompact = { ...project };
+    delete withoutCompact.compact;
+    return validTaskProject(withoutCompact);
+  }
   const hasModelPolicy = Object.hasOwn(project, "requestedSpawnPolicy");
   const modelPolicyKeys = hasModelPolicy
     ? ["requestedSpawnPolicy", "effectiveSpawnPolicy", "modelPolicyHash"]
@@ -843,6 +863,50 @@ export class EventStore {
             (p.reason as ErrorSummary).code,
           );
       }
+    } else if (event.type === "compact.delegation_scheduled") {
+      valid =
+        exactKeys(refs, ["workflowId"]) &&
+        isEntityId(refs.workflowId, "wfl") &&
+        exactKeys(p, [
+          "workflowId",
+          "parentAgentId",
+          "mode",
+          "idempotencyKey",
+          "paramsHash",
+          "response",
+          "tasks",
+        ]) &&
+        p.workflowId === refs.workflowId &&
+        isEntityId(p.parentAgentId, "agt") &&
+        boundedText(p.mode, 32) &&
+        boundedText(p.idempotencyKey, 256) &&
+        typeof p.paramsHash === "string" &&
+        /^[a-f0-9]{64}$/u.test(p.paramsHash) &&
+        !!p.response &&
+        typeof p.response === "object" &&
+        !Array.isArray(p.response) &&
+        Array.isArray(p.tasks) &&
+        p.tasks.length >= 1 &&
+        p.tasks.length <= 16;
+    } else if (event.type === "herdr.metadata_projected") {
+      valid =
+        exactKeys(refs, [
+          "workflowId",
+          "taskId",
+          "runId",
+          "agentId",
+          "workflowDigest",
+        ]) &&
+        isEntityId(refs.workflowId, "wfl") &&
+        isEntityId(refs.taskId, "tsk") &&
+        isEntityId(refs.runId, "run") &&
+        isEntityId(refs.agentId, "agt") &&
+        typeof refs.workflowDigest === "string" &&
+        /^[a-f0-9]{64}$/u.test(refs.workflowDigest) &&
+        Object.keys(p).length <= 26 &&
+        Object.keys(p).every(
+          (key) => key.length <= 64 && !/[\u0000-\u001f\u007f]/u.test(key),
+        );
     } else if (event.type === "herdr.provision.intent") {
       valid =
         exactKeys(refs, ["agentId"]) &&
