@@ -3197,6 +3197,9 @@ export class Broker {
             params,
             {
               generation: agent.generation,
+              ...(agent.connectionGeneration !== undefined
+                ? { connectionGeneration: agent.connectionGeneration }
+                : {}),
               ...(agent.piSessionId ? { piSessionId: agent.piSessionId } : {}),
               ...(run ? { runId: run.id } : {}),
             },
