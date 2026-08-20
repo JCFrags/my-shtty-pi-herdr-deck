@@ -5,7 +5,7 @@ import {
   type Socket,
 } from "node:net";
 import { lstatSync, renameSync, unlinkSync } from "node:fs";
-import { chmod, lstat } from "node:fs/promises";
+import { chmod, link, lstat, unlink } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
@@ -854,42 +854,115 @@ export class Broker {
       return value;
     }
   }
-  async #loadSnapshotAuthentication(): Promise<{
-    key: string;
-    created: boolean;
-  }> {
-    const path = this.paths.snapshotAuthentication!;
+  async #readSnapshotAuthentication(path: string): Promise<string> {
+    const value = await readPrivateRegular(path);
+    if (!/^[A-Za-z0-9_-]{43}\n$/u.test(value))
+      throw new Error("Invalid snapshot authentication key.");
+    return value.slice(0, -1);
+  }
+  async #publishedSnapshotAuthentication(
+    path: string,
+    pendingPath: string,
+  ): Promise<string | undefined> {
     try {
-      const value = await readPrivateRegular(path);
-      if (!/^[A-Za-z0-9_-]{43}\n$/u.test(value))
-        throw new Error("Invalid snapshot authentication key.");
-      return { key: value.slice(0, -1), created: false };
+      return await this.#readSnapshotAuthentication(path);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      const key = randomBytes(32).toString("base64url");
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      let published: Awaited<ReturnType<typeof lstat>>;
+      let pending: Awaited<ReturnType<typeof lstat>>;
       try {
-        await createPrivateExclusive(path, `${key}\n`);
-        return { key, created: true };
-      } catch (createError) {
-        if ((createError as NodeJS.ErrnoException).code !== "EEXIST")
-          throw createError;
-        const value = await readPrivateRegular(path);
-        if (!/^[A-Za-z0-9_-]{43}\n$/u.test(value))
-          throw new Error("Invalid snapshot authentication key.");
-        return { key: value.slice(0, -1), created: false };
+        [published, pending] = await Promise.all([
+          lstat(path, { bigint: true }),
+          lstat(pendingPath, { bigint: true }),
+        ]);
+      } catch {
+        throw error;
       }
+      const uid = BigInt(process.getuid?.() ?? Number(published.uid));
+      if (
+        !published.isFile() ||
+        !pending.isFile() ||
+        published.isSymbolicLink() ||
+        pending.isSymbolicLink() ||
+        published.dev !== pending.dev ||
+        published.ino !== pending.ino ||
+        published.nlink !== 2n ||
+        pending.nlink !== 2n ||
+        published.uid !== uid ||
+        pending.uid !== uid ||
+        (published.mode & 0o077n) !== 0n ||
+        (pending.mode & 0o077n) !== 0n
+      )
+        throw error;
+      await unlink(pendingPath);
+      return await this.#readSnapshotAuthentication(path);
     }
+  }
+  async #publishSnapshotAuthentication(
+    path: string,
+    pendingPath: string,
+    key: string,
+  ): Promise<void> {
+    if ((await this.#readSnapshotAuthentication(pendingPath)) !== key)
+      throw new Error("Snapshot authentication migration changed.");
+    try {
+      await link(pendingPath, path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const published = await this.#publishedSnapshotAuthentication(
+        path,
+        pendingPath,
+      );
+      if (published !== key)
+        throw new Error("Snapshot authentication migration changed.");
+      return;
+    }
+    const published = await this.#publishedSnapshotAuthentication(
+      path,
+      pendingPath,
+    );
+    if (published !== key)
+      throw new Error("Snapshot authentication migration changed.");
   }
   async #snapshotAuthenticationForRead(): Promise<string> {
     if (this.#snapshotAuthentication) return this.#snapshotAuthentication;
     const clientSecret = this.#secret || (await this.#loadSecret());
-    const loaded = await this.#loadSnapshotAuthentication();
-    this.#snapshotAuthentication = loaded.key;
-    if (loaded.created) {
-      const legacy = await this.snapshotStore.read(clientSecret);
-      if (legacy) await this.snapshotStore.write(legacy.state, loaded.key);
+    const path = this.paths.snapshotAuthentication!;
+    const pendingPath = `${path}.pending`;
+    const published = await this.#publishedSnapshotAuthentication(
+      path,
+      pendingPath,
+    );
+    if (published) {
+      this.#snapshotAuthentication = published;
+      return published;
     }
-    return loaded.key;
+    let pending: string;
+    try {
+      pending = await this.#readSnapshotAuthentication(pendingPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      pending = randomBytes(32).toString("base64url");
+      try {
+        await createPrivateExclusive(pendingPath, `${pending}\n`);
+      } catch (createError) {
+        if ((createError as NodeJS.ErrnoException).code !== "EEXIST")
+          throw createError;
+        pending = await this.#readSnapshotAuthentication(pendingPath);
+      }
+    }
+    this.#snapshotAuthentication = pending;
+    try {
+      await this.snapshotStore.read(pending);
+    } catch {
+      const legacy = await this.snapshotStore.read(clientSecret);
+      if (legacy) {
+        await this.snapshotStore.write(legacy.state, pending);
+        await this.snapshotStore.read(pending);
+      }
+    }
+    await this.#publishSnapshotAuthentication(path, pendingPath, pending);
+    return pending;
   }
   stop(): Promise<void> {
     if (this.#stopPromise) return this.#stopPromise;

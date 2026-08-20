@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createConnection, createServer, type Socket } from "node:net";
 import {
   chmod,
+  link,
   lstat,
   mkdir,
   mkdtemp,
@@ -162,6 +163,103 @@ test("broker migrates a client-secret-authenticated snapshot once", async () => 
     new SnapshotStore(p.snapshot).read(legacySecret),
     /Snapshot verification failed/u,
   );
+  await broker.stop();
+});
+
+test("broker resumes a failed legacy snapshot migration", async () => {
+  const root = await mkdtemp(join(tmpdir(), "orch-snapshot-migration-retry-"));
+  const runtime = join(root, "runtime");
+  const p = {
+    root,
+    runtime,
+    events: join(root, "events.jsonl"),
+    snapshot: join(root, "snapshot.json"),
+    lock: join(runtime, "broker.lock"),
+    socket: join(runtime, "broker.sock"),
+    secret: join(runtime, "client.secret"),
+  };
+  await mkdir(runtime, { mode: 0o700 });
+  const legacySecret = "b".repeat(43);
+  await writeFile(p.secret, `${legacySecret}\n`, { mode: 0o600 });
+  const legacyStore = new EventStore(p.events);
+  await legacyStore.open();
+  await legacyStore.append({
+    type: "audit.action",
+    actor: {
+      principalId: "prn_00000000000000000000000000",
+      kind: "system",
+    },
+    payload: { action: "retry_legacy_snapshot" },
+  });
+  await new SnapshotStore(p.snapshot).write(legacyStore.state, legacySecret);
+
+  const interrupted = new Broker(p);
+  const originalWrite = interrupted.snapshotStore.write.bind(
+    interrupted.snapshotStore,
+  );
+  let failMigrationWrite = true;
+  interrupted.snapshotStore.write = async (...args) => {
+    if (failMigrationWrite) {
+      failMigrationWrite = false;
+      throw new Error("injected migration write failure");
+    }
+    return await originalWrite(...args);
+  };
+  await interrupted.start();
+  assert.equal(interrupted.store.readOnly, true);
+  await interrupted.stop();
+
+  const resumed = new Broker(p);
+  await resumed.start();
+  assert.equal(resumed.store.readOnly, false);
+  assert.equal(resumed.store.corruption, undefined);
+  assert.equal(
+    resumed.store.state.lastEventSeq,
+    legacyStore.state.lastEventSeq,
+  );
+  const persistentPath = join(root, "snapshot-authentication.key");
+  const persistentKey = (await readFile(persistentPath, "utf8")).trim();
+  assert.ok(await new SnapshotStore(p.snapshot).read(persistentKey));
+  await resumed.stop();
+});
+
+test("broker completes an interrupted authentication-key publication", async () => {
+  const root = await mkdtemp(join(tmpdir(), "orch-snapshot-publish-retry-"));
+  const runtime = join(root, "runtime");
+  const p = {
+    root,
+    runtime,
+    events: join(root, "events.jsonl"),
+    snapshot: join(root, "snapshot.json"),
+    lock: join(runtime, "broker.lock"),
+    socket: join(runtime, "broker.sock"),
+    secret: join(runtime, "client.secret"),
+  };
+  await mkdir(runtime, { mode: 0o700 });
+  await writeFile(p.secret, `${"c".repeat(43)}\n`, { mode: 0o600 });
+  const state = new EventStore(p.events);
+  await state.open();
+  await state.append({
+    type: "audit.action",
+    actor: {
+      principalId: "prn_00000000000000000000000000",
+      kind: "system",
+    },
+    payload: { action: "publish_snapshot_key" },
+  });
+  const key = "d".repeat(43);
+  const published = join(root, "snapshot-authentication.key");
+  const pending = `${published}.pending`;
+  await writeFile(pending, `${key}\n`, { mode: 0o600 });
+  await new SnapshotStore(p.snapshot).write(state.state, key);
+  await link(pending, published);
+
+  const broker = new Broker(p);
+  await broker.start();
+  assert.equal(broker.store.readOnly, false);
+  assert.equal(broker.store.state.lastEventSeq, state.state.lastEventSeq);
+  await assert.rejects(lstat(pending), { code: "ENOENT" });
+  assert.equal((await lstat(published)).nlink, 1);
   await broker.stop();
 });
 
