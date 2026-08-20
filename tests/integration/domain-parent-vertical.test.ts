@@ -644,12 +644,22 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
         await send(p1.socket, "agent.prompt", {
           agentId: childId,
           message: "continue",
+          delivery: "normal",
           timeoutMs: 30_000,
+          createTask: false,
         }),
       ),
       { ok: true },
     );
     assert.equal(controlPromptParams?.message, "continue");
+    assert.deepEqual(Object.keys(controlPromptParams ?? {}).sort(), [
+      "agentId",
+      "connectionGeneration",
+      "delivery",
+      "generation",
+      "message",
+      "piSessionId",
+    ]);
     assert.deepEqual(
       {
         agentId: controlPromptParams?.agentId,
