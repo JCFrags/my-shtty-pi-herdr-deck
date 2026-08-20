@@ -531,6 +531,7 @@ export class Broker {
     | { record: BrokerProcessRecord; identity: BrokerProcessRecordIdentity }
     | undefined;
   #secret: string;
+  #snapshotAuthentication: string;
   #clients = new Set<Client>();
   #questionTimers = new Map<string, NodeJS.Timeout>();
   #deadlineTimers = new Map<string, NodeJS.Timeout>();
@@ -555,9 +556,13 @@ export class Broker {
       log: paths.log ?? `${paths.socket}.log`,
       herdrSocket: paths.herdrSocket ?? paths.socket,
       sessionKey: paths.sessionKey ?? sessionKey(paths.socket),
+      snapshotAuthentication:
+        paths.snapshotAuthentication ??
+        join(paths.root, "snapshot-authentication.key"),
     };
     this.#lock = new BrokerLock(this.paths.lock, this.paths.socket);
     this.#secret = "";
+    this.#snapshotAuthentication = "";
     this.#now = options.now ?? Date.now;
     this.#setTimeout =
       options.setTimeout ??
@@ -631,7 +636,7 @@ export class Broker {
   async readSnapshot(): Promise<
     import("../state/snapshot-store.js").Snapshot | undefined
   > {
-    const key = this.#secret || (await this.#loadSecret());
+    const key = await this.#snapshotAuthenticationForRead();
     return this.snapshotStore.read(key);
   }
   async start(): Promise<void> {
@@ -652,8 +657,8 @@ export class Broker {
       );
       await safeStaleSocket(this.paths.socket);
       this.#secret = await this.#loadSecret();
-      const snapshot = await this.snapshotStore
-        .read(this.#secret)
+      const snapshot = await this.#snapshotAuthenticationForRead()
+        .then((key) => this.snapshotStore.read(key))
         .catch((error: unknown) => {
           this.store.readOnly = true;
           this.store.corruption =
@@ -848,6 +853,43 @@ export class Broker {
       await createPrivateExclusive(this.paths.secret, `${value}\n`);
       return value;
     }
+  }
+  async #loadSnapshotAuthentication(): Promise<{
+    key: string;
+    created: boolean;
+  }> {
+    const path = this.paths.snapshotAuthentication!;
+    try {
+      const value = await readPrivateRegular(path);
+      if (!/^[A-Za-z0-9_-]{43}\n$/u.test(value))
+        throw new Error("Invalid snapshot authentication key.");
+      return { key: value.slice(0, -1), created: false };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const key = randomBytes(32).toString("base64url");
+      try {
+        await createPrivateExclusive(path, `${key}\n`);
+        return { key, created: true };
+      } catch (createError) {
+        if ((createError as NodeJS.ErrnoException).code !== "EEXIST")
+          throw createError;
+        const value = await readPrivateRegular(path);
+        if (!/^[A-Za-z0-9_-]{43}\n$/u.test(value))
+          throw new Error("Invalid snapshot authentication key.");
+        return { key: value.slice(0, -1), created: false };
+      }
+    }
+  }
+  async #snapshotAuthenticationForRead(): Promise<string> {
+    if (this.#snapshotAuthentication) return this.#snapshotAuthentication;
+    const clientSecret = this.#secret || (await this.#loadSecret());
+    const loaded = await this.#loadSnapshotAuthentication();
+    this.#snapshotAuthentication = loaded.key;
+    if (loaded.created) {
+      const legacy = await this.snapshotStore.read(clientSecret);
+      if (legacy) await this.snapshotStore.write(legacy.state, loaded.key);
+    }
+    return loaded.key;
   }
   stop(): Promise<void> {
     if (this.#stopPromise) return this.#stopPromise;
@@ -6179,7 +6221,10 @@ export class Broker {
   }
   async #writeSnapshotBestEffort(): Promise<void> {
     try {
-      await this.snapshotStore.write(this.store.state, this.#secret);
+      await this.snapshotStore.write(
+        this.store.state,
+        this.#snapshotAuthentication,
+      );
     } catch (error: unknown) {
       this.#observeBackgroundFailure(error);
     }

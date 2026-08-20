@@ -3,6 +3,7 @@ import { createConnection, createServer, type Socket } from "node:net";
 import {
   chmod,
   lstat,
+  mkdir,
   mkdtemp,
   readFile,
   rename,
@@ -14,6 +15,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
 import { EventStore } from "../../src/state/event-store.js";
+import { SnapshotStore } from "../../src/state/snapshot-store.js";
 import { createId } from "../../src/shared/ids.js";
 import { Broker, safeStaleSocket } from "../../src/broker/broker.js";
 import { authenticate } from "../../src/broker/authentication.js";
@@ -120,6 +122,92 @@ class TestClient {
     this.socket.destroy();
   }
 }
+
+test("broker migrates a client-secret-authenticated snapshot once", async () => {
+  const root = await mkdtemp(join(tmpdir(), "orch-snapshot-migration-"));
+  const runtime = join(root, "runtime");
+  const p = {
+    root,
+    runtime,
+    events: join(root, "events.jsonl"),
+    snapshot: join(root, "snapshot.json"),
+    lock: join(runtime, "broker.lock"),
+    socket: join(runtime, "broker.sock"),
+    secret: join(runtime, "client.secret"),
+  };
+  await mkdir(runtime, { mode: 0o700 });
+  const legacySecret = "a".repeat(43);
+  await writeFile(p.secret, `${legacySecret}\n`, { mode: 0o600 });
+  const legacyStore = new EventStore(p.events);
+  await legacyStore.open();
+  await legacyStore.append({
+    type: "audit.action",
+    actor: {
+      principalId: "prn_00000000000000000000000000",
+      kind: "system",
+    },
+    payload: { action: "legacy_snapshot" },
+  });
+  await new SnapshotStore(p.snapshot).write(legacyStore.state, legacySecret);
+
+  const broker = new Broker(p);
+  await broker.start();
+  assert.equal(broker.store.readOnly, false);
+  assert.equal(broker.store.state.lastEventSeq, legacyStore.state.lastEventSeq);
+  const persistentPath = join(root, "snapshot-authentication.key");
+  const persistentKey = (await readFile(persistentPath, "utf8")).trim();
+  assert.equal((await lstat(persistentPath)).mode & 0o777, 0o600);
+  assert.ok(await new SnapshotStore(p.snapshot).read(persistentKey));
+  await assert.rejects(
+    new SnapshotStore(p.snapshot).read(legacySecret),
+    /Snapshot verification failed/u,
+  );
+  await broker.stop();
+});
+
+test("broker snapshot authentication survives runtime-secret rotation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "orch-snapshot-restart-"));
+  const runtime = join(root, "runtime");
+  const p = {
+    root,
+    runtime,
+    events: join(root, "events.jsonl"),
+    snapshot: join(root, "snapshot.json"),
+    lock: join(runtime, "broker.lock"),
+    socket: join(runtime, "broker.sock"),
+    secret: join(runtime, "client.secret"),
+  };
+  const first = new Broker(p);
+  await first.start();
+  await first.store.append({
+    type: "audit.action",
+    actor: {
+      principalId: "prn_00000000000000000000000000",
+      kind: "system",
+    },
+    payload: { action: "before_runtime_restart" },
+  });
+  const expectedSeq = first.store.state.lastEventSeq;
+  const firstClientSecret = await readFile(p.secret, "utf8");
+  await first.stop();
+
+  const snapshotAuthentication = join(root, "snapshot-authentication.key");
+  assert.equal((await lstat(snapshotAuthentication)).mode & 0o777, 0o600);
+  const retainedAuthentication = await readFile(snapshotAuthentication, "utf8");
+  await rename(runtime, join(root, "runtime-before-restart"));
+
+  const second = new Broker(p);
+  await second.start();
+  assert.equal(second.store.readOnly, false);
+  assert.equal(second.store.corruption, undefined);
+  assert.equal(second.store.state.lastEventSeq, expectedSeq);
+  assert.notEqual(await readFile(p.secret, "utf8"), firstClientSecret);
+  assert.equal(
+    await readFile(snapshotAuthentication, "utf8"),
+    retainedAuthentication,
+  );
+  await second.stop();
+});
 
 test("broker refuses to delete a regular socket path", async () => {
   const root = await mkdtemp(join(tmpdir(), "orch-safe-"));
