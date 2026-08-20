@@ -792,6 +792,15 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
       }),
     );
     assert.equal(broker.store.state.runs[runId]?.state, "working");
+    const questionPayload = {
+      schemaVersion: 1,
+      prompt: "Pick",
+      context: null,
+      options: [{ id: "a", label: "A", description: null }],
+      allowFreeform: false,
+      defaultOptionId: "a",
+      timeoutMs: 10_000,
+    };
     const question = ok(
       await send(child.socket, "question.open", {
         agentId: childId,
@@ -799,16 +808,30 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
         runId,
         assignmentGeneration: 1,
         toolCallId: "tool-question-vertical",
-        question: {
-          schemaVersion: 1,
-          prompt: "Pick",
-          context: null,
-          options: [{ id: "a", label: "A", description: null }],
-          allowFreeform: false,
-          defaultOptionId: "a",
-          timeoutMs: 10_000,
-        },
+        question: questionPayload,
       }),
+    );
+    assert.deepEqual(
+      ok(
+        await send(p1.socket, "agent.wait", {
+          agentId: childId,
+          taskId,
+          runId,
+          timeoutMs: 30_000,
+        }),
+      ),
+      {
+        agentId: childId,
+        taskId,
+        runId,
+        state: "blocked",
+        settled: false,
+        question: {
+          questionId: question.questionId,
+          state: "open",
+          payload: questionPayload,
+        },
+      },
     );
     assert.equal(
       (

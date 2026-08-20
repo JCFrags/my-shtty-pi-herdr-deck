@@ -3150,12 +3150,27 @@ export class Broker {
               "RUN_MISMATCH",
               "Wait run identity does not match.",
             );
+          const openQuestion = Object.values(
+            this.store.state.questions ?? {},
+          ).find(
+            (question) =>
+              question.runId === run.id && question.state === "open",
+          );
           result = {
             agentId: target,
             taskId: run.taskId,
             runId: run.id,
             state: run.state,
             settled: run.settled,
+            ...(openQuestion
+              ? {
+                  question: {
+                    questionId: openQuestion.id,
+                    state: openQuestion.state,
+                    payload: openQuestion.payload,
+                  },
+                }
+              : {}),
           };
         } else {
           const method =
