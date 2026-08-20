@@ -3190,6 +3190,7 @@ export class Broker {
           delete params.runId;
           delete params.assignmentGeneration;
           delete params.reason;
+          delete params.timeoutMs;
           result = await this.#sendAdapterRequest(
             target,
             method,
