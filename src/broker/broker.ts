@@ -276,7 +276,7 @@ function isTerminal(value: unknown): boolean {
   );
 }
 function isRunClosedForAdapterProgress(value: unknown): boolean {
-  return isTerminal(value) || value === "settled";
+  return isTerminal(value);
 }
 function isAbortFallbackError(error: unknown): boolean {
   if (!(error instanceof OrchestratorError)) return false;

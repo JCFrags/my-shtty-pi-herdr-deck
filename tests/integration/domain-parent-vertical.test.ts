@@ -752,6 +752,46 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
         safeData: { toolName: null, contextPercent: 0 },
       }),
     );
+    ok(
+      await send(child.socket, "agent.lifecycle_event", {
+        agentId: childId,
+        connectionGeneration,
+        adapterSeq: 7,
+        event: "agent_settled",
+        piSessionId: "child-session",
+        turnIndex: 1,
+        agentCycleId: "cycle",
+        assignment: { assignmentId, generation: 1 },
+        safeData: { toolName: null, contextPercent: 0 },
+      }),
+    );
+    assert.equal(broker.store.state.runs[runId]?.state, "settled");
+    assert.deepEqual(
+      ok(
+        await send(p1.socket, "agent.prompt", {
+          agentId: childId,
+          message: "publish the result",
+          delivery: "normal",
+          timeoutMs: 30_000,
+          createTask: false,
+        }),
+      ),
+      { ok: true },
+    );
+    ok(
+      await send(child.socket, "agent.lifecycle_event", {
+        agentId: childId,
+        connectionGeneration,
+        adapterSeq: 8,
+        event: "turn_start",
+        piSessionId: "child-session",
+        turnIndex: 2,
+        agentCycleId: "cycle-2",
+        assignment: { assignmentId, generation: 1 },
+        safeData: { toolName: null, contextPercent: 0 },
+      }),
+    );
+    assert.equal(broker.store.state.runs[runId]?.state, "working");
     const question = ok(
       await send(child.socket, "question.open", {
         agentId: childId,
@@ -836,7 +876,7 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
     ok(
       await send(child.socket, "agent.heartbeat", {
         agentId: childId,
-        adapterSeq: 7,
+        adapterSeq: 9,
         state: { sessionId: "child-session", activity: "idle" },
       }),
     );
@@ -845,7 +885,7 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
         await send(child.socket, "agent.lifecycle_event", {
           agentId: childId,
           connectionGeneration,
-          adapterSeq: 7,
+          adapterSeq: 9,
           event: "agent_settled",
           piSessionId: "child-session",
           turnIndex: 1,
@@ -885,11 +925,11 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
       await send(child.socket, "agent.lifecycle_event", {
         agentId: childId,
         connectionGeneration,
-        adapterSeq: 8,
+        adapterSeq: 10,
         event: "agent_settled",
         piSessionId: "child-session",
-        turnIndex: 1,
-        agentCycleId: "cycle",
+        turnIndex: 2,
+        agentCycleId: "cycle-2",
         assignment: { assignmentId, generation: 1 },
         safeData: { toolName: null, contextPercent: 0 },
       }),
