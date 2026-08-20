@@ -290,6 +290,7 @@ function isAbortFallbackError(error: unknown): boolean {
 }
 const DEFAULT_TASK_WALL_MS = 15 * 60_000;
 const MAX_TASK_WALL_MS = 24 * 60 * 60_000;
+const MAX_BROKER_CLIENTS = 64;
 const ADAPTER_ABORT_TIMEOUT_MS = 10_000;
 const WALL_TIMEOUT_REASON = {
   code: "TIMEOUT" as const,
@@ -1008,7 +1009,7 @@ export class Broker {
     return this.#secret;
   }
   #connect(socket: Socket): void {
-    if (this.#clients.size >= 16) {
+    if (this.#clients.size >= MAX_BROKER_CLIENTS) {
       socket.destroy();
       return;
     }

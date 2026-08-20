@@ -243,6 +243,90 @@ test("M2 production broker and CLI registration proves proof, late deadline, and
   }
 });
 
+test("broker keeps status available with 16 long-lived clients", async () => {
+  const root = await mkdtemp(join(tmpdir(), "broker-client-capacity-"));
+  const paths = {
+    root,
+    runtime: join(root, "runtime"),
+    events: join(root, "events.ndjson"),
+    snapshot: join(root, "snapshot.json"),
+    lock: join(root, "broker.lock"),
+    socket: join(root, "broker.sock"),
+    secret: join(root, "secret"),
+  };
+  const broker = new Broker(paths);
+  const clients: Socket[] = [];
+  try {
+    await broker.start();
+    for (let index = 0; index < 16; index++)
+      clients.push(await authenticatedClient(broker, `capacity-${index}`));
+
+    const status = (await brokerRequest(
+      paths.socket,
+      paths.secret,
+      "system.status",
+      {},
+    )) as Record<string, unknown>;
+    assert.equal(status.status, "healthy");
+  } finally {
+    for (const client of clients) client.destroy();
+    await broker.stop().catch(() => undefined);
+  }
+});
+
+async function authenticatedClient(
+  broker: Broker,
+  id: string,
+): Promise<Socket> {
+  const socket = createConnection(broker.paths.socket);
+  let buffer = "";
+  const authenticated = new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`authentication timeout: ${id}`)),
+      2_000,
+    );
+    socket.on("data", (data) => {
+      buffer += data.toString("utf8");
+      const at = buffer.indexOf("\n");
+      if (at < 0) return;
+      const frame = JSON.parse(buffer.slice(0, at)) as Record<string, unknown>;
+      if (frame.type === "hello_result" && frame.ok === true) {
+        clearTimeout(timer);
+        resolve();
+      }
+    });
+    socket.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    socket.once("close", () => {
+      clearTimeout(timer);
+      reject(new Error(`connection closed before authentication: ${id}`));
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    socket.once("connect", resolve);
+    socket.once("error", reject);
+  });
+  socket.write(
+    JSON.stringify({
+      v: 1,
+      type: "hello",
+      id: `${id}-hello`,
+      client: {
+        kind: "cli",
+        name: "m2-broker-capacity",
+        version: "0.1.0",
+        capabilities: [],
+      },
+      sessionKey: broker.paths.sessionKey,
+      auth: { kind: "client_secret", secret: broker.secret },
+    }) + "\n",
+  );
+  await authenticated;
+  return socket;
+}
+
 async function request(
   broker: Broker,
   id: string,
