@@ -15,6 +15,7 @@ import test, { type TestContext } from "node:test";
 import {
   finalizeStartupPublicationSync,
   finalizeStartupRemovalSync,
+  minimalBrokerEnvironment,
   type CompanionIdentity,
   type RecordIdentity,
   type StartupRecord,
@@ -46,6 +47,41 @@ async function fixture(t: TestContext): Promise<string> {
 }
 
 const replacement = "held replacement bytes\n";
+
+test("broker startup forwards only the exact compact rollback switch", () => {
+  const prior = process.env.PI_HERDR_COMPACT_DELEGATION;
+  const identity = {
+    path: "/run/user/1000/herdr.sock",
+    dev: 1n,
+    ino: 2n,
+    uid: BigInt(process.getuid?.() ?? 1000),
+    ctimeNs: 3n,
+    birthtimeNs: 4n,
+  };
+  try {
+    process.env.PI_HERDR_COMPACT_DELEGATION = "0";
+    assert.equal(
+      minimalBrokerEnvironment(identity, "/usr/bin/herdr")
+        .PI_HERDR_COMPACT_DELEGATION,
+      "0",
+    );
+    process.env.PI_HERDR_COMPACT_DELEGATION = "1";
+    assert.equal(
+      minimalBrokerEnvironment(identity, "/usr/bin/herdr")
+        .PI_HERDR_COMPACT_DELEGATION,
+      undefined,
+    );
+    process.env.PI_HERDR_COMPACT_DELEGATION = "unexpected";
+    assert.equal(
+      minimalBrokerEnvironment(identity, "/usr/bin/herdr")
+        .PI_HERDR_COMPACT_DELEGATION,
+      undefined,
+    );
+  } finally {
+    if (prior === undefined) delete process.env.PI_HERDR_COMPACT_DELEGATION;
+    else process.env.PI_HERDR_COMPACT_DELEGATION = prior;
+  }
+});
 
 interface MutationEvent {
   mask: number;
