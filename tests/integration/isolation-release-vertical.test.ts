@@ -769,15 +769,40 @@ test("compact preview binds effective model policy and rejects restart drift", a
       workflowDigest: string;
       steps: Array<{ policy: Record<string, unknown> }>;
     };
-    assert.deepEqual(preview.steps[0]?.policy, {
-      decision: "allow",
-      placement: "current-workspace",
-      isolation: "shared-readonly",
-      modelProfileId: "subagent",
-      providerQualifiedModel: "openai-codex/gpt-5.6-luna",
-      thinkingLevel: "medium",
-      modelPolicyHash: preview.steps[0]?.policy.modelPolicyHash,
+    const policy = preview.steps[0]!.policy;
+    const context = policy.context as Record<string, unknown>;
+    assert.deepEqual(
+      { ...policy, context: undefined },
+      {
+        decision: "allow",
+        placement: "current-workspace",
+        isolation: "shared-readonly",
+        modelProfileId: "subagent",
+        providerQualifiedModel: "openai-codex/gpt-5.6-luna",
+        thinkingLevel: "medium",
+        modelPolicyHash: policy.modelPolicyHash,
+        context: undefined,
+      },
+    );
+    assert.match(String(context.parentContextHash), /^[a-f0-9]{64}$/u);
+    assert.match(String(context.workspacePolicyHash), /^[a-f0-9]{64}$/u);
+    assert.match(String(context.budgetPolicyHash), /^[a-f0-9]{64}$/u);
+    assert.equal(context.parentGeneration, 1);
+    assert.equal(context.parentDepth, 0);
+    assert.equal(context.delegatedDepth, 1);
+    assert.equal(context.maxDelegationDepth, 2);
+    assert.equal(context.depthDecision, "allow");
+    assert.deepEqual(context.admissionLimits, {
+      maxActiveAgents: 4,
+      maxActivePerParent: 4,
+      maxQueuedTasks: 32,
+      maxTasksPerDelegate: 8,
+      maxProvisioning: 2,
     });
+    const serializedPreview = JSON.stringify(preview);
+    assert.equal(serializedPreview.includes(h.registered.agentId), false);
+    assert.equal(serializedPreview.includes("parent-workspace"), false);
+    assert.equal(serializedPreview.includes(h.paths.root), false);
     assert.match(
       String(preview.steps[0]?.policy.modelPolicyHash),
       /^[a-f0-9]{64}$/u,
@@ -793,6 +818,39 @@ test("compact preview binds effective model policy and rejects restart drift", a
           parentAgentId: h.registered.agentId,
         },
         { idempotencyKey: "compact-policy-drift" },
+      ),
+      (error: unknown) =>
+        (error as { code?: string }).code === "INVALID_REQUEST",
+    );
+    assert.equal(Object.keys(h.broker.store.state.workflows).length, 0);
+    assert.equal(Object.keys(h.broker.store.state.tasks).length, 0);
+    assert.equal(h.provisions.length, 0);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("compact acceptance rejects authenticated parent context drift before mutation", async () => {
+  const h = await productionParent();
+  try {
+    const text =
+      "- [ ] bind: Bind parent policy context [profile:reviewer] [mode:read]";
+    const preview = (await h.client.request("compact.delegate", { text })) as {
+      workflowDigest: string;
+    };
+    const parent = h.broker.store.state.agents[h.registered.agentId]!;
+    parent.generation += 1;
+    parent.workspaceId = "parent-workspace-replaced";
+    await assert.rejects(
+      h.client.request(
+        "compact.delegate",
+        {
+          text,
+          accept: true,
+          workflowDigest: preview.workflowDigest,
+          parentAgentId: h.registered.agentId,
+        },
+        { idempotencyKey: "compact-parent-policy-drift" },
       ),
       (error: unknown) =>
         (error as { code?: string }).code === "INVALID_REQUEST",

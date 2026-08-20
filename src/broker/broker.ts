@@ -78,6 +78,7 @@ import {
 import {
   acceptedCompactWorkflow,
   compileCompactDelegation,
+  type CompactPolicyContext,
 } from "./compact-delegation.js";
 import {
   modelSelectionMatches,
@@ -1273,6 +1274,7 @@ export class Broker {
       let compactPreview: unknown;
       let compactReplayResponse: unknown;
       let compactIdempotency: { key: string; paramsHash: string } | undefined;
+      let compactPolicyContext: CompactPolicyContext | undefined;
       if (request.method === "compact.delegate") {
         requirePermission(principal, "delegate");
         if (!this.#compactDelegationEnabled)
@@ -1301,6 +1303,100 @@ export class Broker {
             "INVALID_REQUEST",
             "Compact delegation parameters are invalid.",
           );
+        if (
+          principal.kind === "pi_parent" &&
+          safeText(p.parentAgentId) &&
+          p.parentAgentId !== principal.agentId
+        )
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "A parent cannot target another parent subtree.",
+          );
+        const compactParentAgentId =
+          principal.kind === "pi_parent"
+            ? principal.agentId
+            : safeText(p.parentAgentId)
+              ? p.parentAgentId
+              : undefined;
+        if (
+          !compactParentAgentId ||
+          !(await this.#canAccessAgent(principal, compactParentAgentId))
+        )
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "A broker-bound parent identity is required.",
+          );
+        const resolveCompactPolicyContext = (): CompactPolicyContext => {
+          const parent = this.store.state.agents[compactParentAgentId];
+          if (
+            !parent ||
+            !Number.isSafeInteger(parent.generation) ||
+            parent.generation < 1 ||
+            !safeText(parent.workspaceId)
+          )
+            throw new OrchestratorError(
+              "INVALID_REQUEST",
+              "Authenticated parent policy context is unavailable.",
+            );
+          let parentDepth = 0;
+          let ancestorId = parent.parentAgentId;
+          const seen = new Set([parent.id]);
+          while (ancestorId) {
+            if (seen.has(ancestorId))
+              throw new OrchestratorError(
+                "STATE_CORRUPT",
+                "Parent delegation ancestry is invalid.",
+              );
+            seen.add(ancestorId);
+            const ancestor = this.store.state.agents[ancestorId];
+            if (!ancestor)
+              throw new OrchestratorError(
+                "STATE_CORRUPT",
+                "Parent delegation ancestry is incomplete.",
+              );
+            parentDepth++;
+            ancestorId = ancestor.parentAgentId;
+          }
+          const limits = new DeterministicScheduler().limits;
+          const delegatedDepth = parentDepth + 1;
+          if (delegatedDepth > limits.maxDelegationDepth)
+            throw new OrchestratorError(
+              "PERMISSION_DENIED",
+              "Compact delegation exceeds the delegation-depth policy.",
+            );
+          const admissionLimits = {
+            maxActiveAgents: limits.maxActiveAgents,
+            maxActivePerParent: limits.maxActivePerParent,
+            maxQueuedTasks: limits.maxQueuedTasks,
+            maxTasksPerDelegate: limits.maxTasksPerDelegate,
+            maxProvisioning: limits.maxProvisioning,
+          };
+          return {
+            parentContextHash: sha256(
+              canonicalJson({
+                agentId: parent.id,
+                generation: parent.generation,
+                depth: parentDepth,
+                workspaceId: parent.workspaceId,
+              }),
+            ),
+            workspacePolicyHash: sha256(
+              canonicalJson({
+                workspaceId: parent.workspaceId,
+                policy: "authenticated-parent-workspace",
+              }),
+            ),
+            parentGeneration: parent.generation,
+            parentDepth,
+            delegatedDepth,
+            maxDelegationDepth: limits.maxDelegationDepth,
+            depthDecision: "allow",
+            budgetPolicyHash: sha256(canonicalJson(admissionLimits)),
+            admissionLimits,
+          };
+        };
+        const previewPolicyContext = resolveCompactPolicyContext();
+        compactPolicyContext = previewPolicyContext;
         const compiled = compileCompactDelegation(
           p.text,
           (profileId, requestedIsolation) => {
@@ -1321,6 +1417,7 @@ export class Broker {
                   providerQualifiedModel: `${effective.model.provider}/${effective.model.modelId}`,
                   thinkingLevel: effective.model.thinkingLevel,
                   modelPolicyHash: spawnPolicy.policyHash,
+                  context: previewPolicyContext,
                 },
               };
             } catch {
@@ -1328,6 +1425,14 @@ export class Broker {
             }
           },
         );
+        if (
+          compiled.stepCount >
+          previewPolicyContext.admissionLimits.maxTasksPerDelegate
+        )
+          throw new OrchestratorError(
+            "LIMIT_EXCEEDED",
+            "Compact delegation exceeds the fixed task admission limit.",
+          );
         if (p.accept !== true) {
           compactPreview = {
             schemaVersion: compiled.schemaVersion,
@@ -1345,6 +1450,14 @@ export class Broker {
             compiled,
             typeof p.workflowDigest === "string" ? p.workflowDigest : undefined,
           );
+          if (
+            canonicalJson(resolveCompactPolicyContext()) !==
+            canonicalJson(previewPolicyContext)
+          )
+            throw new OrchestratorError(
+              "INVALID_REQUEST",
+              "Authenticated compact policy context changed before acceptance.",
+            );
           const paramsHash = sha256(
             canonicalJson({
               method: "compact.delegate",
@@ -4264,6 +4377,11 @@ export class Broker {
             this.#modelPolicy,
           );
           if (compact) {
+            if (!compactPolicyContext)
+              throw new OrchestratorError(
+                "INVALID_REQUEST",
+                "Compact policy context is unavailable.",
+              );
             const expectedPolicy = record.compactPolicy;
             const effective = spawnPolicy.effective;
             const currentPolicy = {
@@ -4274,6 +4392,7 @@ export class Broker {
               providerQualifiedModel: `${effective.model.provider}/${effective.model.modelId}`,
               thinkingLevel: effective.model.thinkingLevel,
               modelPolicyHash: spawnPolicy.policyHash,
+              context: compactPolicyContext,
             };
             if (canonicalJson(expectedPolicy) !== canonicalJson(currentPolicy))
               throw new OrchestratorError(

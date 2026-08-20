@@ -8,6 +8,23 @@ export const COMPACT_DELEGATION_LIMITS = Object.freeze({
   maxPreviewBytes: 8_192,
 });
 
+export interface CompactPolicyContext {
+  readonly parentContextHash: string;
+  readonly workspacePolicyHash: string;
+  readonly parentGeneration: number;
+  readonly parentDepth: number;
+  readonly delegatedDepth: number;
+  readonly maxDelegationDepth: number;
+  readonly depthDecision: "allow";
+  readonly budgetPolicyHash: string;
+  readonly admissionLimits: {
+    readonly maxActiveAgents: number;
+    readonly maxActivePerParent: number;
+    readonly maxQueuedTasks: number;
+    readonly maxTasksPerDelegate: number;
+    readonly maxProvisioning: number;
+  };
+}
 export interface CompactPolicyProjection {
   readonly decision: "allow";
   readonly placement: "current-workspace" | "new-workspace";
@@ -16,6 +33,7 @@ export interface CompactPolicyProjection {
   readonly providerQualifiedModel: string;
   readonly thinkingLevel: string;
   readonly modelPolicyHash: string;
+  readonly context: CompactPolicyContext;
 }
 export interface CompactProfileResolution {
   readonly profileId: string;
@@ -207,6 +225,10 @@ export function compileCompactDelegation(
       !ID.test(resolved.profileId) ||
       resolved.policy.isolation !== requestedIsolation ||
       !/^[a-f0-9]{64}$/u.test(resolved.policy.modelPolicyHash) ||
+      !/^[a-f0-9]{64}$/u.test(resolved.policy.context.parentContextHash) ||
+      !/^[a-f0-9]{64}$/u.test(resolved.policy.context.workspacePolicyHash) ||
+      !/^[a-f0-9]{64}$/u.test(resolved.policy.context.budgetPolicyHash) ||
+      resolved.policy.context.depthDecision !== "allow" ||
       !resolved.policy.providerQualifiedModel.includes("/")
     )
       fail("COMPACT_PROFILE_UNTRUSTED", "Profile is not trusted.", lineNumber);

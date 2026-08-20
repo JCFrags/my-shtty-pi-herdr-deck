@@ -13,6 +13,24 @@ import {
   PARENT_TOOL_NAMES,
 } from "../../src/pi/parent-tool-schema.js";
 
+const policyContext = {
+  parentContextHash: "b".repeat(64),
+  workspacePolicyHash: "c".repeat(64),
+  parentGeneration: 1,
+  parentDepth: 0,
+  delegatedDepth: 1,
+  maxDelegationDepth: 2,
+  depthDecision: "allow" as const,
+  budgetPolicyHash: "d".repeat(64),
+  admissionLimits: {
+    maxActiveAgents: 4,
+    maxActivePerParent: 4,
+    maxQueuedTasks: 32,
+    maxTasksPerDelegate: 8,
+    maxProvisioning: 2,
+  },
+};
+
 const resolver = (id: string, isolation: "shared-readonly" | "worktree") =>
   new Set(["implementer", "reviewer", "scout"]).has(id)
     ? {
@@ -25,6 +43,7 @@ const resolver = (id: string, isolation: "shared-readonly" | "worktree") =>
           providerQualifiedModel: "openai-codex/gpt-5.6-luna",
           thinkingLevel: "medium",
           modelPolicyHash: "a".repeat(64),
+          context: policyContext,
         },
       }
     : undefined;
@@ -49,6 +68,7 @@ test("compact delegation compiles a DAG into canonical delegate steps", () => {
       providerQualifiedModel: "openai-codex/gpt-5.6-luna",
       thinkingLevel: "medium",
       modelPolicyHash: "a".repeat(64),
+      context: policyContext,
     },
     completedInput: true,
   });
@@ -58,6 +78,49 @@ test("compact delegation compiles a DAG into canonical delegate steps", () => {
     compileCompactDelegation(text, resolver).workflowDigest,
     value.workflowDigest,
   );
+});
+
+test("compact digest binds parent, workspace, depth, and budget policy context", () => {
+  const input = "- [ ] bind: Bind policy [profile:reviewer] [mode:read]";
+  const compileWith = (context: typeof policyContext) =>
+    compileCompactDelegation(input, (id, isolation) => {
+      const resolved = resolver(id, isolation);
+      return resolved
+        ? { ...resolved, policy: { ...resolved.policy, context } }
+        : undefined;
+    });
+  const baseline = compileWith(policyContext);
+  for (const context of [
+    {
+      ...policyContext,
+      parentGeneration: 2,
+      parentContextHash: "e".repeat(64),
+    },
+    {
+      ...policyContext,
+      parentDepth: 1,
+      delegatedDepth: 2,
+      parentContextHash: "f".repeat(64),
+    },
+    {
+      ...policyContext,
+      workspacePolicyHash: "1".repeat(64),
+      parentContextHash: "2".repeat(64),
+    },
+    {
+      ...policyContext,
+      budgetPolicyHash: "3".repeat(64),
+      admissionLimits: {
+        ...policyContext.admissionLimits,
+        maxQueuedTasks: 31,
+      },
+    },
+  ])
+    assert.notEqual(
+      compileWith(context).workflowDigest,
+      baseline.workflowDigest,
+    );
+  assert.doesNotMatch(JSON.stringify(baseline), /workspace-secret|\/home\//u);
 });
 
 test("compact scheduling requires explicit matching digest", () => {
