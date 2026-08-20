@@ -863,6 +863,31 @@ export class EventStore {
             (p.reason as ErrorSummary).code,
           );
       }
+    } else if (event.type === "compact.delegation_scheduled") {
+      valid =
+        exactKeys(refs, ["workflowId"]) &&
+        isEntityId(refs.workflowId, "wfl") &&
+        exactKeys(p, [
+          "workflowId",
+          "parentAgentId",
+          "mode",
+          "idempotencyKey",
+          "paramsHash",
+          "response",
+          "tasks",
+        ]) &&
+        p.workflowId === refs.workflowId &&
+        isEntityId(p.parentAgentId, "agt") &&
+        boundedText(p.mode, 32) &&
+        boundedText(p.idempotencyKey, 256) &&
+        typeof p.paramsHash === "string" &&
+        /^[a-f0-9]{64}$/u.test(p.paramsHash) &&
+        !!p.response &&
+        typeof p.response === "object" &&
+        !Array.isArray(p.response) &&
+        Array.isArray(p.tasks) &&
+        p.tasks.length >= 1 &&
+        p.tasks.length <= 16;
     } else if (event.type === "herdr.metadata_projected") {
       valid =
         exactKeys(refs, [

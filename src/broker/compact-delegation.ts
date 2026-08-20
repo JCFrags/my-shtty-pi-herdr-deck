@@ -8,11 +8,22 @@ export const COMPACT_DELEGATION_LIMITS = Object.freeze({
   maxPreviewBytes: 8_192,
 });
 
+export interface CompactPolicyProjection {
+  readonly decision: "allow";
+  readonly placement: "current-workspace" | "new-workspace";
+  readonly isolation: "shared-readonly" | "worktree";
+  readonly modelProfileId: "manager" | "subagent";
+  readonly providerQualifiedModel: string;
+  readonly thinkingLevel: string;
+  readonly modelPolicyHash: string;
+}
 export interface CompactProfileResolution {
   readonly profileId: string;
+  readonly policy: CompactPolicyProjection;
 }
 export type CompactProfileResolver = (
   requestedProfileId: string,
+  requestedIsolation: "shared-readonly" | "worktree",
 ) => CompactProfileResolution | undefined;
 export interface CompactStepPreview {
   readonly id: string;
@@ -21,6 +32,7 @@ export interface CompactStepPreview {
   readonly dependencyIds: readonly string[];
   readonly placement: "background";
   readonly isolation: "shared-readonly" | "worktree";
+  readonly policy: CompactPolicyProjection;
   readonly completedInput: boolean;
 }
 export interface CompactCanonicalWorkflow {
@@ -35,6 +47,7 @@ export interface CompactCanonicalWorkflow {
     readonly constraints: readonly string[];
     readonly dependsOn: readonly string[];
     readonly isolation: "shared-readonly" | "worktree";
+    readonly compactPolicy: CompactPolicyProjection;
   }[];
 }
 export interface CompactCompileResult {
@@ -67,6 +80,7 @@ type Parsed = {
   profileId: string;
   mode: "read" | "write";
   completedInput: boolean;
+  policy: CompactPolicyProjection;
 };
 
 function fail(code: string, message: string, line?: number): never {
@@ -94,8 +108,9 @@ export function compileCompactDelegation(
     fail("COMPACT_CONTROL_CHARACTER", "Input contains a control character.");
   const lines = text.split("\n");
   if (lines.at(-1) === "") lines.pop();
-  if (lines.length > COMPACT_DELEGATION_LIMITS.maxLines)
-    fail("COMPACT_LINE_LIMIT", "Input exceeds 32 lines.");
+  const nonEmptyLineCount = lines.filter((line) => !/^ *$/u.test(line)).length;
+  if (nonEmptyLineCount > COMPACT_DELEGATION_LIMITS.maxLines)
+    fail("COMPACT_LINE_LIMIT", "Input exceeds 32 non-empty lines.");
 
   const parsed: Parsed[] = [];
   const ids = new Set<string>();
@@ -185,8 +200,15 @@ export function compileCompactDelegation(
       else if (value === "mode:write") mode = "write";
       else fail("COMPACT_TAG_UNKNOWN", "Tag is not supported.", lineNumber);
     }
-    const resolved = resolveProfile(profileId);
-    if (!resolved || !ID.test(resolved.profileId))
+    const requestedIsolation = mode === "read" ? "shared-readonly" : "worktree";
+    const resolved = resolveProfile(profileId, requestedIsolation);
+    if (
+      !resolved ||
+      !ID.test(resolved.profileId) ||
+      resolved.policy.isolation !== requestedIsolation ||
+      !/^[a-f0-9]{64}$/u.test(resolved.policy.modelPolicyHash) ||
+      !resolved.policy.providerQualifiedModel.includes("/")
+    )
       fail("COMPACT_PROFILE_UNTRUSTED", "Profile is not trusted.", lineNumber);
     parsed.push({
       id,
@@ -195,6 +217,7 @@ export function compileCompactDelegation(
       profileId: resolved.profileId,
       mode,
       completedInput,
+      policy: resolved.policy,
     });
   }
   if (parsed.length === 0) fail("COMPACT_EMPTY", "Input has no steps.");
@@ -228,7 +251,8 @@ export function compileCompactDelegation(
       objective: step.title,
       constraints: [],
       dependsOn: [...step.after].sort(),
-      isolation: step.mode === "read" ? "shared-readonly" : "worktree",
+      isolation: step.policy.isolation,
+      compactPolicy: step.policy,
     })),
   };
   const workflowDigest = sha256(canonicalJson(workflow));
@@ -238,7 +262,8 @@ export function compileCompactDelegation(
     mode: step.mode,
     dependencyIds: [...step.after].sort(),
     placement: "background",
-    isolation: step.mode === "read" ? "shared-readonly" : "worktree",
+    isolation: step.policy.isolation,
+    policy: step.policy,
     completedInput: step.completedInput,
   }));
   const result = {

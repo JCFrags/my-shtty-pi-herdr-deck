@@ -1,15 +1,32 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   acceptedCompactWorkflow,
   CompactDelegationError,
   compileCompactDelegation,
 } from "../../src/broker/compact-delegation.js";
 import { ParentToolService } from "../../src/pi/parent-tools.js";
+import {
+  PARENT_TOOL_METADATA,
+  PARENT_TOOL_NAMES,
+} from "../../src/pi/parent-tool-schema.js";
 
-const resolver = (id: string) =>
+const resolver = (id: string, isolation: "shared-readonly" | "worktree") =>
   new Set(["implementer", "reviewer", "scout"]).has(id)
-    ? { profileId: id }
+    ? {
+        profileId: id,
+        policy: {
+          decision: "allow" as const,
+          placement: "current-workspace" as const,
+          isolation,
+          modelProfileId: "subagent" as const,
+          providerQualifiedModel: "openai-codex/gpt-5.6-luna",
+          thinkingLevel: "medium",
+          modelPolicyHash: "a".repeat(64),
+        },
+      }
     : undefined;
 
 test("compact delegation compiles a DAG into canonical delegate steps", () => {
@@ -24,6 +41,15 @@ test("compact delegation compiles a DAG into canonical delegate steps", () => {
     dependencyIds: ["build"],
     placement: "background",
     isolation: "shared-readonly",
+    policy: {
+      decision: "allow",
+      placement: "current-workspace",
+      isolation: "shared-readonly",
+      modelProfileId: "subagent",
+      providerQualifiedModel: "openai-codex/gpt-5.6-luna",
+      thinkingLevel: "medium",
+      modelPolicyHash: "a".repeat(64),
+    },
     completedInput: true,
   });
   assert.equal(value.workflow.steps[1]?.objective, "Check it");
@@ -117,5 +143,47 @@ test("compact parser enforces UTF-8, profile, and bounded input", () => {
   assert.throws(() =>
     compileCompactDelegation(`- [ ] a: ${"x".repeat(241)}`, resolver),
   );
-  assert.throws(() => compileCompactDelegation("\n".repeat(33), resolver));
+  assert.throws(() =>
+    compileCompactDelegation(
+      Array.from(
+        { length: 33 },
+        (_, index) => `- [ ] s${index}: Step ${index} [profile:scout]`,
+      ).join("\n"),
+      resolver,
+    ),
+  );
+});
+
+test("compact parser counts non-empty lines and keeps physical error lines", () => {
+  const accepted = compileCompactDelegation(
+    `${"\n".repeat(32)}- [ ] work: Do work [profile:scout]${"\n".repeat(32)}`,
+    resolver,
+  );
+  assert.equal(accepted.stepCount, 1);
+  assert.throws(
+    () =>
+      compileCompactDelegation(
+        "\n\n- [ ] good: Good [profile:scout]\n\nnot-a-step",
+        resolver,
+      ),
+    (error: unknown) =>
+      (error as CompactDelegationError).code === "COMPACT_MARKER_INVALID" &&
+      (error as CompactDelegationError).line === 5,
+  );
+});
+
+test("authoritative parent schema equals runtime names and method metadata", () => {
+  const schema = JSON.parse(
+    readFileSync(
+      join(process.cwd(), "schemas/parent-tool-request.schema.json"),
+      "utf8",
+    ),
+  ) as { properties: { tool: { enum: string[] } } };
+  assert.deepEqual(schema.properties.tool.enum, [...PARENT_TOOL_NAMES]);
+  assert.deepEqual(Object.keys(PARENT_TOOL_METADATA), [...PARENT_TOOL_NAMES]);
+  assert.equal(
+    new Set(Object.values(PARENT_TOOL_METADATA).map((item) => item.method))
+      .size,
+    PARENT_TOOL_NAMES.length,
+  );
 });

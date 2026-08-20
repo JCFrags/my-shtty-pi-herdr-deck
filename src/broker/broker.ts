@@ -731,6 +731,51 @@ export class Broker {
             } as unknown as StoredEvent,
             true,
           ).catch(() => undefined);
+      for (const metadata of Object.values(
+        this.store.state.herdrMetadata ?? {},
+      ))
+        if (metadata.state === "cleanup_pending" && this.#herdr) {
+          const task = this.store.state.tasks[metadata.taskId];
+          const workflowDigest = String(
+            (task?.project?.compact as { workflowDigest?: unknown } | undefined)
+              ?.workflowDigest ?? "",
+          );
+          if (!/^[a-f0-9]{64}$/u.test(workflowDigest)) continue;
+          try {
+            await this.#herdr.closeRetainedTab({
+              workspaceId: metadata.workspaceId,
+              tabId: metadata.tabId,
+              paneId: metadata.paneId,
+              terminalId: metadata.terminalId,
+            });
+            const closed = {
+              ...metadata,
+              state: "closed" as const,
+              updatedAt: new Date(this.#now()).toISOString(),
+            };
+            delete (closed as Partial<HerdrTaskMetadata>).metadataDigest;
+            await this.store.append({
+              type: "herdr.metadata_projected",
+              actor: {
+                principalId: "prn_00000000000000000000000000",
+                kind: "system",
+              },
+              entityRefs: {
+                workflowId: metadata.workflowId,
+                taskId: metadata.taskId,
+                runId: metadata.runId,
+                agentId: metadata.agentId,
+                workflowDigest,
+              },
+              payload: {
+                ...closed,
+                metadataDigest: sha256(canonicalJson(closed)),
+              },
+            });
+          } catch {
+            // Keep the durable intent. A later recovery can retry exact proof.
+          }
+        }
       this.#server = createServer((socket) => this.#connect(socket));
       await new Promise<void>((resolve, reject) =>
         this.#server
@@ -1226,6 +1271,8 @@ export class Broker {
     try {
       let result: unknown;
       let compactPreview: unknown;
+      let compactReplayResponse: unknown;
+      let compactIdempotency: { key: string; paramsHash: string } | undefined;
       if (request.method === "compact.delegate") {
         requirePermission(principal, "delegate");
         if (!this.#compactDelegationEnabled)
@@ -1254,14 +1301,33 @@ export class Broker {
             "INVALID_REQUEST",
             "Compact delegation parameters are invalid.",
           );
-        const compiled = compileCompactDelegation(p.text, (profileId) => {
-          try {
-            resolveIsolation(profileId, undefined);
-            return { profileId };
-          } catch {
-            return undefined;
-          }
-        });
+        const compiled = compileCompactDelegation(
+          p.text,
+          (profileId, requestedIsolation) => {
+            try {
+              const isolation = resolveIsolation(profileId, requestedIsolation);
+              const spawnPolicy = resolveSpawnPolicy(
+                { taskProfileId: profileId },
+                this.#modelPolicy,
+              );
+              const effective = spawnPolicy.effective;
+              return {
+                profileId,
+                policy: {
+                  decision: "allow",
+                  placement: effective.placement,
+                  isolation,
+                  modelProfileId: effective.modelProfileId,
+                  providerQualifiedModel: `${effective.model.provider}/${effective.model.modelId}`,
+                  thinkingLevel: effective.model.thinkingLevel,
+                  modelPolicyHash: spawnPolicy.policyHash,
+                },
+              };
+            } catch {
+              return undefined;
+            }
+          },
+        );
         if (p.accept !== true) {
           compactPreview = {
             schemaVersion: compiled.schemaVersion,
@@ -1270,13 +1336,45 @@ export class Broker {
             steps: compiled.steps,
           };
         } else {
+          if (!request.idempotencyKey)
+            throw new OrchestratorError(
+              "INVALID_REQUEST",
+              "Accepted compact delegation requires an idempotency key.",
+            );
           const workflow = acceptedCompactWorkflow(
             compiled,
             typeof p.workflowDigest === "string" ? p.workflowDigest : undefined,
           );
+          const paramsHash = sha256(
+            canonicalJson({
+              method: "compact.delegate",
+              params: p,
+              canonicalWorkflow: workflow,
+            }),
+          );
+          const prior = this.store.state.idempotency[request.idempotencyKey];
+          if (prior) {
+            if (
+              prior.principalId !== principal.id ||
+              prior.method !== "compact.delegate" ||
+              prior.paramsHash !== paramsHash
+            )
+              throw new OrchestratorError(
+                "IDEMPOTENCY_CONFLICT",
+                "Idempotency key is already bound.",
+              );
+            compactReplayResponse = prior.response;
+          } else
+            compactIdempotency = {
+              key: request.idempotencyKey,
+              paramsHash,
+            };
           request = {
             ...request,
-            method: "delegate.execute",
+            method:
+              compactReplayResponse === undefined
+                ? "delegate.execute"
+                : "compact.idempotency_replay",
             params: {
               ...workflow,
               ...(p.parentAgentId !== undefined
@@ -1300,6 +1398,26 @@ export class Broker {
       let shutdownAfterResponse = false;
       if (compactPreview !== undefined) {
         result = compactPreview;
+      } else if (compactReplayResponse !== undefined) {
+        const replayWorkflowId =
+          compactReplayResponse &&
+          typeof compactReplayResponse === "object" &&
+          safeText(
+            (compactReplayResponse as Record<string, unknown>).workflowId,
+          )
+            ? ((compactReplayResponse as Record<string, unknown>)
+                .workflowId as string)
+            : undefined;
+        if (replayWorkflowId && this.store.state.workflows[replayWorkflowId]) {
+          for (const taskId of this.store.state.workflows[replayWorkflowId]!
+            .taskIds)
+            this.#scheduleTaskDeadline(this.store.state.tasks[taskId]!);
+          await this.#advanceWorkflow(replayWorkflowId, {
+            principalId: principal.id,
+            kind: principal.kind,
+          });
+        }
+        result = compactReplayResponse;
       } else if (
         request.method === "system.ping" ||
         request.method === "system.status"
@@ -3878,15 +3996,41 @@ export class Broker {
               "INVALID_REQUEST",
               "The retained transcript is not ready for close.",
             );
+          let closeIntent = metadata;
+          if (metadata.state !== "cleanup_pending") {
+            const pendingAt = new Date(this.#now()).toISOString();
+            const pending = {
+              ...metadata,
+              state: "cleanup_pending" as const,
+              updatedAt: pendingAt,
+            };
+            delete (pending as Partial<HerdrTaskMetadata>).metadataDigest;
+            committedEvent = await this.store.append({
+              type: "herdr.metadata_projected",
+              actor: { principalId: principal.id, kind: principal.kind },
+              entityRefs: {
+                workflowId: metadata.workflowId,
+                taskId: metadata.taskId,
+                runId: metadata.runId,
+                agentId: metadata.agentId,
+                workflowDigest,
+              },
+              payload: {
+                ...pending,
+                metadataDigest: sha256(canonicalJson(pending)),
+              },
+            });
+            closeIntent = this.store.state.herdrMetadata![metadata.metadataId]!;
+          }
           await this.#herdr.closeRetainedTab({
-            workspaceId: metadata.workspaceId,
-            tabId: metadata.tabId,
-            paneId: metadata.paneId,
-            terminalId: metadata.terminalId,
+            workspaceId: closeIntent.workspaceId,
+            tabId: closeIntent.tabId,
+            paneId: closeIntent.paneId,
+            terminalId: closeIntent.terminalId,
           });
           const updatedAt = new Date(this.#now()).toISOString();
           const closed = {
-            ...metadata,
+            ...closeIntent,
             state: "closed" as const,
             updatedAt,
           };
@@ -4119,6 +4263,24 @@ export class Broker {
             },
             this.#modelPolicy,
           );
+          if (compact) {
+            const expectedPolicy = record.compactPolicy;
+            const effective = spawnPolicy.effective;
+            const currentPolicy = {
+              decision: "allow",
+              placement: effective.placement,
+              isolation: resolveIsolation(profileId, requested),
+              modelProfileId: effective.modelProfileId,
+              providerQualifiedModel: `${effective.model.provider}/${effective.model.modelId}`,
+              thinkingLevel: effective.model.thinkingLevel,
+              modelPolicyHash: spawnPolicy.policyHash,
+            };
+            if (canonicalJson(expectedPolicy) !== canonicalJson(currentPolicy))
+              throw new OrchestratorError(
+                "INVALID_REQUEST",
+                "Compact policy changed after preview acceptance.",
+              );
+          }
           return {
             key: safeText(record.key, 64)
               ? (record.key as string)
@@ -4207,6 +4369,64 @@ export class Broker {
               effectiveModel: step.spawnPolicy.effective,
             })),
           };
+        } else if (compact && compactIdempotency) {
+          const frozenResponse = {
+            workflowId,
+            state: "scheduled",
+            tasks: planned.map((step, index) => ({
+              key: step.key,
+              taskId: taskIds[index]!,
+              state: "queued",
+            })),
+          };
+          committedEvent = await this.store.append({
+            type: "compact.delegation_scheduled",
+            actor: { principalId: principal.id, kind: principal.kind },
+            entityRefs: { workflowId },
+            payload: {
+              workflowId,
+              parentAgentId,
+              mode: safeText(p.mode, 32) ? p.mode : "dag",
+              idempotencyKey: compactIdempotency.key,
+              paramsHash: compactIdempotency.paramsHash,
+              response: frozenResponse,
+              tasks: planned.map((step, index) => ({
+                taskId: taskIds[index]!,
+                title: step.title,
+                objective: step.objective,
+                createdAt,
+                parentAgentId,
+                workflowId,
+                profileId: step.profileId,
+                dependencies: step.dependsOn
+                  .map((key) =>
+                    planned.find((candidate) => candidate.key === key),
+                  )
+                  .filter(Boolean)
+                  .map((candidate) => taskIds[planned.indexOf(candidate!)]),
+                project: {
+                  ...inheritedProject,
+                  isolation: step.isolation,
+                  requestedSpawnPolicy: step.spawnPolicy.requested,
+                  effectiveSpawnPolicy: step.spawnPolicy.effective,
+                  modelPolicyHash: step.spawnPolicy.policyHash,
+                  compact: {
+                    workflowDigest: compact.workflowDigest,
+                    transcriptPolicy: "retain-tab",
+                  },
+                },
+                timeoutAt: wallDeadline,
+              })),
+            },
+          });
+          for (const taskId of taskIds)
+            this.#scheduleTaskDeadline(this.store.state.tasks[taskId]!);
+          await this.#advanceWorkflow(workflowId, {
+            principalId: principal.id,
+            kind: principal.kind,
+          });
+          result = frozenResponse;
+          compactIdempotency = undefined;
         } else {
           committedEvent = await this.store.append({
             type: "workflow.created",
@@ -4943,11 +5163,11 @@ export class Broker {
     const resource = run?.agentId
       ? this.store.state.herdrResources?.[run.agentId]
       : undefined;
-    const workspaceId = agent?.workspaceId ?? resource?.workspaceId;
-    const tabId = agent?.tabId ?? resource?.tabId;
-    const paneId = agent?.paneId ?? resource?.paneId;
-    const terminalId = agent?.terminalId ?? resource?.terminalId;
-    const sessionId = agent?.piSessionId ?? resource?.sessionId;
+    const workspaceId = resource?.workspaceId ?? agent?.workspaceId;
+    const tabId = resource?.tabId ?? agent?.tabId;
+    const paneId = resource?.paneId ?? agent?.paneId;
+    const terminalId = resource?.terminalId ?? agent?.terminalId;
+    const sessionId = resource?.sessionId ?? agent?.piSessionId;
     if (
       !run ||
       !agent ||
@@ -5051,7 +5271,11 @@ export class Broker {
       canonicalJson({ ...item, updatedAt: "" });
     if (!current || semantic(value) !== semantic(current) || forcePublication) {
       const projectedEvent = await appendProjection(value);
-      if (!value.exitedAt && this.#herdr)
+      if (
+        !value.exitedAt &&
+        this.#herdr &&
+        !(terminal && current?.state === "settled" && !current.exitedAt)
+      )
         try {
           await this.#herdr.reportTaskMetadata(
             { workspaceId, tabId, paneId, terminalId, sessionId },

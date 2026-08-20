@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { canonicalJson, sha256 } from "../../src/shared/canonical-json.js";
 import { emptyState, reduce } from "../../src/state/reducer.js";
+import { EventStore } from "../../src/state/event-store.js";
 import { HerdrService } from "../../src/herdr/service.js";
 import type { HerdrSnapshot } from "../../src/herdr/types.js";
 
@@ -22,7 +26,7 @@ const base = {
   tabId: "w1:t1",
   paneId: "w1:p1",
   terminalId: "term_example",
-  piSessionRef: "pis_example",
+  piSessionRef: `pis_${sha256("session_example").slice(0, 26)}`,
   startedAt: "2026-08-19T00:00:00.000Z",
   updatedAt: "2026-08-19T00:00:01.000Z",
   settledAt: null,
@@ -36,21 +40,81 @@ const payload = (overrides: Record<string, unknown> = {}) => {
   const value = { ...base, ...overrides };
   return { ...value, metadataDigest: sha256(canonicalJson(value)) };
 };
-const event = (value: Record<string, unknown>) => ({
+const event = (
+  value: Record<string, unknown>,
+  refOverrides: Record<string, string> = {},
+) => ({
   type: "herdr.metadata_projected",
-  actor: { principalId: "system", kind: "system" },
+  actor: {
+    principalId: "prn_00000000000000000000000000",
+    kind: "system",
+  },
   entityRefs: {
     workflowId: "wfl_example",
     taskId: "tsk_example",
     runId: "run_example",
     agentId: "agt_example",
     workflowDigest: "a".repeat(64),
+    ...refOverrides,
   },
   payload: value,
 });
 
+function correlatedState() {
+  const state = emptyState();
+  state.workflows.wfl_example = {
+    id: "wfl_example",
+    state: "running",
+    taskIds: ["tsk_example"],
+  };
+  state.tasks.tsk_example = {
+    id: "tsk_example",
+    title: "Example",
+    objective: "Example",
+    state: "running",
+    createdAt: base.startedAt,
+    parentAgentId: "agt_parent",
+    workflowId: "wfl_example",
+    profileId: "implementer",
+    currentRunId: "run_example",
+    assignedAgentId: "agt_example",
+    project: {
+      compact: {
+        workflowDigest: "a".repeat(64),
+        transcriptPolicy: "retain-tab",
+      },
+    },
+  };
+  state.runs.run_example = {
+    id: "run_example",
+    taskId: "tsk_example",
+    state: "working",
+    agentId: "agt_example",
+    assignmentGeneration: 1,
+    settled: false,
+  };
+  state.agents.agt_example = {
+    id: "agt_example",
+    state: "working",
+    generation: 1,
+    currentRunId: "run_example",
+  };
+  state.herdrResources = {
+    agt_example: {
+      agentId: "agt_example",
+      state: "registered",
+      workspaceId: "w1",
+      tabId: "w1:t1",
+      paneId: "w1:p1",
+      terminalId: "term_example",
+      sessionId: "session_example",
+    },
+  };
+  return state;
+}
+
 test("Herdr metadata projection replays safe exact correlation", () => {
-  const state = reduce(emptyState(), event(payload()));
+  const state = reduce(correlatedState(), event(payload()));
   assert.equal(state.herdrMetadata?.hmd_example?.paneId, "w1:p1");
   assert.equal(
     state.herdrMetadata?.hmd_example?.transcriptPolicy,
@@ -62,13 +126,86 @@ test("Herdr metadata rejects forbidden fields, changed identity, and terminal re
   assert.throws(() =>
     reduce(emptyState(), event(payload({ prompt: "secret" }))),
   );
-  const terminal = reduce(emptyState(), event(payload({ state: "completed" })));
+  const terminal = reduce(
+    correlatedState(),
+    event(payload({ state: "completed" })),
+  );
   assert.throws(() => reduce(terminal, event(payload({ state: "working" }))));
   assert.throws(() =>
     reduce(
-      reduce(emptyState(), event(payload())),
+      reduce(correlatedState(), event(payload())),
       event(payload({ runId: "run_other" })),
     ),
+  );
+});
+
+test("EventStore rejects orphan metadata before append", async () => {
+  const root = await mkdtemp(join(tmpdir(), "herdr-metadata-append-"));
+  const path = join(root, "events.jsonl");
+  try {
+    const store = new EventStore(path);
+    await store.open();
+    const workflowId = `wfl_${"0".repeat(26)}`;
+    const taskId = `tsk_${"1".repeat(26)}`;
+    const runId = `run_${"2".repeat(26)}`;
+    const agentId = `agt_${"3".repeat(26)}`;
+    const orphanPayload = payload({ workflowId, taskId, runId, agentId });
+    await assert.rejects(
+      store.append(
+        event(orphanPayload, { workflowId, taskId, runId, agentId }),
+      ),
+      /correlation/u,
+    );
+    assert.equal(await readFile(path, "utf8"), "");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Herdr metadata rejects valid-hash missing and cross-linked correlations", () => {
+  assert.throws(() => reduce(emptyState(), event(payload())), /correlation/u);
+
+  const wrongWorkflow = correlatedState();
+  wrongWorkflow.workflows.wfl_example!.taskIds = ["tsk_other"];
+  assert.throws(() => reduce(wrongWorkflow, event(payload())), /correlation/u);
+
+  const wrongResource = correlatedState();
+  wrongResource.herdrResources!.agt_example!.terminalId = "term_replaced";
+  assert.throws(() => reduce(wrongResource, event(payload())), /correlation/u);
+
+  assert.throws(() =>
+    reduce(
+      correlatedState(),
+      event(payload(), { workflowDigest: "b".repeat(64) }),
+    ),
+  );
+
+  const resultState = correlatedState();
+  resultState.results = {
+    res_example: {
+      id: "res_example",
+      taskId: "tsk_example",
+      runId: "run_example",
+      agentId: "agt_example",
+      status: "succeeded",
+      payloadHash: "c".repeat(64),
+      piSettled: true,
+    },
+  };
+  assert.doesNotThrow(() =>
+    reduce(resultState, event(payload({ resultRef: "res_example" }))),
+  );
+  const wrongResult = correlatedState();
+  wrongResult.results = {
+    res_example: { ...resultState.results!.res_example!, agentId: "agt_other" },
+  };
+  assert.throws(() =>
+    reduce(wrongResult, event(payload({ resultRef: "res_example" }))),
+  );
+
+  const duplicated = reduce(correlatedState(), event(payload()));
+  assert.throws(() =>
+    reduce(duplicated, event(payload({ metadataId: "hmd_duplicate" }))),
   );
 });
 
@@ -155,6 +292,46 @@ test("retained lifecycle publishes, exits Pi, and closes only the proven vacant 
     calls: closeCalls,
   }).closeRetainedTab(guard);
   assert.deepEqual(closeCalls, ["close:w1:t1"]);
+});
+
+test("retained exit and close accept only proven crash-window completion", async () => {
+  const exitCalls: string[] = [];
+  await retainedService({
+    snapshots: [retainedSnapshot(false)],
+    calls: exitCalls,
+  }).exitRetainingTab(guard);
+  assert.deepEqual(exitCalls, []);
+
+  const absent: HerdrSnapshot = {
+    workspaces: [{ id: "w1", tabs: [] }],
+    tabs: [],
+    panes: [],
+    agents: [],
+    worktrees: [],
+  };
+  const closeCalls: string[] = [];
+  await retainedService({
+    snapshots: [absent],
+    calls: closeCalls,
+  }).closeRetainedTab(guard);
+  assert.deepEqual(closeCalls, []);
+
+  const replacement = structuredClone(absent);
+  replacement.panes.push({
+    id: "w9:p9",
+    terminalId: "term_example",
+    workspaceId: "w1",
+    tabId: "w1:t9",
+  });
+  const replacementCalls: string[] = [];
+  await assert.rejects(
+    retainedService({
+      snapshots: [replacement],
+      calls: replacementCalls,
+    }).closeRetainedTab(guard),
+    /HERDR_IDENTITY_MISMATCH/u,
+  );
+  assert.deepEqual(replacementCalls, []);
 });
 
 test("retained close rejects changed identity before mutation", async () => {

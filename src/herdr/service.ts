@@ -92,6 +92,27 @@ function exactRetainedPane(
   )
     throw new Error("HERDR_IDENTITY_MISMATCH");
 }
+function exactRetainedTabAbsent(
+  snapshot: HerdrSnapshot,
+  guard: RetainedTabGuard,
+): boolean {
+  const exactWorkspace = snapshot.workspaces.filter(
+    (item) => item.id === guard.workspaceId,
+  );
+  const conflictingResource =
+    snapshot.tabs.some((item) => item.id === guard.tabId) ||
+    snapshot.panes.some(
+      (item) =>
+        item.id === guard.paneId || item.terminalId === guard.terminalId,
+    ) ||
+    snapshot.agents.some(
+      (item) =>
+        item.paneId === guard.paneId || item.terminalId === guard.terminalId,
+    );
+  if (exactWorkspace.length > 1 || conflictingResource)
+    throw new Error("HERDR_IDENTITY_MISMATCH");
+  return true;
+}
 function exactPiPane(
   snapshot: HerdrSnapshot,
   paneId: string,
@@ -697,6 +718,17 @@ export class HerdrService {
         "session.snapshot",
       ]);
       const before = await this.#cli.snapshot();
+      const occupants = before.agents.filter(
+        (item) =>
+          item.paneId === guard.paneId || item.terminalId === guard.terminalId,
+      );
+      if (occupants.length === 0) {
+        exactRetainedPane(before, guard, true);
+        if (!agentId.startsWith("pane:"))
+          await this.recordLifecycle(agentId, "stopped", "retained_tab_exit");
+        return;
+      }
+      exactRetainedPane(before, guard, false);
       exactPiPane(
         before,
         guard.paneId,
@@ -737,7 +769,12 @@ export class HerdrService {
     await this.withAgentLock(agentId, async () => {
       await this.#preflight?.();
       this.#cli.requireMutationCapabilities(["tab.close", "session.snapshot"]);
-      exactRetainedPane(await this.#cli.snapshot(), guard, true);
+      const before = await this.#cli.snapshot();
+      if (!before.tabs.some((item) => item.id === guard.tabId)) {
+        exactRetainedTabAbsent(before, guard);
+        return;
+      }
+      exactRetainedPane(before, guard, true);
       await this.#cli.closeTab(guard.tabId);
       const after = await this.#cli.snapshot();
       if (
