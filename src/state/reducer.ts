@@ -636,9 +636,9 @@ export function reduce(
           "run.pi_started",
           "run.pi_settled",
         ].includes(event.type) &&
-        (run.settled ||
-          run.state === "settled" ||
-          runSharedTerminal.has(run.state))
+        (runSharedTerminal.has(run.state) ||
+          (event.type !== "run.pi_started" &&
+            (run.settled || run.state === "settled")))
       )
         throw new OrchestratorError(
           "STATE_CORRUPT",
@@ -661,7 +661,12 @@ export function reduce(
           "STATE_CORRUPT",
           "Invalid terminal reason.",
         );
-      const settled = event.type === "run.pi_settled" ? true : run.settled;
+      const settled =
+        event.type === "run.pi_settled"
+          ? true
+          : event.type === "run.pi_started"
+            ? false
+            : run.settled;
       const reason =
         state === "timed_out" && timeoutReason(p.reason) ? p.reason : undefined;
       next.runs = {

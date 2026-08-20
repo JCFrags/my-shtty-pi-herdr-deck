@@ -44,7 +44,7 @@ export class LifecycleCorrelator {
       assignment.piSessionId !== safe.sessionId
     )
       throw new Error("PI_IDENTITY_MISMATCH");
-    if (!safe.idle || safe.pendingMessages > 0 || this.#state.kind !== "none") {
+    if (!safe.idle || safe.pendingMessages > 0) {
       if (
         this.#state.kind !== "none" &&
         this.#state.assignment.id === assignment.id
@@ -52,6 +52,16 @@ export class LifecycleCorrelator {
         return "already_accepted";
       throw new Error("AGENT_NOT_IDLE");
     }
+    if (this.#state.kind !== "none" && this.#state.kind !== "settled") {
+      if (this.#state.assignment.id === assignment.id)
+        return "already_accepted";
+      throw new Error("AGENT_NOT_IDLE");
+    }
+    if (
+      this.#state.kind === "settled" &&
+      this.#state.assignment.id === assignment.id
+    )
+      return "already_accepted";
     this.#state = { kind: "pending", assignment, customEntryWritten: false };
     return "accepted";
   }

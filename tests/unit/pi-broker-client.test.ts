@@ -351,6 +351,8 @@ test("PiAdapter rebinds a settled assignment for a parent prompt and restores it
   pi = new PiAdapter(api, context, state.agentId, state.generation);
   pi.bindIdentity(state.agentId, state.generation, 4);
   pi.restorePersisted("settled", assignment, "prior-cycle", 0);
+  pi.clearSettledCycle();
+  assert.equal(pi.correlationState().kind, "settled");
   assert.equal(pi.assignmentForTools(), undefined);
   assert.deepEqual(
     await pi.handleControl("control.prompt", {

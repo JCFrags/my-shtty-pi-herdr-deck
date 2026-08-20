@@ -270,10 +270,8 @@ export class PiAdapter implements PiControl {
     };
   }
   clearSettledCycle(): void {
-    if (this.correlator.state.kind === "settled") {
-      this.correlator.cancel();
+    if (this.correlator.state.kind === "settled")
       this.#activeCycleId = undefined;
-    }
   }
   assignmentForTools(): PiAssignment | undefined {
     return this.correlator.activeAssignment();
