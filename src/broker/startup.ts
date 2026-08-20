@@ -396,7 +396,7 @@ async function packageCommand(): Promise<{
   return { path, dev: stat.dev, ino: stat.ino };
 }
 
-function minimalBrokerEnvironment(
+export function minimalBrokerEnvironment(
   identity: HerdrSocketIdentity,
   herdrBinary: string,
 ): NodeJS.ProcessEnv {
@@ -428,6 +428,8 @@ function minimalBrokerEnvironment(
     env.PI_HERDR_ORCH_RUNTIME_ROOT = process.env.PI_HERDR_ORCH_RUNTIME_ROOT;
   if (process.env.PI_HERDR_ORCH_STATE_ROOT)
     env.PI_HERDR_ORCH_STATE_ROOT = process.env.PI_HERDR_ORCH_STATE_ROOT;
+  if (process.env.PI_HERDR_COMPACT_DELEGATION === "0")
+    env.PI_HERDR_COMPACT_DELEGATION = "0";
   return env;
 }
 
