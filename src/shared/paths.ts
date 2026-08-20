@@ -17,6 +17,7 @@ export interface ResolvedPaths {
   runtime: string;
   events: string;
   snapshot: string;
+  snapshotAuthentication?: string;
   lock: string;
   startup?: string;
   pid?: string;
@@ -135,6 +136,7 @@ export function resolvePaths(
     runtime,
     events: join(root, "events-v1.jsonl"),
     snapshot: join(root, "snapshot-v1.json"),
+    snapshotAuthentication: join(root, "snapshot-authentication.key"),
     lock: join(runtime, "broker.lock"),
     startup: join(runtime, "startup.lock"),
     pid: join(runtime, "broker.pid"),

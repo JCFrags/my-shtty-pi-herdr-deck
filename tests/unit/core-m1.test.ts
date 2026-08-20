@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
 import { EventStore } from "../../src/state/event-store.js";
+import { SnapshotStore } from "../../src/state/snapshot-store.js";
 import { createId } from "../../src/shared/ids.js";
 import { Broker, safeStaleSocket } from "../../src/broker/broker.js";
 import { authenticate } from "../../src/broker/authentication.js";
@@ -120,6 +121,79 @@ class TestClient {
     this.socket.destroy();
   }
 }
+
+test("broker preserves a legacy snapshot when its persistent key is absent", async () => {
+  const root = await mkdtemp(join(tmpdir(), "orch-snapshot-legacy-"));
+  const p = paths(root);
+  const legacySecret = "a".repeat(43);
+  await writeFile(p.secret, `${legacySecret}\n`, { mode: 0o600 });
+  const state = new EventStore(p.events);
+  await state.open();
+  await state.append({
+    type: "audit.action",
+    actor: {
+      principalId: "prn_00000000000000000000000000",
+      kind: "system",
+    },
+    payload: { action: "legacy_snapshot" },
+  });
+  const snapshot = new SnapshotStore(p.snapshot);
+  await snapshot.write(state.state, legacySecret);
+  const before = await readFile(p.snapshot);
+
+  const broker = new Broker(p);
+  await broker.start();
+  assert.equal(broker.store.readOnly, true);
+  assert.match(
+    broker.store.corruption ?? "",
+    /Snapshot authentication key is missing/u,
+  );
+  await broker.stop();
+  assert.deepEqual(await readFile(p.snapshot), before);
+  await assert.rejects(lstat(join(root, "snapshot-authentication.key")), {
+    code: "ENOENT",
+  });
+});
+
+test("broker snapshot authentication survives runtime-secret rotation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "orch-snapshot-restart-"));
+  const runtime = join(root, "runtime");
+  const p = {
+    root,
+    runtime,
+    events: join(root, "events.jsonl"),
+    snapshot: join(root, "snapshot.json"),
+    lock: join(runtime, "broker.lock"),
+    socket: join(runtime, "broker.sock"),
+    secret: join(runtime, "client.secret"),
+  };
+  const first = new Broker(p);
+  await first.start();
+  await first.store.append({
+    type: "audit.action",
+    actor: {
+      principalId: "prn_00000000000000000000000000",
+      kind: "system",
+    },
+    payload: { action: "before_runtime_restart" },
+  });
+  const expectedSeq = first.store.state.lastEventSeq;
+  const firstClientSecret = await readFile(p.secret, "utf8");
+  await first.stop();
+  const snapshotAuthentication = join(root, "snapshot-authentication.key");
+  const retainedKey = await readFile(snapshotAuthentication, "utf8");
+  assert.equal((await lstat(snapshotAuthentication)).mode & 0o777, 0o600);
+  await rename(runtime, join(root, "runtime-before-restart"));
+
+  const second = new Broker(p);
+  await second.start();
+  assert.equal(second.store.readOnly, false);
+  assert.equal(second.store.corruption, undefined);
+  assert.equal(second.store.state.lastEventSeq, expectedSeq);
+  assert.notEqual(await readFile(p.secret, "utf8"), firstClientSecret);
+  assert.equal(await readFile(snapshotAuthentication, "utf8"), retainedKey);
+  await second.stop();
+});
 
 test("broker refuses to delete a regular socket path", async () => {
   const root = await mkdtemp(join(tmpdir(), "orch-safe-"));
