@@ -68,6 +68,8 @@ async function productionParent(
     resourceMode?: "missing" | "wrong-owner" | "stale";
     holdProvisions?: boolean;
     holdReuseProvisions?: boolean;
+    compactLifecycle?: boolean;
+    compactEnabled?: boolean;
     realReconcileWorktree?:
       | "exact"
       | "missing"
@@ -90,6 +92,9 @@ async function productionParent(
     secret: join(runtime, "secret"),
   };
   const provisions: Array<Record<string, unknown>> = [];
+  const metadataReports: unknown[] = [];
+  const retainedExits: unknown[] = [];
+  const retainedCloses: unknown[] = [];
   const children = new Map<string, PiBrokerClient>();
   type HeldProvision = {
     input: Record<string, unknown>;
@@ -229,6 +234,13 @@ async function productionParent(
           tokenDigest: digest(`${agentId}-token`),
           sessionId: `session-${agentId}`,
           paneId: `pane-${agentId}`,
+          ...(options.compactLifecycle
+            ? {
+                workspaceId: `workspace-${agentId}`,
+                tabId: `tab-${agentId}`,
+                terminalId: `terminal-${agentId}`,
+              }
+            : {}),
           ...((input.isolation === "worktree" ||
             typeof input.reuseWorktreeId === "string") &&
           options.resourceMode !== "missing"
@@ -244,6 +256,13 @@ async function productionParent(
       return {
         name: `child-${agentId}`,
         paneId: `pane-${agentId}`,
+        ...(options.compactLifecycle
+          ? {
+              workspaceId: `workspace-${agentId}`,
+              tabId: `tab-${agentId}`,
+              terminalId: `terminal-${agentId}`,
+            }
+          : {}),
         ...((input.isolation === "worktree" ||
           typeof input.reuseWorktreeId === "string") &&
         options.resourceMode !== "missing"
@@ -302,6 +321,15 @@ async function productionParent(
         cwd: resource?.worktreePath ?? root,
       };
     },
+    async reportTaskMetadata(_guard: unknown, metadata: unknown) {
+      metadataReports.push(metadata);
+    },
+    async exitRetainingTab(guard: unknown) {
+      retainedExits.push(guard);
+    },
+    async closeRetainedTab(guard: unknown) {
+      retainedCloses.push(guard);
+    },
     async recordRegistrationMismatch(agentId: string) {
       const resource = store.state.herdrResources?.[agentId];
       await store.append({
@@ -321,6 +349,9 @@ async function productionParent(
   });
   broker = new Broker(paths, {
     herdrFactory: async (store) => herdr(store, ++herdrFactoryCalls) as never,
+    ...(options.compactEnabled !== undefined
+      ? { compactDelegationEnabled: options.compactEnabled }
+      : {}),
   });
   await broker.start();
   const secret = (await readFile(paths.secret, "utf8")).trim();
@@ -362,6 +393,9 @@ async function productionParent(
     await broker.stop();
     broker = new Broker(paths, {
       herdrFactory: async (store) => herdr(store, ++herdrFactoryCalls) as never,
+      ...(options.compactEnabled !== undefined
+        ? { compactDelegationEnabled: options.compactEnabled }
+        : {}),
     });
     await broker.start();
     const nextSecret = (await readFile(paths.secret, "utf8")).trim();
@@ -392,6 +426,9 @@ async function productionParent(
     nextProvision,
     paths,
     provisions,
+    metadataReports,
+    retainedExits,
+    retainedCloses,
     children,
     registered,
     cleanup: async () => {
@@ -613,6 +650,147 @@ test("production agent.spawn preserves explicit worktree through exact receipts"
     );
   } finally {
     for (const receipt of owned) receipt.remove();
+    await h.cleanup();
+  }
+});
+
+test("compact rollback switch rejects new work without task or resource creation", async () => {
+  const h = await productionParent({ compactEnabled: false });
+  try {
+    const tasks = Object.keys(h.broker.store.state.tasks).length;
+    await assert.rejects(
+      h.client.request("compact.delegate", {
+        text: "- [ ] blocked: Must not schedule",
+      }),
+      (error: unknown) =>
+        (error as { code?: string }).code === "PERMISSION_DENIED",
+    );
+    assert.equal(Object.keys(h.broker.store.state.tasks).length, tasks);
+    assert.equal(h.provisions.length, 0);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("compact broker preview is mutation-free and acceptance uses the existing delegation path", async () => {
+  const h = await productionParent({ holdProvisions: true });
+  try {
+    const before = h.broker.store.state.lastEventSeq;
+    const text = [
+      "- [ ] implement: Implement safely [profile:implementer] [mode:write]",
+      "- [ ] review: Review independently [profile:reviewer] [mode:read]",
+    ].join("\n");
+    const preview = (await h.client.request("compact.delegate", {
+      text,
+      accept: false,
+    })) as {
+      workflowDigest: string;
+      stepCount: number;
+      steps: Array<{ isolation: string }>;
+    };
+    assert.equal(preview.stepCount, 2);
+    assert.deepEqual(
+      preview.steps.map((step) => step.isolation),
+      ["worktree", "shared-readonly"],
+    );
+    assert.equal(h.broker.store.state.lastEventSeq, before);
+
+    const accepted = h.client.request("compact.delegate", {
+      text,
+      accept: true,
+      workflowDigest: preview.workflowDigest,
+      parentAgentId: h.registered.agentId,
+    }) as Promise<{ tasks: Array<{ taskId: string }> }>;
+    for (const [profileId, isolation] of [
+      ["implementer", "worktree"],
+      ["reviewer", "shared-readonly"],
+    ] as const) {
+      const entered = await h.nextProvision();
+      assert.equal(entered.input.profileId, profileId);
+      assert.equal(entered.input.isolation, isolation);
+      entered.release();
+    }
+    const response = await accepted;
+    assert.equal(response.tasks.length, 2);
+    for (const task of response.tasks) {
+      const compact = h.broker.store.state.tasks[task.taskId]?.project
+        ?.compact as Record<string, unknown> | undefined;
+      assert.equal(compact?.workflowDigest, preview.workflowDigest);
+      assert.equal(compact?.transcriptPolicy, "retain-tab");
+    }
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("compact lifecycle persists safe final metadata and closes the retained tab idempotently", async () => {
+  const h = await productionParent({
+    holdProvisions: true,
+    compactLifecycle: true,
+  });
+  let finalReceipt: ReturnType<typeof boundedReceipt> | undefined;
+  try {
+    const text =
+      "- [ ] finish: Finish the bounded canary [profile:implementer] [mode:write]";
+    const preview = (await h.client.request("compact.delegate", {
+      text,
+    })) as { workflowDigest: string };
+    const accepted = h.client.request("compact.delegate", {
+      text,
+      accept: true,
+      workflowDigest: preview.workflowDigest,
+      parentAgentId: h.registered.agentId,
+    }) as Promise<{
+      tasks: Array<{ taskId: string; runId: string; agentId: string }>;
+    }>;
+    const entered = await h.nextProvision();
+    entered.release();
+    const response = await accepted;
+    const task = response.tasks[0]!;
+    await connectManagedChild(h, task.agentId);
+    finalReceipt = boundedReceipt(h.broker.store, (event) => {
+      const candidate = event as {
+        type?: string;
+        entityRefs?: Record<string, unknown>;
+        payload?: Record<string, unknown>;
+      };
+      return (
+        candidate.type === "herdr.metadata_projected" &&
+        candidate.entityRefs?.taskId === task.taskId &&
+        candidate.payload?.state === "completed" &&
+        typeof candidate.payload?.exitedAt === "string" &&
+        typeof candidate.payload?.transcriptRef === "string"
+      );
+    });
+    await completeManagedChild(h, task.agentId);
+    await finalReceipt.promise;
+
+    const metadata = (await h.client.request("metadata.get", {
+      taskId: task.taskId,
+    })) as Record<string, unknown>;
+    assert.equal(metadata.state, "completed");
+    assert.equal(metadata.resultRef !== null, true);
+    assert.match(String(metadata.transcriptRef), /^trn_[a-f0-9]{26}$/u);
+    assert.match(String(metadata.piSessionRef), /^pis_[a-f0-9]{26}$/u);
+    const serialized = JSON.stringify(metadata);
+    assert.equal(serialized.includes(text), false);
+    assert.equal(serialized.includes(`session-${task.agentId}`), false);
+    assert.equal(h.retainedExits.length, 1);
+    assert.ok(h.metadataReports.length >= 1);
+
+    const close = await h.client.request("transcript.close", {
+      taskId: task.taskId,
+      confirm: true,
+    });
+    assert.equal((close as { state: string }).state, "closed");
+    const repeated = await h.client.request("transcript.close", {
+      taskId: task.taskId,
+      confirm: true,
+    });
+    assert.deepEqual(repeated, close);
+    assert.equal(h.retainedCloses.length, 1);
+  } finally {
+    finalReceipt?.remove();
     await h.cleanup();
   }
 });

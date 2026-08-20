@@ -67,12 +67,15 @@ test("compact parser rejects cycles, duplicate IDs, unknown tags, and shell cont
   }
 });
 
-test("compact parent tool previews without broker mutation and schedules through delegate.execute", async () => {
+test("compact parent tool routes preview and acceptance to the one broker method", async () => {
   const calls: { method: string; params: Record<string, unknown> }[] = [];
+  const digest = "a".repeat(64);
   const service = new ParentToolService({
     invoke: async (method, params) => {
       calls.push({ method, params });
-      return { scheduled: true };
+      return params.accept === true
+        ? { scheduled: true }
+        : { schemaVersion: 1, workflowDigest: digest, stepCount: 1, steps: [] };
     },
   });
   const principal = {
@@ -87,8 +90,8 @@ test("compact parent tool previews without broker mutation and schedules through
     principal,
   );
   assert.equal(preview.ok, true);
-  assert.equal(calls.length, 0);
-  const digest = (preview.result as { workflowDigest: string }).workflowDigest;
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.method, "compact.delegate");
   const scheduled = await service.execute(
     {
       tool: "delegate_compact",
@@ -97,9 +100,9 @@ test("compact parent tool previews without broker mutation and schedules through
     principal,
   );
   assert.equal(scheduled.ok, true);
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0]?.method, "delegate.execute");
-  assert.equal((calls[0]?.params.steps as unknown[]).length, 1);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1]?.method, "compact.delegate");
+  assert.equal(calls[1]?.params.workflowDigest, digest);
 });
 
 test("compact parser enforces UTF-8, profile, and bounded input", () => {

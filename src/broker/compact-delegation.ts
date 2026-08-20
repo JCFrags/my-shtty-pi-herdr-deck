@@ -34,6 +34,7 @@ export interface CompactCanonicalWorkflow {
     readonly objective: string;
     readonly constraints: readonly string[];
     readonly dependsOn: readonly string[];
+    readonly isolation: "shared-readonly" | "worktree";
   }[];
 }
 export interface CompactCompileResult {
@@ -227,6 +228,7 @@ export function compileCompactDelegation(
       objective: step.title,
       constraints: [],
       dependsOn: [...step.after].sort(),
+      isolation: step.mode === "read" ? "shared-readonly" : "worktree",
     })),
   };
   const workflowDigest = sha256(canonicalJson(workflow));

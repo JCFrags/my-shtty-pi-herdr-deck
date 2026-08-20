@@ -53,6 +53,12 @@ The broker resolves task-profile compatibility and the model allowlist first. Th
 
 Broker configuration can override the `manager` and `subagent` selections, the allowlist, and task-profile compatibility through `modelPolicy`. The broker reads `~/.config/pi-herdr-orchestrator/config.json` by default. Set `PI_HERDR_ORCH_CONFIG_PATH` to use a different owner-controlled file. The effective selection must be in the allowlist. The `max` thinking level is not permitted.
 
+## Compact delegation rollback switch
+
+The `delegate_compact` parent tool previews compact todo text without mutation. Scheduling requires `accept: true` and the exact preview digest. Accepted work uses the existing broker workflow, task, result, question, model, authority, and cleanup paths.
+
+Set `PI_HERDR_COMPACT_DELEGATION=0` in the trusted broker startup environment to reject new compact compilation and scheduling. This switch does not delete or close existing tasks, metadata, tabs, worktrees, results, questions, or transcript references. Keep the current compatible broker available to collect or close existing compact work through exact identity checks.
+
 ## Link the Herdr plugin and run startup
 
 Confirm that Herdr is version 0.8.0 or newer. Then link the reviewed package root:

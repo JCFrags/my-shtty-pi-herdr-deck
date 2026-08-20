@@ -53,7 +53,12 @@ import {
   payloadHash,
 } from "../results/validation.js";
 import type { ResultBody, QuestionBody } from "../results/types.js";
-import type { QuestionRecord } from "../state/types.js";
+import type {
+  HerdrTaskMetadata,
+  HerdrMetadataState,
+  QuestionRecord,
+  StoredEvent,
+} from "../state/types.js";
 import { DeterministicScheduler } from "../scheduler/scheduler.js";
 import { planAdmission } from "../scheduler/admission.js";
 import {
@@ -70,6 +75,10 @@ import {
   resolveIsolation,
   resolveWorkflowIsolation,
 } from "./isolation-policy.js";
+import {
+  acceptedCompactWorkflow,
+  compileCompactDelegation,
+} from "./compact-delegation.js";
 import {
   modelSelectionMatches,
   resolveSpawnPolicy,
@@ -501,6 +510,7 @@ export interface BrokerOptions {
     paths: CanonicalResolvedPaths,
   ) => Promise<HerdrService>;
   modelPolicy?: ModelPolicyConfig;
+  compactDelegationEnabled?: boolean;
 }
 export class Broker {
   readonly store: EventStore;
@@ -529,6 +539,7 @@ export class Broker {
   #clearTimeout: (timer: NodeJS.Timeout) => void;
   #herdr?: HerdrService;
   readonly #modelPolicy: ModelPolicyConfig;
+  readonly #compactDelegationEnabled: boolean;
   readonly #herdrFactory:
     | ((
         store: EventStore,
@@ -552,6 +563,9 @@ export class Broker {
       ((callback, delayMs) => setTimeout(callback, delayMs));
     this.#clearTimeout = options.clearTimeout ?? clearTimeout;
     this.#modelPolicy = options.modelPolicy ?? {};
+    this.#compactDelegationEnabled =
+      options.compactDelegationEnabled ??
+      process.env.PI_HERDR_COMPACT_DELEGATION !== "0";
     this.store = new EventStore(this.paths.events);
     this.store.onAppend((event) => {
       if (
@@ -600,6 +614,10 @@ export class Broker {
           } else if (subscriber.subscribed) this.#sendEvent(subscriber, event);
         }
       }
+      if (event.type !== "herdr.metadata_projected")
+        this.#trackDeferred(() =>
+          this.#enqueueMutation(() => this.#projectCompactMetadata(event)),
+        );
     });
     this.snapshotStore = new SnapshotStore(this.paths.snapshot);
     if (options.herdr) {
@@ -703,6 +721,16 @@ export class Broker {
             principalId: "prn_00000000000000000000000000",
             kind: "system",
           });
+      for (const metadata of Object.values(
+        this.store.state.herdrMetadata ?? {},
+      ))
+        if (metadata.state === "settled" && !metadata.exitedAt)
+          await this.#projectCompactMetadata(
+            {
+              entityRefs: { taskId: metadata.taskId },
+            } as unknown as StoredEvent,
+            true,
+          ).catch(() => undefined);
       this.#server = createServer((socket) => this.#connect(socket));
       await new Promise<void>((resolve, reject) =>
         this.#server
@@ -1194,14 +1222,85 @@ export class Broker {
   }
   async #requestUnlocked(client: Client, request: RequestFrame): Promise<void> {
     const principal = client.principal!;
+    const responseMethod = request.method;
     try {
       let result: unknown;
+      let compactPreview: unknown;
+      if (request.method === "compact.delegate") {
+        requirePermission(principal, "delegate");
+        if (!this.#compactDelegationEnabled)
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "Compact delegation is disabled.",
+          );
+        const p = request.params;
+        const allowed = [
+          "text",
+          "accept",
+          "workflowDigest",
+          "parentAgentId",
+          "wait",
+          "waitUntil",
+          "timeoutMs",
+          "failureMode",
+        ];
+        if (
+          !exactKeys(p, allowed) ||
+          typeof p.text !== "string" ||
+          (p.accept !== undefined && typeof p.accept !== "boolean") ||
+          (p.workflowDigest !== undefined && !safeText(p.workflowDigest, 128))
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Compact delegation parameters are invalid.",
+          );
+        const compiled = compileCompactDelegation(p.text, (profileId) => {
+          try {
+            resolveIsolation(profileId, undefined);
+            return { profileId };
+          } catch {
+            return undefined;
+          }
+        });
+        if (p.accept !== true) {
+          compactPreview = {
+            schemaVersion: compiled.schemaVersion,
+            workflowDigest: compiled.workflowDigest,
+            stepCount: compiled.stepCount,
+            steps: compiled.steps,
+          };
+        } else {
+          const workflow = acceptedCompactWorkflow(
+            compiled,
+            typeof p.workflowDigest === "string" ? p.workflowDigest : undefined,
+          );
+          request = {
+            ...request,
+            method: "delegate.execute",
+            params: {
+              ...workflow,
+              ...(p.parentAgentId !== undefined
+                ? { parentAgentId: p.parentAgentId }
+                : {}),
+              ...(p.wait !== undefined ? { wait: p.wait } : {}),
+              ...(p.waitUntil !== undefined ? { waitUntil: p.waitUntil } : {}),
+              ...(p.timeoutMs !== undefined ? { timeoutMs: p.timeoutMs } : {}),
+              compact: {
+                workflowDigest: compiled.workflowDigest,
+                transcriptPolicy: "retain-tab",
+              },
+            },
+          };
+        }
+      }
       let replayEvents: import("../state/types.js").StoredEvent[] = [];
       let committedEvent: import("../state/types.js").StoredEvent | undefined;
       let responseBoundary: (() => Promise<void>) | undefined;
       const deferred: Array<() => Promise<void>> = [];
       let shutdownAfterResponse = false;
-      if (
+      if (compactPreview !== undefined) {
+        result = compactPreview;
+      } else if (
         request.method === "system.ping" ||
         request.method === "system.status"
       ) {
@@ -3717,6 +3816,104 @@ export class Broker {
           );
         result = collection;
       } else if (
+        request.method === "metadata.get" ||
+        request.method === "transcript.close"
+      ) {
+        requirePermission(principal, "read:state");
+        const p = request.params;
+        const close = request.method === "transcript.close";
+        if (
+          !exactKeys(p, close ? ["taskId", "confirm"] : ["taskId"]) ||
+          !safeText(p.taskId) ||
+          (close && p.confirm !== true)
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Transcript metadata request is invalid.",
+          );
+        const task = this.store.state.tasks[p.taskId as string];
+        if (!task)
+          throw new OrchestratorError("NOT_FOUND", "Task was not found.");
+        if (!(await this.#canAccessTask(principal, task.id)))
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "Task is outside the authenticated scope.",
+          );
+        const matches = Object.values(
+          this.store.state.herdrMetadata ?? {},
+        ).filter((item) => item.taskId === task.id);
+        if (matches.length !== 1)
+          throw new OrchestratorError(
+            matches.length === 0 ? "NOT_FOUND" : "HERDR_IDENTITY_MISMATCH",
+            matches.length === 0
+              ? "Task metadata was not found."
+              : "Task metadata identity is ambiguous.",
+          );
+        const metadata = matches[0]!;
+        const workflowDigest = String(
+          (task.project?.compact as { workflowDigest?: unknown } | undefined)
+            ?.workflowDigest ?? "",
+        );
+        if (!/^[a-f0-9]{64}$/u.test(workflowDigest))
+          throw new OrchestratorError(
+            "STATE_CORRUPT",
+            "Compact task correlation is invalid.",
+          );
+        if (!close) result = metadata;
+        else if (metadata.state === "closed") {
+          result = {
+            taskId: metadata.taskId,
+            metadataId: metadata.metadataId,
+            transcriptRef: metadata.transcriptRef,
+            state: "closed",
+          };
+        } else {
+          if (
+            !this.#herdr ||
+            !metadata.exitedAt ||
+            !metadata.transcriptRef ||
+            metadata.transcriptPolicy !== "retain-tab"
+          )
+            throw new OrchestratorError(
+              "INVALID_REQUEST",
+              "The retained transcript is not ready for close.",
+            );
+          await this.#herdr.closeRetainedTab({
+            workspaceId: metadata.workspaceId,
+            tabId: metadata.tabId,
+            paneId: metadata.paneId,
+            terminalId: metadata.terminalId,
+          });
+          const updatedAt = new Date(this.#now()).toISOString();
+          const closed = {
+            ...metadata,
+            state: "closed" as const,
+            updatedAt,
+          };
+          delete (closed as Partial<HerdrTaskMetadata>).metadataDigest;
+          committedEvent = await this.store.append({
+            type: "herdr.metadata_projected",
+            actor: { principalId: principal.id, kind: principal.kind },
+            entityRefs: {
+              workflowId: metadata.workflowId,
+              taskId: metadata.taskId,
+              runId: metadata.runId,
+              agentId: metadata.agentId,
+              workflowDigest,
+            },
+            payload: {
+              ...closed,
+              metadataDigest: sha256(canonicalJson(closed)),
+            },
+          });
+          result = {
+            taskId: metadata.taskId,
+            metadataId: metadata.metadataId,
+            transcriptRef: metadata.transcriptRef,
+            state: "closed",
+          };
+        }
+      } else if (
         request.method === "agent.spawn" ||
         request.method === "delegate.execute"
       ) {
@@ -3746,6 +3943,7 @@ export class Broker {
                 "timeoutMs",
                 "failureMode",
                 "dryRun",
+                "compact",
               ];
         if (Object.keys(p).some((key) => !allowedKeys.includes(key)))
           throw new OrchestratorError(
@@ -3823,6 +4021,23 @@ export class Broker {
             "INVALID_REQUEST",
             "Spawn placement or model profile is invalid.",
           );
+        const compact =
+          p.compact &&
+          typeof p.compact === "object" &&
+          !Array.isArray(p.compact)
+            ? (p.compact as Record<string, unknown>)
+            : undefined;
+        if (
+          p.compact !== undefined &&
+          (!compact ||
+            !exactKeys(compact, ["workflowDigest", "transcriptPolicy"]) ||
+            !/^[a-f0-9]{64}$/u.test(String(compact.workflowDigest)) ||
+            compact.transcriptPolicy !== "retain-tab")
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Compact workflow metadata is invalid.",
+          );
         const dryRun = p.dryRun === true;
         const creationNow = this.#now();
         const createdAt = new Date(creationNow).toISOString();
@@ -3885,7 +4100,9 @@ export class Broker {
         const planned = steps.map((raw) => {
           const record = raw as Record<string, unknown>;
           const profileId = record.profileId as string;
-          const requested = requestedIsolation;
+          const requested = compact
+            ? exactRequestedIsolation({ mode: record.isolation })
+            : requestedIsolation;
           const spawnPolicy = resolveSpawnPolicy(
             {
               taskProfileId: profileId,
@@ -4034,6 +4251,14 @@ export class Broker {
                   requestedSpawnPolicy: step.spawnPolicy.requested,
                   effectiveSpawnPolicy: step.spawnPolicy.effective,
                   modelPolicyHash: step.spawnPolicy.policyHash,
+                  ...(compact
+                    ? {
+                        compact: {
+                          workflowDigest: compact.workflowDigest,
+                          transcriptPolicy: "retain-tab",
+                        },
+                      }
+                    : {}),
                 },
                 timeoutAt: wallDeadline,
               },
@@ -4624,7 +4849,7 @@ export class Broker {
         v: 1,
         type: "response",
         id: request.id,
-        method: request.method,
+        method: responseMethod,
         ok: true,
         result,
       };
@@ -4661,7 +4886,7 @@ export class Broker {
               kind: principal.kind,
             },
             entityRefs: {},
-            payload: { action: request.method },
+            payload: { action: responseMethod },
           });
         } catch (auditError: unknown) {
           this.#observeBackgroundFailure(auditError);
@@ -4672,13 +4897,213 @@ export class Broker {
         v: 1,
         type: "response",
         id: request.id,
-        method: request.method,
+        method: responseMethod,
         ok: false,
         error: {
           code: typed.code,
           message: typed.message,
           retryable: typed.retryable,
         },
+      });
+    }
+  }
+  async #projectCompactMetadata(
+    event: StoredEvent,
+    forcePublication = false,
+  ): Promise<void> {
+    let taskId = event.entityRefs.taskId;
+    const referencedRun = event.entityRefs.runId
+      ? this.store.state.runs[event.entityRefs.runId]
+      : undefined;
+    if (!taskId && referencedRun) taskId = referencedRun.taskId;
+    if (!taskId && event.entityRefs.agentId) {
+      const agent = this.store.state.agents[event.entityRefs.agentId];
+      const run = agent?.currentRunId
+        ? this.store.state.runs[agent.currentRunId]
+        : undefined;
+      taskId = run?.taskId;
+    }
+    if (!taskId) return;
+    const task = this.store.state.tasks[taskId];
+    const compact = task?.project?.compact as
+      { workflowDigest?: unknown; transcriptPolicy?: unknown } | undefined;
+    if (
+      !task ||
+      !compact ||
+      !/^[a-f0-9]{64}$/u.test(String(compact.workflowDigest)) ||
+      compact.transcriptPolicy !== "retain-tab" ||
+      !task.workflowId ||
+      !task.currentRunId
+    )
+      return;
+    const run = this.store.state.runs[task.currentRunId];
+    const agent = run?.agentId
+      ? this.store.state.agents[run.agentId]
+      : undefined;
+    const resource = run?.agentId
+      ? this.store.state.herdrResources?.[run.agentId]
+      : undefined;
+    const workspaceId = agent?.workspaceId ?? resource?.workspaceId;
+    const tabId = agent?.tabId ?? resource?.tabId;
+    const paneId = agent?.paneId ?? resource?.paneId;
+    const terminalId = agent?.terminalId ?? resource?.terminalId;
+    const sessionId = agent?.piSessionId ?? resource?.sessionId;
+    if (
+      !run ||
+      !agent ||
+      !workspaceId ||
+      !tabId ||
+      !paneId ||
+      !terminalId ||
+      !sessionId ||
+      !task.profileId
+    )
+      return;
+    const current = Object.values(this.store.state.herdrMetadata ?? {}).find(
+      (item) => item.taskId === task.id && item.runId === run.id,
+    );
+    if (current?.state === "closed") return;
+    const terminalState = new Map<string, HerdrMetadataState>([
+      ["succeeded", "completed"],
+      ["failed", "failed"],
+      ["cancelled", "cancelled"],
+      ["timed_out", "failed"],
+    ]);
+    const terminalOutcome = terminalState.get(task.state);
+    const terminal = terminalOutcome !== undefined;
+    const state =
+      terminal && !current?.exitedAt
+        ? "settled"
+        : (terminalOutcome ??
+          (run.state === "result_pending" ||
+          run.state === "result_pending_missing"
+            ? "settling"
+            : run.settled
+              ? "settled"
+              : run.state === "blocked" || task.state === "blocked"
+                ? "blocked"
+                : task.state === "provisioning"
+                  ? "creating"
+                  : task.state === "assigned"
+                    ? "starting"
+                    : "working"));
+    const result = Object.values(this.store.state.results ?? {}).find(
+      (item) => item.taskId === task.id && item.runId === run.id,
+    );
+    const question = Object.values(this.store.state.questions ?? {})
+      .filter((item) => item.taskId === task.id && item.runId === run.id)
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .at(-1);
+    const updatedAt = new Date(this.#now()).toISOString();
+    const metadataId =
+      current?.metadataId ??
+      `hmd_${sha256(`${task.id}:${run.id}`).slice(0, 26)}`;
+    const exitedAt = current?.exitedAt ?? null;
+    const value: Omit<HerdrTaskMetadata, "metadataDigest"> = {
+      schemaVersion: 1,
+      metadataId,
+      orchestrationId: `orc_${sha256(this.paths.sessionKey).slice(0, 26)}`,
+      workflowId: task.workflowId,
+      taskId: task.id,
+      runId: run.id,
+      agentId: agent.id,
+      ...(task.parentAgentId ? { parentAgentId: task.parentAgentId } : {}),
+      profileId: task.profileId,
+      state,
+      placement: "background",
+      transcriptPolicy: "retain-tab",
+      workspaceId,
+      tabId,
+      paneId,
+      terminalId,
+      piSessionRef: `pis_${sha256(sessionId).slice(0, 26)}`,
+      startedAt: current?.startedAt ?? task.createdAt,
+      updatedAt,
+      settledAt: run.settled ? (current?.settledAt ?? updatedAt) : null,
+      exitedAt,
+      transcriptRef: current?.transcriptRef ?? null,
+      resultRef: result?.id ?? null,
+      questionRef: question?.id ?? null,
+      errorCode: task.terminalReason?.code ?? null,
+    };
+    const appendProjection = async (
+      projection: Omit<HerdrTaskMetadata, "metadataDigest">,
+    ): Promise<StoredEvent> =>
+      await this.store.append({
+        type: "herdr.metadata_projected",
+        actor: {
+          principalId: "prn_00000000000000000000000000",
+          kind: "system",
+        },
+        entityRefs: {
+          workflowId: task.workflowId!,
+          taskId: task.id,
+          runId: run.id,
+          agentId: agent.id,
+          workflowDigest: String(compact.workflowDigest),
+        },
+        payload: {
+          ...projection,
+          metadataDigest: sha256(canonicalJson(projection)),
+        },
+      });
+    const semantic = (item: Omit<HerdrTaskMetadata, "metadataDigest">) =>
+      canonicalJson({ ...item, updatedAt: "" });
+    if (!current || semantic(value) !== semantic(current) || forcePublication) {
+      const projectedEvent = await appendProjection(value);
+      if (!value.exitedAt && this.#herdr)
+        try {
+          await this.#herdr.reportTaskMetadata(
+            { workspaceId, tabId, paneId, terminalId, sessionId },
+            this.store.state.herdrMetadata![metadataId]!,
+            projectedEvent.seq,
+          );
+        } catch (error) {
+          await appendProjection({
+            ...value,
+            state: "conflict",
+            updatedAt: new Date(this.#now()).toISOString(),
+            errorCode: "HERDR_METADATA_PUBLICATION_FAILED",
+          });
+          throw error;
+        }
+    }
+    const latest = this.store.state.herdrMetadata?.[metadataId];
+    if (terminal && !latest?.exitedAt && !this.#herdr) {
+      await appendProjection({
+        ...value,
+        state: "orphaned",
+        updatedAt: new Date(this.#now()).toISOString(),
+        errorCode: "HERDR_UNAVAILABLE",
+      });
+      return;
+    }
+    if (terminal && !latest?.exitedAt && this.#herdr) {
+      try {
+        await this.#herdr.exitRetainingTab({
+          workspaceId,
+          tabId,
+          paneId,
+          terminalId,
+          sessionId,
+        });
+      } catch (error) {
+        await appendProjection({
+          ...value,
+          state: "orphaned",
+          updatedAt: new Date(this.#now()).toISOString(),
+          errorCode: "HERDR_PROCESS_EXIT_FAILED",
+        });
+        throw error;
+      }
+      const finalTime = new Date(this.#now()).toISOString();
+      await appendProjection({
+        ...value,
+        state: terminalOutcome!,
+        updatedAt: finalTime,
+        settledAt: value.settledAt ?? finalTime,
+        exitedAt: finalTime,
+        transcriptRef: `trn_${sha256(`${metadataId}:${sessionId}`).slice(0, 26)}`,
       });
     }
   }

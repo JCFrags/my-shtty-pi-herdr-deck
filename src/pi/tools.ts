@@ -337,6 +337,8 @@ const parentInputKeys: Readonly<Record<ParentToolName, readonly string[]>> =
     task_get: ["taskId", "include", "maxBytes"],
     task_collect: ["taskIds", "select", "maxBytes"],
     task_cancel: ["taskId", "reason", "cascade"],
+    task_metadata: ["taskId"],
+    task_transcript_close: ["taskId", "confirm"],
   });
 function validateNested(value: unknown, depth = 0): void {
   if (depth > 6) throw new Error("LIMIT_EXCEEDED");
@@ -371,6 +373,7 @@ function validateNested(value: unknown, depth = 0): void {
 const parentRequired: Readonly<
   Partial<Record<ParentToolName, readonly string[]>>
 > = Object.freeze({
+  delegate_compact: ["text"],
   delegate: [
     "mode",
     "title",
@@ -402,6 +405,8 @@ const parentRequired: Readonly<
   task_get: ["taskId"],
   task_collect: ["taskIds"],
   task_cancel: ["taskId", "reason", "cascade"],
+  task_metadata: ["taskId"],
+  task_transcript_close: ["taskId", "confirm"],
 });
 function assertInputString(
   value: unknown,
@@ -1763,7 +1768,7 @@ export function registerParentTools(
   const permissions = new Set(principalFromClient().permissions);
   for (const tool of PARENT_TOOL_NAMES) {
     if (
-      tool === "delegate" &&
+      (tool === "delegate" || tool === "delegate_compact") &&
       !permissions.has("delegate") &&
       !permissions.has("manage:all")
     )
@@ -1788,7 +1793,10 @@ export function registerParentTools(
         if (idempotencyKey !== undefined)
           assertInputString(idempotencyKey, 256);
         const principal = principalFromClient();
-        if (tool === "delegate" && binding.parentAuthorized === false)
+        if (
+          (tool === "delegate" || tool === "delegate_compact") &&
+          binding.parentAuthorized === false
+        )
           throw new Error("PERMISSION_DENIED");
         const adapter = binding.adapter;
         const client = binding.client;

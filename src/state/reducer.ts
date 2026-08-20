@@ -860,10 +860,15 @@ export function reduce(
         "errorCode",
         "metadataDigest",
       ]);
-      if (Object.keys(p).some((key) => !allowed.has(key)))
+      if (
+        Object.keys(p).some((key) => !allowed.has(key)) ||
+        [...allowed].some(
+          (key) => key !== "parentAgentId" && !Object.hasOwn(p, key),
+        )
+      )
         throw new OrchestratorError(
           "STATE_CORRUPT",
-          "Herdr metadata contains a forbidden field.",
+          "Herdr metadata fields are not exact.",
         );
       const metadata = p as unknown as HerdrTaskMetadata;
       const states = new Set([
@@ -922,7 +927,26 @@ export function reduce(
             value !== null &&
             (typeof value !== "string" ||
               !/^[A-Za-z][A-Za-z0-9_-]{1,255}$/u.test(value)),
-        )
+        ) ||
+        [metadata.startedAt, metadata.updatedAt].some(
+          (value) => !Number.isFinite(Date.parse(value)),
+        ) ||
+        [metadata.settledAt, metadata.exitedAt].some(
+          (value) =>
+            value !== null &&
+            (typeof value !== "string" || !Number.isFinite(Date.parse(value))),
+        ) ||
+        (metadata.parentAgentId !== undefined &&
+          (typeof metadata.parentAgentId !== "string" ||
+            metadata.parentAgentId.length > 256)) ||
+        (metadata.errorCode !== null &&
+          (typeof metadata.errorCode !== "string" ||
+            !/^[A-Z][A-Z0-9_]{0,127}$/u.test(metadata.errorCode))) ||
+        event.entityRefs?.taskId !== metadata.taskId ||
+        event.entityRefs?.runId !== metadata.runId ||
+        event.entityRefs?.agentId !== metadata.agentId ||
+        event.entityRefs?.workflowId !== metadata.workflowId ||
+        !/^[a-f0-9]{64}$/u.test(event.entityRefs?.workflowDigest ?? "")
       )
         throw new OrchestratorError(
           "STATE_CORRUPT",
@@ -942,7 +966,9 @@ export function reduce(
         (current.taskId !== metadata.taskId ||
           current.runId !== metadata.runId ||
           current.agentId !== metadata.agentId ||
-          (terminal.has(current.state) && current.state !== metadata.state))
+          (terminal.has(current.state) &&
+            current.state !== metadata.state &&
+            metadata.state !== "closed"))
       )
         throw new OrchestratorError(
           "STATE_CORRUPT",

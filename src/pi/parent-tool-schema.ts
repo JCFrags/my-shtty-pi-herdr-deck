@@ -27,6 +27,8 @@ export const PARENT_TOOL_NAMES = [
   "task_get",
   "task_collect",
   "task_cancel",
+  "task_metadata",
+  "task_transcript_close",
 ] as const satisfies readonly ParentToolName[];
 
 export interface ParentToolMetadata {
@@ -216,6 +218,20 @@ const METADATA: Record<ParentToolName, ParentToolMetadata> = {
   },
   task_cancel: {
     method: "task.cancel",
+    targetParameters: ["taskId"],
+    requiresTarget: true,
+    requiresDelegation: false,
+    mutating: true,
+  },
+  task_metadata: {
+    method: "metadata.get",
+    targetParameters: ["taskId"],
+    requiresTarget: true,
+    requiresDelegation: false,
+    mutating: false,
+  },
+  task_transcript_close: {
+    method: "transcript.close",
     targetParameters: ["taskId"],
     requiresTarget: true,
     requiresDelegation: false,
