@@ -650,6 +650,20 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
       { ok: true },
     );
     assert.equal(controlPromptParams?.message, "continue");
+    assert.deepEqual(
+      {
+        agentId: controlPromptParams?.agentId,
+        generation: controlPromptParams?.generation,
+        connectionGeneration: controlPromptParams?.connectionGeneration,
+        piSessionId: controlPromptParams?.piSessionId,
+      },
+      {
+        agentId: childId,
+        generation: 1,
+        connectionGeneration,
+        piSessionId: "child-session",
+      },
+    );
     assert.equal("timeoutMs" in (controlPromptParams ?? {}), false);
     assert.equal(
       (
