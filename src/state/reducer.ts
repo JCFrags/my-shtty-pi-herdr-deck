@@ -1232,6 +1232,7 @@ export function reduce(
           "STATE_CORRUPT",
           "Herdr resource has no intent.",
         );
+      if (current.state === "closed" && String(p.state) !== "closed") break;
       next.herdrResources = {
         ...(next.herdrResources ?? {}),
         [agentId]: {

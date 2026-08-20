@@ -25,6 +25,8 @@ export function reconcileAgents(
   const panes = new Map(snapshot.panes.map((pane) => [pane.id, pane]));
   const out: Reconciliation[] = [];
   for (const agent of agents) {
+    const resource = resources[agent.id];
+    if (resource?.state === "closed") continue;
     let pane = agent.paneId ? panes.get(agent.paneId) : undefined;
     if (!pane && agent.terminalId)
       pane = snapshot.panes.find(
@@ -61,7 +63,6 @@ export function reconcileAgents(
       continue;
     }
 
-    const resource = resources[agent.id];
     const hasWorktreeIdentity = Boolean(
       resource?.worktreeId || resource?.worktreePath || resource?.workspaceId,
     );

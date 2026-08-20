@@ -117,6 +117,7 @@ test("M2 normalizers ignore additive fields", () => {
   });
   assert.equal(snapshot.workspaces[0]?.id, "w1");
   assert.equal(snapshot.panes[0]?.terminalId, "t1");
+  assert.equal(snapshot.worktreeInventoryPresent, false);
 });
 test("official Herdr 0.8 snapshot preserves the exact nested Pi session reference", () => {
   const snapshot = normalizeSnapshot({
@@ -159,7 +160,9 @@ test("official Herdr 0.8 snapshot preserves the exact nested Pi session referenc
     kind: "path",
     value: "/home/test/.pi/sessions/exact.jsonl",
   });
+  assert.equal(snapshot.agents[0]?.agentId, "a1");
   assert.equal(snapshot.panes[0]?.terminalId, "term1");
+  assert.equal(snapshot.worktreeInventoryPresent, true);
 });
 
 test("official Herdr 0.8 CLI success envelopes require exact command correlation", async () => {
