@@ -3,7 +3,11 @@ import { createServer, Socket } from "node:net";
 import test from "node:test";
 import { PiBrokerClient } from "../../src/pi/broker-client.js";
 import { PiAdapter } from "../../src/pi/adapter.js";
-import type { PiApiLike, PiContextLike } from "../../src/pi/types.js";
+import type {
+  PiApiLike,
+  PiAssignment,
+  PiContextLike,
+} from "../../src/pi/types.js";
 import { encodeFrame, NdjsonDecoder } from "../../src/shared/protocol/codec.js";
 
 process.env.HERDR_PANE_ID = "p-1";
@@ -283,6 +287,153 @@ test("PiAdapter rejects wrong control identity and unsupported capabilities", as
       }),
     /PI_CAPABILITY_MISSING/,
   );
+});
+
+test("PiAdapter rebinds a settled assignment for a parent prompt and restores it on failure", async () => {
+  const assignment: PiAssignment = {
+    id: "asg_prompt_rebind",
+    taskId: "tsk_prompt_rebind",
+    runId: "run_prompt_rebind",
+    agentId: state.agentId,
+    generation: state.generation,
+    assignmentGeneration: 2,
+    piSessionId: state.sessionId,
+    objective: "publish the result",
+    constraints: [],
+    deadline: "2099-01-01T00:00:00.000Z",
+  };
+  const persisted: string[] = [];
+  let pi!: PiAdapter;
+  const api: PiApiLike = {
+    on: () => undefined,
+    registerCommand: () => undefined,
+    appendEntry: (_type, value) => {
+      persisted.push(String((value as Record<string, unknown>).kind));
+    },
+    sendUserMessage: async () => {
+      assert.equal(pi.correlationState().kind, "accepted");
+      assert.equal(pi.assignmentForTools()?.runId, assignment.runId);
+      assert.equal(
+        pi.onLifecycle({
+          type: "agent_start",
+          agentId: assignment.agentId,
+          generation: assignment.generation,
+          piSessionId: assignment.piSessionId,
+          assignmentGeneration: assignment.assignmentGeneration,
+          turnIndex: 1,
+        }),
+        "bound",
+      );
+      assert.equal(pi.assignmentForTools()?.runId, assignment.runId);
+      assert.equal(
+        pi.onLifecycle({
+          type: "agent_settled",
+          agentId: assignment.agentId,
+          generation: assignment.generation,
+          piSessionId: assignment.piSessionId,
+          assignmentGeneration: assignment.assignmentGeneration,
+        }),
+        "settled",
+      );
+    },
+    getActiveTools: () => ["read"],
+  };
+  const context: PiContextLike = {
+    ui: {},
+    cwd: "/tmp",
+    sessionManager: { getSessionId: () => state.sessionId },
+    modelRegistry: {},
+    isIdle: () => true,
+    hasPendingMessages: () => false,
+    abort: () => undefined,
+    compact: (options) => options?.onComplete?.(),
+  };
+  pi = new PiAdapter(api, context, state.agentId, state.generation);
+  pi.bindIdentity(state.agentId, state.generation, 4);
+  pi.restorePersisted("settled", assignment, "prior-cycle", 0);
+  assert.equal(pi.assignmentForTools(), undefined);
+  assert.deepEqual(
+    await pi.handleControl("control.prompt", {
+      agentId: state.agentId,
+      generation: state.generation,
+      connectionGeneration: 4,
+      piSessionId: state.sessionId,
+      message: "continue",
+      delivery: "normal",
+    }),
+    { ok: true },
+  );
+  assert.equal(pi.correlationState().kind, "settled");
+  assert.deepEqual(persisted, ["accepted", "bound", "settled"]);
+
+  const failedEntries: string[] = [];
+  const failed = new PiAdapter(
+    {
+      ...api,
+      appendEntry: (_type, value) => {
+        failedEntries.push(String((value as Record<string, unknown>).kind));
+      },
+      sendUserMessage: async () => {
+        throw new Error("PROMPT_FAILED");
+      },
+    },
+    context,
+    state.agentId,
+    state.generation,
+  );
+  failed.bindIdentity(state.agentId, state.generation, 5);
+  failed.restorePersisted("settled", assignment, "failed-cycle", 0);
+  await assert.rejects(
+    () =>
+      failed.handleControl("control.prompt", {
+        agentId: state.agentId,
+        generation: state.generation,
+        connectionGeneration: 5,
+        piSessionId: state.sessionId,
+        message: "continue",
+        delivery: "normal",
+      }),
+    /PROMPT_FAILED/,
+  );
+  assert.equal(failed.correlationState().kind, "settled");
+  assert.deepEqual(failedEntries, ["accepted", "settled"]);
+
+  let deliveries = 0;
+  const persistenceFailure = new PiAdapter(
+    {
+      ...api,
+      appendEntry: () => {
+        throw new Error("PERSIST_FAILED");
+      },
+      sendUserMessage: async () => {
+        deliveries++;
+      },
+    },
+    context,
+    state.agentId,
+    state.generation,
+  );
+  persistenceFailure.bindIdentity(state.agentId, state.generation, 6);
+  persistenceFailure.restorePersisted(
+    "settled",
+    assignment,
+    "persist-cycle",
+    0,
+  );
+  await assert.rejects(
+    () =>
+      persistenceFailure.handleControl("control.prompt", {
+        agentId: state.agentId,
+        generation: state.generation,
+        connectionGeneration: 6,
+        piSessionId: state.sessionId,
+        message: "continue",
+        delivery: "normal",
+      }),
+    /PERSIST_FAILED/,
+  );
+  assert.equal(persistenceFailure.correlationState().kind, "settled");
+  assert.equal(deliveries, 0);
 });
 
 test("question waiter binds early delivery and rejects duplicate or mismatched delivery", async () => {
