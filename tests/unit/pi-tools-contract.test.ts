@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { registerParentTools } from "../../src/pi/tools.js";
 const inputs: Record<string, Record<string, unknown>> = {
+  delegate_compact: {
+    text: "- [ ] canary: Read package.json [profile:reviewer] [mode:read]",
+    accept: true,
+    workflowDigest: "a".repeat(64),
+  },
   delegate: {
     mode: "parallel",
     title: "x",
@@ -96,6 +101,7 @@ const state = {
 test("all parent tools capture frozen methods and frame-owned idempotency", async () => {
   const tools: Array<{
     name: string;
+    parameters: unknown;
     execute: (...args: never[]) => Promise<unknown>;
   }> = [];
   const calls: Array<{
@@ -140,10 +146,17 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
       {},
     );
   }
-  assert.equal(calls.length, 25);
+  assert.equal(calls.length, 26);
+  const compactTool = tools.find((item) => item.name === "delegate_compact");
+  assert.equal(
+    (compactTool?.parameters as { properties?: { accept?: { type?: string } } })
+      .properties?.accept?.type,
+    "boolean",
+  );
   assert.deepEqual(
     calls.map((call) => call.method),
     [
+      "compact.delegate",
       "delegate.execute",
       "agent.spawn",
       "agent.list",
