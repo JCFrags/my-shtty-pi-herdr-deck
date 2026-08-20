@@ -728,7 +728,10 @@ export class Broker {
         if (metadata.state === "settled" && !metadata.exitedAt)
           await this.#projectCompactMetadata(
             {
-              entityRefs: { taskId: metadata.taskId },
+              entityRefs: {
+                taskId: metadata.taskId,
+                runId: metadata.runId,
+              },
             } as unknown as StoredEvent,
             true,
           ).catch(() => undefined);
@@ -1326,181 +1329,270 @@ export class Broker {
             "PERMISSION_DENIED",
             "A broker-bound parent identity is required.",
           );
-        const resolveCompactPolicyContext = (): CompactPolicyContext => {
-          const parent = this.store.state.agents[compactParentAgentId];
-          if (
-            !parent ||
-            !Number.isSafeInteger(parent.generation) ||
-            parent.generation < 1 ||
-            !safeText(parent.workspaceId)
-          )
-            throw new OrchestratorError(
-              "INVALID_REQUEST",
-              "Authenticated parent policy context is unavailable.",
-            );
-          let parentDepth = 0;
-          let ancestorId = parent.parentAgentId;
-          const seen = new Set([parent.id]);
-          while (ancestorId) {
-            if (seen.has(ancestorId))
-              throw new OrchestratorError(
-                "STATE_CORRUPT",
-                "Parent delegation ancestry is invalid.",
-              );
-            seen.add(ancestorId);
-            const ancestor = this.store.state.agents[ancestorId];
-            if (!ancestor)
-              throw new OrchestratorError(
-                "STATE_CORRUPT",
-                "Parent delegation ancestry is incomplete.",
-              );
-            parentDepth++;
-            ancestorId = ancestor.parentAgentId;
-          }
-          const limits = new DeterministicScheduler().limits;
-          const delegatedDepth = parentDepth + 1;
-          if (delegatedDepth > limits.maxDelegationDepth)
-            throw new OrchestratorError(
-              "PERMISSION_DENIED",
-              "Compact delegation exceeds the delegation-depth policy.",
-            );
-          const admissionLimits = {
-            maxActiveAgents: limits.maxActiveAgents,
-            maxActivePerParent: limits.maxActivePerParent,
-            maxQueuedTasks: limits.maxQueuedTasks,
-            maxTasksPerDelegate: limits.maxTasksPerDelegate,
-            maxProvisioning: limits.maxProvisioning,
-          };
-          return {
-            parentContextHash: sha256(
-              canonicalJson({
-                agentId: parent.id,
-                generation: parent.generation,
-                depth: parentDepth,
-                workspaceId: parent.workspaceId,
-              }),
-            ),
-            workspacePolicyHash: sha256(
-              canonicalJson({
-                workspaceId: parent.workspaceId,
-                policy: "authenticated-parent-workspace",
-              }),
-            ),
-            parentGeneration: parent.generation,
-            parentDepth,
-            delegatedDepth,
-            maxDelegationDepth: limits.maxDelegationDepth,
-            depthDecision: "allow",
-            budgetPolicyHash: sha256(canonicalJson(admissionLimits)),
-            admissionLimits,
-          };
-        };
-        const previewPolicyContext = resolveCompactPolicyContext();
-        compactPolicyContext = previewPolicyContext;
-        const compiled = compileCompactDelegation(
-          p.text,
-          (profileId, requestedIsolation) => {
-            try {
-              const isolation = resolveIsolation(profileId, requestedIsolation);
-              const spawnPolicy = resolveSpawnPolicy(
-                { taskProfileId: profileId },
-                this.#modelPolicy,
-              );
-              const effective = spawnPolicy.effective;
-              return {
-                profileId,
-                policy: {
-                  decision: "allow",
-                  placement: effective.placement,
-                  isolation,
-                  modelProfileId: effective.modelProfileId,
-                  providerQualifiedModel: `${effective.model.provider}/${effective.model.modelId}`,
-                  thinkingLevel: effective.model.thinkingLevel,
-                  modelPolicyHash: spawnPolicy.policyHash,
-                  context: previewPolicyContext,
-                },
-              };
-            } catch {
-              return undefined;
-            }
-          },
+        const compactRequestFingerprint = sha256(
+          canonicalJson({ method: "compact.delegate", params: p }),
         );
-        if (
-          compiled.stepCount >
-          previewPolicyContext.admissionLimits.maxTasksPerDelegate
-        )
-          throw new OrchestratorError(
-            "LIMIT_EXCEEDED",
-            "Compact delegation exceeds the fixed task admission limit.",
-          );
-        if (p.accept !== true) {
-          compactPreview = {
-            schemaVersion: compiled.schemaVersion,
-            workflowDigest: compiled.workflowDigest,
-            stepCount: compiled.stepCount,
-            steps: compiled.steps,
-          };
-        } else {
+        if (p.accept === true) {
           if (!request.idempotencyKey)
             throw new OrchestratorError(
               "INVALID_REQUEST",
               "Accepted compact delegation requires an idempotency key.",
             );
-          const workflow = acceptedCompactWorkflow(
-            compiled,
-            typeof p.workflowDigest === "string" ? p.workflowDigest : undefined,
-          );
-          if (
-            canonicalJson(resolveCompactPolicyContext()) !==
-            canonicalJson(previewPolicyContext)
-          )
-            throw new OrchestratorError(
-              "INVALID_REQUEST",
-              "Authenticated compact policy context changed before acceptance.",
-            );
-          const paramsHash = sha256(
-            canonicalJson({
-              method: "compact.delegate",
-              params: p,
-              canonicalWorkflow: workflow,
-            }),
-          );
           const prior = this.store.state.idempotency[request.idempotencyKey];
           if (prior) {
             if (
               prior.principalId !== principal.id ||
               prior.method !== "compact.delegate" ||
-              prior.paramsHash !== paramsHash
+              prior.paramsHash !== compactRequestFingerprint
             )
               throw new OrchestratorError(
                 "IDEMPOTENCY_CONFLICT",
                 "Idempotency key is already bound.",
               );
             compactReplayResponse = prior.response;
-          } else
-            compactIdempotency = {
-              key: request.idempotencyKey,
-              paramsHash,
+          }
+        }
+        if (compactReplayResponse === undefined) {
+          const resolveCompactPolicyContext = (
+            requestedTasks: number,
+          ): CompactPolicyContext => {
+            const parent = this.store.state.agents[compactParentAgentId];
+            if (
+              !parent ||
+              !Number.isSafeInteger(parent.generation) ||
+              parent.generation < 1 ||
+              !safeText(parent.workspaceId)
+            )
+              throw new OrchestratorError(
+                "INVALID_REQUEST",
+                "Authenticated parent policy context is unavailable.",
+              );
+            let parentDepth = 0;
+            let ancestorId = parent.parentAgentId;
+            const seen = new Set([parent.id]);
+            while (ancestorId) {
+              if (seen.has(ancestorId))
+                throw new OrchestratorError(
+                  "STATE_CORRUPT",
+                  "Parent delegation ancestry is invalid.",
+                );
+              seen.add(ancestorId);
+              const ancestor = this.store.state.agents[ancestorId];
+              if (!ancestor)
+                throw new OrchestratorError(
+                  "STATE_CORRUPT",
+                  "Parent delegation ancestry is incomplete.",
+                );
+              parentDepth++;
+              ancestorId = ancestor.parentAgentId;
+            }
+            const limits = new DeterministicScheduler().limits;
+            const delegatedDepth = parentDepth + 1;
+            if (delegatedDepth > limits.maxDelegationDepth)
+              throw new OrchestratorError(
+                "PERMISSION_DENIED",
+                "Compact delegation exceeds the delegation-depth policy.",
+              );
+            const admissionLimits = {
+              maxActiveAgents: limits.maxActiveAgents,
+              maxActivePerParent: limits.maxActivePerParent,
+              maxQueuedTasks: limits.maxQueuedTasks,
+              maxTasksPerDelegate: limits.maxTasksPerDelegate,
+              maxProvisioning: limits.maxProvisioning,
             };
+            const tasks = Object.values(this.store.state.tasks);
+            const activeStates = new Set([
+              "assigned",
+              "provisioning",
+              "running",
+              "blocked",
+            ]);
+            const admissionSnapshot = {
+              queuedTasks: tasks.filter((task) => task.state === "queued")
+                .length,
+              activeTasks: tasks.filter((task) => activeStates.has(task.state))
+                .length,
+              parentActiveTasks: tasks.filter(
+                (task) =>
+                  task.parentAgentId === compactParentAgentId &&
+                  activeStates.has(task.state),
+              ).length,
+              provisioningTasks: tasks.filter(
+                (task) => task.state === "provisioning",
+              ).length,
+            };
+            const queueAfterAcceptance =
+              admissionSnapshot.queuedTasks + requestedTasks;
+            if (
+              requestedTasks > admissionLimits.maxTasksPerDelegate ||
+              queueAfterAcceptance > admissionLimits.maxQueuedTasks
+            )
+              throw new OrchestratorError(
+                "LIMIT_EXCEEDED",
+                "Compact delegation exceeds live task admission capacity.",
+              );
+            const initialDispatch =
+              admissionSnapshot.activeTasks < admissionLimits.maxActiveAgents &&
+              admissionSnapshot.parentActiveTasks <
+                admissionLimits.maxActivePerParent &&
+              admissionSnapshot.provisioningTasks <
+                admissionLimits.maxProvisioning
+                ? "eligible"
+                : "deferred";
+            return {
+              parentContextHash: sha256(
+                canonicalJson({
+                  agentId: parent.id,
+                  generation: parent.generation,
+                  depth: parentDepth,
+                  workspaceId: parent.workspaceId,
+                }),
+              ),
+              workspacePolicyHash: sha256(
+                canonicalJson({
+                  workspaceId: parent.workspaceId,
+                  policy: "authenticated-parent-workspace",
+                }),
+              ),
+              parentGeneration: parent.generation,
+              parentDepth,
+              delegatedDepth,
+              maxDelegationDepth: limits.maxDelegationDepth,
+              depthDecision: "allow",
+              budgetPolicyHash: sha256(canonicalJson(admissionLimits)),
+              admissionLimits,
+              admissionSnapshot,
+              admissionDecision: {
+                decision: "allow",
+                requestedTasks,
+                queueAfterAcceptance,
+                initialDispatch,
+              },
+            };
+          };
+          const preliminaryPolicyContext = resolveCompactPolicyContext(0);
+          const preliminary = compileCompactDelegation(
+            p.text,
+            (profileId, requestedIsolation) => {
+              try {
+                const isolation = resolveIsolation(
+                  profileId,
+                  requestedIsolation,
+                );
+                const spawnPolicy = resolveSpawnPolicy(
+                  { taskProfileId: profileId },
+                  this.#modelPolicy,
+                );
+                const effective = spawnPolicy.effective;
+                return {
+                  profileId,
+                  policy: {
+                    decision: "allow",
+                    placement: effective.placement,
+                    isolation,
+                    modelProfileId: effective.modelProfileId,
+                    providerQualifiedModel: `${effective.model.provider}/${effective.model.modelId}`,
+                    thinkingLevel: effective.model.thinkingLevel,
+                    modelPolicyHash: spawnPolicy.policyHash,
+                    context: preliminaryPolicyContext,
+                  },
+                };
+              } catch {
+                return undefined;
+              }
+            },
+          );
+          const previewPolicyContext = resolveCompactPolicyContext(
+            preliminary.stepCount,
+          );
+          compactPolicyContext = previewPolicyContext;
+          const compiled = compileCompactDelegation(
+            p.text,
+            (profileId, requestedIsolation) => {
+              try {
+                const isolation = resolveIsolation(
+                  profileId,
+                  requestedIsolation,
+                );
+                const spawnPolicy = resolveSpawnPolicy(
+                  { taskProfileId: profileId },
+                  this.#modelPolicy,
+                );
+                const effective = spawnPolicy.effective;
+                return {
+                  profileId,
+                  policy: {
+                    decision: "allow",
+                    placement: effective.placement,
+                    isolation,
+                    modelProfileId: effective.modelProfileId,
+                    providerQualifiedModel: `${effective.model.provider}/${effective.model.modelId}`,
+                    thinkingLevel: effective.model.thinkingLevel,
+                    modelPolicyHash: spawnPolicy.policyHash,
+                    context: previewPolicyContext,
+                  },
+                };
+              } catch {
+                return undefined;
+              }
+            },
+          );
+          if (p.accept !== true) {
+            compactPreview = {
+              schemaVersion: compiled.schemaVersion,
+              workflowDigest: compiled.workflowDigest,
+              stepCount: compiled.stepCount,
+              steps: compiled.steps,
+            };
+          } else {
+            const workflow = acceptedCompactWorkflow(
+              compiled,
+              typeof p.workflowDigest === "string"
+                ? p.workflowDigest
+                : undefined,
+            );
+            if (
+              canonicalJson(resolveCompactPolicyContext(compiled.stepCount)) !==
+              canonicalJson(previewPolicyContext)
+            )
+              throw new OrchestratorError(
+                "INVALID_REQUEST",
+                "Authenticated compact policy context changed before acceptance.",
+              );
+            compactIdempotency = {
+              key: request.idempotencyKey!,
+              paramsHash: compactRequestFingerprint,
+            };
+            request = {
+              ...request,
+              method:
+                compactReplayResponse === undefined
+                  ? "delegate.execute"
+                  : "compact.idempotency_replay",
+              params: {
+                ...workflow,
+                ...(p.parentAgentId !== undefined
+                  ? { parentAgentId: p.parentAgentId }
+                  : {}),
+                ...(p.wait !== undefined ? { wait: p.wait } : {}),
+                ...(p.waitUntil !== undefined
+                  ? { waitUntil: p.waitUntil }
+                  : {}),
+                ...(p.timeoutMs !== undefined
+                  ? { timeoutMs: p.timeoutMs }
+                  : {}),
+                compact: {
+                  workflowDigest: compiled.workflowDigest,
+                  transcriptPolicy: workflow.transcriptPolicy,
+                },
+              },
+            };
+          }
+        } else {
           request = {
             ...request,
-            method:
-              compactReplayResponse === undefined
-                ? "delegate.execute"
-                : "compact.idempotency_replay",
-            params: {
-              ...workflow,
-              ...(p.parentAgentId !== undefined
-                ? { parentAgentId: p.parentAgentId }
-                : {}),
-              ...(p.wait !== undefined ? { wait: p.wait } : {}),
-              ...(p.waitUntil !== undefined ? { waitUntil: p.waitUntil } : {}),
-              ...(p.timeoutMs !== undefined ? { timeoutMs: p.timeoutMs } : {}),
-              compact: {
-                workflowDigest: compiled.workflowDigest,
-                transcriptPolicy: "retain-tab",
-              },
-            },
+            method: "compact.idempotency_replay",
+            params: {},
           };
         }
       }
@@ -4054,8 +4146,12 @@ export class Broker {
         const p = request.params;
         const close = request.method === "transcript.close";
         if (
-          !exactKeys(p, close ? ["taskId", "confirm"] : ["taskId"]) ||
+          !exactKeys(
+            p,
+            close ? ["taskId", "runId", "confirm"] : ["taskId", "runId"],
+          ) ||
           !safeText(p.taskId) ||
+          (p.runId !== undefined && !safeText(p.runId)) ||
           (close && p.confirm !== true)
         )
           throw new OrchestratorError(
@@ -4070,9 +4166,21 @@ export class Broker {
             "PERMISSION_DENIED",
             "Task is outside the authenticated scope.",
           );
+        const selectedRunId =
+          typeof p.runId === "string" ? p.runId : task.currentRunId;
+        if (
+          !selectedRunId ||
+          this.store.state.runs[selectedRunId]?.taskId !== task.id
+        )
+          throw new OrchestratorError(
+            "NOT_FOUND",
+            "The selected task run was not found.",
+          );
         const matches = Object.values(
           this.store.state.herdrMetadata ?? {},
-        ).filter((item) => item.taskId === task.id);
+        ).filter(
+          (item) => item.taskId === task.id && item.runId === selectedRunId,
+        );
         if (matches.length !== 1)
           throw new OrchestratorError(
             matches.length === 0 ? "NOT_FOUND" : "HERDR_IDENTITY_MISMATCH",
@@ -4199,6 +4307,7 @@ export class Broker {
                 "waitUntil",
                 "timeoutMs",
                 "failureMode",
+                "transcriptPolicy",
                 "dryRun",
                 "compact",
               ];
@@ -4289,7 +4398,8 @@ export class Broker {
           (!compact ||
             !exactKeys(compact, ["workflowDigest", "transcriptPolicy"]) ||
             !/^[a-f0-9]{64}$/u.test(String(compact.workflowDigest)) ||
-            compact.transcriptPolicy !== "retain-tab")
+            compact.transcriptPolicy !== "retain-tab" ||
+            p.transcriptPolicy !== compact.transcriptPolicy)
         )
           throw new OrchestratorError(
             "INVALID_REQUEST",
@@ -4415,6 +4525,9 @@ export class Broker {
             dependsOn: Array.isArray(record.dependsOn)
               ? (record.dependsOn as unknown[])
               : [],
+            resultProjection: Array.isArray(record.resultProjection)
+              ? (record.resultProjection as unknown[])
+              : [],
             isolation: resolveIsolation(profileId, requested),
             spawnPolicy,
           };
@@ -4450,7 +4563,9 @@ export class Broker {
               dependsOn: step.dependsOn.filter(
                 (item): item is string => typeof item === "string",
               ),
-              resultProjection: [],
+              resultProjection: step.resultProjection.filter(
+                (item): item is string => typeof item === "string",
+              ),
               isolationMode: step.isolation,
             })),
           });
@@ -4531,7 +4646,7 @@ export class Broker {
                   modelPolicyHash: step.spawnPolicy.policyHash,
                   compact: {
                     workflowDigest: compact.workflowDigest,
-                    transcriptPolicy: "retain-tab",
+                    transcriptPolicy: compact.transcriptPolicy,
                   },
                 },
                 timeoutAt: wallDeadline,
@@ -4594,7 +4709,7 @@ export class Broker {
                     ? {
                         compact: {
                           workflowDigest: compact.workflowDigest,
-                          transcriptPolicy: "retain-tab",
+                          transcriptPolicy: compact.transcriptPolicy,
                         },
                       }
                     : {}),
@@ -5271,11 +5386,13 @@ export class Broker {
       !compact ||
       !/^[a-f0-9]{64}$/u.test(String(compact.workflowDigest)) ||
       compact.transcriptPolicy !== "retain-tab" ||
-      !task.workflowId ||
-      !task.currentRunId
+      !task.workflowId
     )
       return;
-    const run = this.store.state.runs[task.currentRunId];
+    const selectedRunId =
+      referencedRun?.taskId === task.id ? referencedRun.id : task.currentRunId;
+    if (!selectedRunId) return;
+    const run = this.store.state.runs[selectedRunId];
     const agent = run?.agentId
       ? this.store.state.agents[run.agentId]
       : undefined;
@@ -5307,8 +5424,11 @@ export class Broker {
       ["failed", "failed"],
       ["cancelled", "cancelled"],
       ["timed_out", "failed"],
+      ["lost", "failed"],
     ]);
-    const terminalOutcome = terminalState.get(task.state);
+    const terminalOutcome = terminalState.get(
+      task.currentRunId === run.id ? task.state : run.state,
+    );
     const terminal = terminalOutcome !== undefined;
     const state =
       terminal && !current?.exitedAt

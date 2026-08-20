@@ -29,6 +29,18 @@ const policyContext = {
     maxTasksPerDelegate: 8,
     maxProvisioning: 2,
   },
+  admissionSnapshot: {
+    queuedTasks: 0,
+    activeTasks: 0,
+    parentActiveTasks: 0,
+    provisioningTasks: 0,
+  },
+  admissionDecision: {
+    decision: "allow" as const,
+    requestedTasks: 2,
+    queueAfterAcceptance: 2,
+    initialDispatch: "eligible" as const,
+  },
 };
 
 const resolver = (id: string, isolation: "shared-readonly" | "worktree") =>
@@ -58,21 +70,13 @@ test("compact delegation compiles a DAG into canonical delegate steps", () => {
     profileId: "reviewer",
     mode: "read",
     dependencyIds: ["build"],
-    placement: "background",
+    placement: "current-workspace",
     isolation: "shared-readonly",
-    policy: {
-      decision: "allow",
-      placement: "current-workspace",
-      isolation: "shared-readonly",
-      modelProfileId: "subagent",
-      providerQualifiedModel: "openai-codex/gpt-5.6-luna",
-      thinkingLevel: "medium",
-      modelPolicyHash: "a".repeat(64),
-      context: policyContext,
-    },
-    completedInput: true,
   });
   assert.equal(value.workflow.steps[1]?.objective, "Check it");
+  assert.deepEqual(value.workflow.steps[1]?.resultProjection, []);
+  assert.equal(value.workflow.transcriptPolicy, "retain-tab");
+  assert.equal(JSON.stringify(value.steps).includes("modelPolicyHash"), false);
   assert.doesNotMatch(JSON.stringify(value), /describe only/u);
   assert.equal(
     compileCompactDelegation(text, resolver).workflowDigest,
@@ -113,6 +117,17 @@ test("compact digest binds parent, workspace, depth, and budget policy context",
       admissionLimits: {
         ...policyContext.admissionLimits,
         maxQueuedTasks: 31,
+      },
+    },
+    {
+      ...policyContext,
+      admissionSnapshot: {
+        ...policyContext.admissionSnapshot,
+        queuedTasks: 1,
+      },
+      admissionDecision: {
+        ...policyContext.admissionDecision,
+        queueAfterAcceptance: 3,
       },
     },
   ])

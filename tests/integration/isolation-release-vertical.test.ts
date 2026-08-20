@@ -9,6 +9,7 @@ import { digest } from "../../src/broker/authentication.js";
 import { PiAdapter } from "../../src/pi/adapter.js";
 import { PiBrokerClient } from "../../src/pi/broker-client.js";
 import { sessionKey } from "../../src/shared/paths.js";
+import { canonicalJson, sha256 } from "../../src/shared/canonical-json.js";
 import type { PiApiLike, PiContextLike } from "../../src/pi/types.js";
 import { EventStore } from "../../src/state/event-store.js";
 import { HerdrProvisioner } from "../../src/herdr/provisioner.js";
@@ -767,46 +768,30 @@ test("compact preview binds effective model policy and rejects restart drift", a
     const text = "- [ ] bind: Bind policy [profile:reviewer] [mode:read]";
     const preview = (await h.client.request("compact.delegate", { text })) as {
       workflowDigest: string;
-      steps: Array<{ policy: Record<string, unknown> }>;
+      steps: Array<Record<string, unknown>>;
     };
-    const policy = preview.steps[0]!.policy;
-    const context = policy.context as Record<string, unknown>;
-    assert.deepEqual(
-      { ...policy, context: undefined },
-      {
-        decision: "allow",
-        placement: "current-workspace",
-        isolation: "shared-readonly",
-        modelProfileId: "subagent",
-        providerQualifiedModel: "openai-codex/gpt-5.6-luna",
-        thinkingLevel: "medium",
-        modelPolicyHash: policy.modelPolicyHash,
-        context: undefined,
-      },
-    );
-    assert.match(String(context.parentContextHash), /^[a-f0-9]{64}$/u);
-    assert.match(String(context.workspacePolicyHash), /^[a-f0-9]{64}$/u);
-    assert.match(String(context.budgetPolicyHash), /^[a-f0-9]{64}$/u);
-    assert.equal(context.parentGeneration, 1);
-    assert.equal(context.parentDepth, 0);
-    assert.equal(context.delegatedDepth, 1);
-    assert.equal(context.maxDelegationDepth, 2);
-    assert.equal(context.depthDecision, "allow");
-    assert.deepEqual(context.admissionLimits, {
-      maxActiveAgents: 4,
-      maxActivePerParent: 4,
-      maxQueuedTasks: 32,
-      maxTasksPerDelegate: 8,
-      maxProvisioning: 2,
+    assert.deepEqual(Object.keys(preview.steps[0]!).sort(), [
+      "dependencyIds",
+      "id",
+      "isolation",
+      "mode",
+      "placement",
+      "profileId",
+    ]);
+    assert.deepEqual(preview.steps[0], {
+      id: "bind",
+      profileId: "reviewer",
+      mode: "read",
+      dependencyIds: [],
+      placement: "current-workspace",
+      isolation: "shared-readonly",
     });
     const serializedPreview = JSON.stringify(preview);
     assert.equal(serializedPreview.includes(h.registered.agentId), false);
     assert.equal(serializedPreview.includes("parent-workspace"), false);
     assert.equal(serializedPreview.includes(h.paths.root), false);
-    assert.match(
-      String(preview.steps[0]?.policy.modelPolicyHash),
-      /^[a-f0-9]{64}$/u,
-    );
+    assert.equal(serializedPreview.includes("modelPolicyHash"), false);
+    assert.equal(serializedPreview.includes("admissionSnapshot"), false);
     await h.restart();
     await assert.rejects(
       h.client.request(
@@ -858,6 +843,105 @@ test("compact acceptance rejects authenticated parent context drift before mutat
     assert.equal(Object.keys(h.broker.store.state.workflows).length, 0);
     assert.equal(Object.keys(h.broker.store.state.tasks).length, 0);
     assert.equal(h.provisions.length, 0);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("compact acceptance rejects live admission drift before its first mutation", async () => {
+  const h = await productionParent();
+  try {
+    const text =
+      "- [ ] bind: Bind live admission [profile:reviewer] [mode:read]";
+    const preview = (await h.client.request("compact.delegate", { text })) as {
+      workflowDigest: string;
+    };
+    const existingTaskCount = Object.keys(h.broker.store.state.tasks).length;
+    h.broker.store.state.tasks.tsk_admission_drift = {
+      id: "tsk_admission_drift",
+      title: "Existing queued work",
+      objective: "Existing queued work",
+      state: "queued",
+      createdAt: "2026-08-19T00:00:00.000Z",
+      parentAgentId: h.registered.agentId,
+    };
+    await assert.rejects(
+      h.client.request(
+        "compact.delegate",
+        {
+          text,
+          accept: true,
+          workflowDigest: preview.workflowDigest,
+          parentAgentId: h.registered.agentId,
+        },
+        { idempotencyKey: "compact-live-admission-drift" },
+      ),
+      (error: unknown) =>
+        (error as { code?: string }).code === "INVALID_REQUEST",
+    );
+    assert.equal(
+      Object.keys(h.broker.store.state.tasks).length,
+      existingTaskCount + 1,
+    );
+    assert.equal(Object.keys(h.broker.store.state.workflows).length, 0);
+    assert.equal(h.provisions.length, 0);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("committed compact retry returns its frozen response after policy drift", async () => {
+  const changedSubagent = {
+    provider: "openai-codex",
+    modelId: "gpt-5.6-luna-policy-change",
+    thinkingLevel: "medium" as const,
+  };
+  const h = await productionParent({
+    holdProvisions: true,
+    restartModelPolicy: {
+      profiles: { subagent: changedSubagent },
+      allowlist: [
+        changedSubagent,
+        {
+          provider: "openai-codex",
+          modelId: "gpt-5.6-sol",
+          thinkingLevel: "medium",
+        },
+      ],
+    },
+  });
+  try {
+    const text = "- [ ] once: Freeze once [profile:reviewer] [mode:read]";
+    const preview = (await h.client.request("compact.delegate", { text })) as {
+      workflowDigest: string;
+    };
+    const params = {
+      text,
+      accept: true,
+      workflowDigest: preview.workflowDigest,
+      parentAgentId: h.registered.agentId,
+    };
+    const options = { idempotencyKey: "compact-frozen-policy-replay" };
+    const accepted = h.client.request("compact.delegate", params, options);
+    (await h.nextProvision()).release();
+    const frozen = await accepted;
+    await h.restart();
+    assert.deepEqual(
+      await h.client.request("compact.delegate", params, options),
+      frozen,
+    );
+    assert.equal(Object.keys(h.broker.store.state.workflows).length, 1);
+    assert.equal(Object.keys(h.broker.store.state.tasks).length, 1);
+    assert.equal(h.provisions.length, 1);
+    await assert.rejects(
+      h.client.request(
+        "compact.delegate",
+        { ...params, timeoutMs: 1 },
+        options,
+      ),
+      (error: unknown) =>
+        (error as { code?: string }).code === "IDEMPOTENCY_CONFLICT",
+    );
   } finally {
     await h.cleanup();
   }
@@ -986,6 +1070,157 @@ test("compact lifecycle persists safe final metadata and closes the retained tab
     assert.equal(h.retainedCloses.length, 1);
   } finally {
     finalReceipt?.remove();
+    await h.cleanup();
+  }
+});
+
+test("compact metadata retrieves, replays, and closes exact runs after task retry", async () => {
+  const h = await productionParent({
+    holdProvisions: true,
+    compactLifecycle: true,
+  });
+  let firstReceipt: ReturnType<typeof boundedReceipt> | undefined;
+  let secondReceipt: ReturnType<typeof boundedReceipt> | undefined;
+  try {
+    const text =
+      "- [ ] retry: Preserve both run projections [profile:implementer] [mode:write]";
+    const preview = (await h.client.request("compact.delegate", { text })) as {
+      workflowDigest: string;
+    };
+    const accepted = h.client.request(
+      "compact.delegate",
+      {
+        text,
+        accept: true,
+        workflowDigest: preview.workflowDigest,
+        parentAgentId: h.registered.agentId,
+      },
+      { idempotencyKey: "compact-two-run-metadata" },
+    ) as Promise<{ tasks: Array<{ taskId: string }> }>;
+    (await h.nextProvision()).release();
+    const taskId = (await accepted).tasks[0]!.taskId;
+    const task = h.broker.store.state.tasks[taskId]!;
+    const firstRunId = task.currentRunId!;
+    firstReceipt = boundedReceipt(h.broker.store, (event) => {
+      const candidate = event as {
+        type?: string;
+        entityRefs?: Record<string, unknown>;
+      };
+      return (
+        candidate.type === "herdr.metadata_projected" &&
+        candidate.entityRefs?.runId === firstRunId
+      );
+    });
+    const existingFirst = Object.values(
+      h.broker.store.state.herdrMetadata ?? {},
+    ).find((item) => item.runId === firstRunId);
+    if (!existingFirst) await firstReceipt.promise;
+    else firstReceipt.remove();
+    const first = Object.values(h.broker.store.state.herdrMetadata ?? {}).find(
+      (item) => item.runId === firstRunId,
+    )!;
+    h.broker.store.state.runs[firstRunId]!.state = "succeeded";
+    h.broker.store.state.runs[firstRunId]!.settled = true;
+    const secondRunId = `run_${"8".repeat(26)}`;
+    secondReceipt = boundedReceipt(h.broker.store, (event) => {
+      const candidate = event as {
+        type?: string;
+        entityRefs?: Record<string, unknown>;
+      };
+      return (
+        candidate.type === "herdr.metadata_projected" &&
+        candidate.entityRefs?.runId === secondRunId
+      );
+    });
+    await h.broker.store.append({
+      type: "run.created",
+      actor,
+      entityRefs: { taskId, runId: secondRunId, agentId: first.agentId },
+      payload: {
+        runId: secondRunId,
+        taskId,
+        agentId: first.agentId,
+        assignmentId: `asg_${"9".repeat(26)}`,
+        assignmentGeneration: 2,
+        agentGeneration: 1,
+      },
+    });
+    await secondReceipt.promise;
+
+    const exitedAt = "2026-08-19T01:00:00.000Z";
+    const retained = {
+      ...first,
+      state: "completed" as const,
+      updatedAt: exitedAt,
+      settledAt: exitedAt,
+      exitedAt,
+      transcriptRef: `trn_${sha256(firstRunId).slice(0, 26)}`,
+    };
+    delete (retained as Partial<typeof first>).metadataDigest;
+    await h.broker.store.append({
+      type: "herdr.metadata_projected",
+      actor,
+      entityRefs: {
+        workflowId: first.workflowId,
+        taskId,
+        runId: firstRunId,
+        agentId: first.agentId,
+        workflowDigest: preview.workflowDigest,
+      },
+      payload: {
+        ...retained,
+        metadataDigest: sha256(canonicalJson(retained)),
+      },
+    });
+
+    const current = (await h.client.request("metadata.get", {
+      taskId,
+    })) as { runId: string };
+    assert.equal(current.runId, secondRunId);
+    const historical = (await h.client.request("metadata.get", {
+      taskId,
+      runId: firstRunId,
+    })) as { runId: string; state: string };
+    assert.equal(historical.runId, firstRunId);
+    assert.equal(historical.state, "completed");
+    const close = await h.client.request("transcript.close", {
+      taskId,
+      runId: firstRunId,
+      confirm: true,
+    });
+    assert.equal((close as { state: string }).state, "closed");
+    assert.deepEqual(
+      await h.client.request("transcript.close", {
+        taskId,
+        runId: firstRunId,
+        confirm: true,
+      }),
+      close,
+    );
+    assert.equal(h.retainedCloses.length, 1);
+
+    await h.restart();
+    assert.equal(
+      (
+        (await h.client.request("metadata.get", {
+          taskId,
+          runId: firstRunId,
+        })) as { state: string }
+      ).state,
+      "closed",
+    );
+    assert.equal(
+      (
+        (await h.client.request("metadata.get", {
+          taskId,
+          runId: secondRunId,
+        })) as { runId: string }
+      ).runId,
+      secondRunId,
+    );
+  } finally {
+    firstReceipt?.remove();
+    secondReceipt?.remove();
     await h.cleanup();
   }
 });

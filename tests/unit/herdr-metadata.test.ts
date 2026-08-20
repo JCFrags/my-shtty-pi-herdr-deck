@@ -162,6 +162,64 @@ test("EventStore rejects orphan metadata before append", async () => {
   }
 });
 
+test("Herdr metadata accepts two exact run projections for one task and replays them", () => {
+  const state = correlatedState();
+  state.runs.run_second = {
+    id: "run_second",
+    taskId: "tsk_example",
+    state: "working",
+    agentId: "agt_second",
+    assignmentGeneration: 2,
+    settled: false,
+  };
+  state.tasks.tsk_example!.currentRunId = "run_second";
+  state.tasks.tsk_example!.assignedAgentId = "agt_second";
+  state.tasks.tsk_example!.runIds = ["run_example", "run_second"];
+  state.agents.agt_second = {
+    id: "agt_second",
+    state: "working",
+    generation: 1,
+    currentRunId: "run_second",
+  };
+  state.herdrResources!.agt_second = {
+    agentId: "agt_second",
+    state: "registered",
+    workspaceId: "w2",
+    tabId: "w2:t2",
+    paneId: "w2:p2",
+    terminalId: "term_second",
+    sessionId: "session_second",
+  };
+  const second = payload({
+    metadataId: "hmd_second",
+    runId: "run_second",
+    agentId: "agt_second",
+    workspaceId: "w2",
+    tabId: "w2:t2",
+    paneId: "w2:p2",
+    terminalId: "term_second",
+    piSessionRef: `pis_${sha256("session_second").slice(0, 26)}`,
+  });
+  const secondEvent = event(second, {
+    runId: "run_second",
+    agentId: "agt_second",
+  });
+  const appended = reduce(reduce(state, event(payload())), secondEvent);
+  assert.deepEqual(Object.keys(appended.herdrMetadata!).sort(), [
+    "hmd_example",
+    "hmd_second",
+  ]);
+  const replayed = [event(payload()), secondEvent].reduce(
+    (current, stored) => reduce(current, stored),
+    state,
+  );
+  assert.deepEqual(replayed.herdrMetadata, appended.herdrMetadata);
+  assert.throws(
+    () => reduce(appended, event(payload({ metadataId: "hmd_replacement" }))),
+    /correlation/u,
+  );
+});
+
 test("Herdr metadata rejects valid-hash missing and cross-linked correlations", () => {
   assert.throws(() => reduce(emptyState(), event(payload())), /correlation/u);
 

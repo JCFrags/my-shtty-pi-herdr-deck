@@ -337,8 +337,8 @@ const parentInputKeys: Readonly<Record<ParentToolName, readonly string[]>> =
     task_get: ["taskId", "include", "maxBytes"],
     task_collect: ["taskIds", "select", "maxBytes"],
     task_cancel: ["taskId", "reason", "cascade"],
-    task_metadata: ["taskId"],
-    task_transcript_close: ["taskId", "confirm"],
+    task_metadata: ["taskId", "runId"],
+    task_transcript_close: ["taskId", "runId", "confirm"],
   });
 function validateNested(value: unknown, depth = 0): void {
   if (depth > 6) throw new Error("LIMIT_EXCEEDED");

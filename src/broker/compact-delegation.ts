@@ -24,6 +24,18 @@ export interface CompactPolicyContext {
     readonly maxTasksPerDelegate: number;
     readonly maxProvisioning: number;
   };
+  readonly admissionSnapshot: {
+    readonly queuedTasks: number;
+    readonly activeTasks: number;
+    readonly parentActiveTasks: number;
+    readonly provisioningTasks: number;
+  };
+  readonly admissionDecision: {
+    readonly decision: "allow";
+    readonly requestedTasks: number;
+    readonly queueAfterAcceptance: number;
+    readonly initialDispatch: "eligible" | "deferred";
+  };
 }
 export interface CompactPolicyProjection {
   readonly decision: "allow";
@@ -48,15 +60,14 @@ export interface CompactStepPreview {
   readonly profileId: string;
   readonly mode: "read" | "write";
   readonly dependencyIds: readonly string[];
-  readonly placement: "background";
+  readonly placement: "current-workspace" | "new-workspace";
   readonly isolation: "shared-readonly" | "worktree";
-  readonly policy: CompactPolicyProjection;
-  readonly completedInput: boolean;
 }
 export interface CompactCanonicalWorkflow {
   readonly mode: "dag";
   readonly title: "Compact delegation";
   readonly failureMode: "collect_all";
+  readonly transcriptPolicy: "retain-tab";
   readonly steps: readonly {
     readonly key: string;
     readonly profileId: string;
@@ -64,6 +75,7 @@ export interface CompactCanonicalWorkflow {
     readonly objective: string;
     readonly constraints: readonly string[];
     readonly dependsOn: readonly string[];
+    readonly resultProjection: readonly string[];
     readonly isolation: "shared-readonly" | "worktree";
     readonly compactPolicy: CompactPolicyProjection;
   }[];
@@ -266,6 +278,7 @@ export function compileCompactDelegation(
     mode: "dag",
     title: "Compact delegation",
     failureMode: "collect_all",
+    transcriptPolicy: "retain-tab",
     steps: parsed.map((step) => ({
       key: step.id,
       profileId: step.profileId,
@@ -273,6 +286,7 @@ export function compileCompactDelegation(
       objective: step.title,
       constraints: [],
       dependsOn: [...step.after].sort(),
+      resultProjection: [],
       isolation: step.policy.isolation,
       compactPolicy: step.policy,
     })),
@@ -283,10 +297,8 @@ export function compileCompactDelegation(
     profileId: step.profileId,
     mode: step.mode,
     dependencyIds: [...step.after].sort(),
-    placement: "background",
+    placement: step.policy.placement,
     isolation: step.policy.isolation,
-    policy: step.policy,
-    completedInput: step.completedInput,
   }));
   const result = {
     schemaVersion: 1 as const,

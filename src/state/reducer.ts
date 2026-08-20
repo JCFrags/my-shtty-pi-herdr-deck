@@ -1138,15 +1138,12 @@ export function reduce(
         !workflow.taskIds.includes(metadata.taskId) ||
         !task ||
         task.workflowId !== metadata.workflowId ||
-        task.currentRunId !== metadata.runId ||
-        task.assignedAgentId !== metadata.agentId ||
         task.profileId !== metadata.profileId ||
         task.parentAgentId !== metadata.parentAgentId ||
         !run ||
         run.taskId !== metadata.taskId ||
         run.agentId !== metadata.agentId ||
         !agent ||
-        agent.currentRunId !== metadata.runId ||
         !resource ||
         resource.agentId !== metadata.agentId ||
         resource.workspaceId !== metadata.workspaceId ||
@@ -1171,7 +1168,7 @@ export function reduce(
         Object.values(next.herdrMetadata ?? {}).some(
           (item) =>
             item.metadataId !== metadata.metadataId &&
-            (item.taskId === metadata.taskId || item.runId === metadata.runId),
+            item.runId === metadata.runId,
         )
       )
         throw new OrchestratorError(
