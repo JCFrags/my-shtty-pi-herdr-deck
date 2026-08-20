@@ -695,6 +695,7 @@ function validateParentInput(
         "confirm",
         "createTask",
         "cascade",
+        "accept",
       ].includes(key) &&
       typeof value !== "boolean"
     )
@@ -873,6 +874,7 @@ function schemaForKey(key: string): unknown {
       "confirm",
       "createTask",
       "cascade",
+      "accept",
     ].includes(key)
   )
     return { type: "boolean" };
