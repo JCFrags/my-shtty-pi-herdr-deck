@@ -829,14 +829,15 @@ export class HerdrService {
           snapshot.panes.some(
             (pane) => pane.occupant?.agentId === expectedAgentId,
           );
+        const hasRecordedWorktree =
+          resource.worktreeId !== undefined ||
+          resource.worktreePath !== undefined;
         const recordedWorkspacePresent =
+          hasRecordedWorktree &&
           resource.workspaceId !== undefined &&
           snapshot.workspaces.some(
             (workspace) => workspace.id === resource.workspaceId,
           );
-        const hasRecordedWorktree =
-          resource.worktreeId !== undefined ||
-          resource.worktreePath !== undefined;
         const recordedWorktreePresent =
           (resource.worktreeId !== undefined &&
             snapshot.worktrees.some(

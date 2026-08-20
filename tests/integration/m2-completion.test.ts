@@ -401,6 +401,7 @@ test("M2 close is serialized and repeated close mutates once", async () => {
       state: "registered",
       paneId: "pane-m",
       terminalId: "terminal-m",
+      workspaceId: "workspace-shared",
       generation: 1,
     },
   });
@@ -414,6 +415,7 @@ test("M2 close is serialized and repeated close mutates once", async () => {
       reason: "Recorded pane is absent.",
     },
   });
+  liveWorkspaces = [{ id: "workspace-shared" }];
   await service.close({ paneId: "pane-m", terminalId: "terminal-m" });
   assert.equal(closeCount, 1);
   assert.equal(store.state.herdrResources?.[missingAgentId]?.state, "closed");
@@ -422,6 +424,7 @@ test("M2 close is serialized and repeated close mutates once", async () => {
     "already_absent",
   );
 
+  liveWorkspaces = [];
   const movedAgentId = createId("agt");
   await store.append({
     type: "herdr.provision.intent",
