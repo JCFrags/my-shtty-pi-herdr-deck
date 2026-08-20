@@ -469,6 +469,7 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
       resolveDelivery = resolve;
     });
     let assignmentFrame: { frame: Frame; socket: Socket } | undefined;
+    let controlPromptParams: Record<string, unknown> | undefined;
     const child = await connect(
       paths,
       {
@@ -507,6 +508,19 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
             }),
           );
           resolveDelivery();
+          return;
+        }
+        if (frame.method === "control.prompt") {
+          controlPromptParams = frame.params;
+          socket.write(
+            encodeFrame({
+              v: 1,
+              type: "server_response",
+              id: frame.id,
+              ok: true,
+              result: { ok: true },
+            }),
+          );
           return;
         }
         if (frame.method === "assignment.deliver") {
@@ -625,6 +639,18 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
       broker.store.state.runs[runId]?.assignmentDeliveryState,
       "accepted",
     );
+    assert.deepEqual(
+      ok(
+        await send(p1.socket, "agent.prompt", {
+          agentId: childId,
+          message: "continue",
+          timeoutMs: 30_000,
+        }),
+      ),
+      { ok: true },
+    );
+    assert.equal(controlPromptParams?.message, "continue");
+    assert.equal("timeoutMs" in (controlPromptParams ?? {}), false);
     assert.equal(
       (
         await send(child.socket, "agent.lifecycle_event", {
