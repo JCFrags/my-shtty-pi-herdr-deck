@@ -301,18 +301,27 @@ test("M2 restart expiry durably times out pending registration", async () => {
 
 test("M2 close is serialized and repeated close mutates once", async () => {
   const root = await mkdtemp(join(tmpdir(), "m2-close-lock-"));
-  const store = new EventStore(join(root, "events.ndjson"));
+  const eventPath = join(root, "events.ndjson");
+  const store = new EventStore(eventPath);
   await store.open();
   let closeCount = 0;
   const agentId = createId("agt");
+  let livePanes: Array<Record<string, unknown>> = [
+    { id: "pane-c", occupant: { agentId, generation: 1 } },
+  ];
+  let liveAgents: Array<Record<string, unknown>> = [];
+  let liveWorkspaces: Array<Record<string, unknown>> = [];
+  let liveWorktrees: Array<Record<string, unknown>> = [];
+  let worktreeInventoryPresent = false;
   const cli = {
     requireMutationCapabilities: () => undefined,
     snapshot: async () => ({
-      panes: [{ id: "pane-c", occupant: { agentId, generation: 1 } }],
+      panes: livePanes,
       tabs: [],
-      workspaces: [],
-      agents: [],
-      worktrees: [],
+      workspaces: liveWorkspaces,
+      agents: liveAgents,
+      worktrees: liveWorktrees,
+      worktreeInventoryPresent,
     }),
     closePane: async () => {
       closeCount++;
@@ -347,6 +356,186 @@ test("M2 close is serialized and repeated close mutates once", async () => {
   ]);
   assert.equal(closeCount, 1);
   assert.equal(store.state.herdrResources?.[agentId]?.state, "closed");
+  const closedSeq = store.state.lastEventSeq;
+  assert.deepEqual(await service.reconcile(), []);
+  assert.equal(store.state.lastEventSeq, closedSeq);
+  await store.append({
+    type: "herdr.reconciled",
+    actor: { principalId: "prn_00000000000000000000000000", kind: "system" },
+    entityRefs: { agentId },
+    payload: {
+      agentId,
+      state: "missing",
+      reason: "Recorded pane is absent.",
+    },
+  });
+  await store.append({
+    type: "herdr.provision.outcome",
+    actor: { principalId: "prn_00000000000000000000000000", kind: "system" },
+    entityRefs: { agentId },
+    payload: {
+      agentId,
+      state: "closing",
+      cleanupOutcome: "mutation_pending",
+      generation: 2,
+    },
+  });
+  assert.equal(store.state.herdrResources?.[agentId]?.state, "closed");
+  const replay = new EventStore(eventPath);
+  await replay.open();
+  assert.equal(replay.state.herdrResources?.[agentId]?.state, "closed");
+
+  const missingAgentId = createId("agt");
+  await store.append({
+    type: "herdr.provision.intent",
+    actor: { principalId: "prn_00000000000000000000000000", kind: "system" },
+    entityRefs: { agentId: missingAgentId },
+    payload: { agentId: missingAgentId },
+  });
+  await store.append({
+    type: "herdr.provision.outcome",
+    actor: { principalId: "prn_00000000000000000000000000", kind: "system" },
+    entityRefs: { agentId: missingAgentId },
+    payload: {
+      agentId: missingAgentId,
+      state: "registered",
+      paneId: "pane-m",
+      terminalId: "terminal-m",
+      generation: 1,
+    },
+  });
+  await store.append({
+    type: "herdr.reconciled",
+    actor: { principalId: "prn_00000000000000000000000000", kind: "system" },
+    entityRefs: { agentId: missingAgentId },
+    payload: {
+      agentId: missingAgentId,
+      state: "missing",
+      reason: "Recorded pane is absent.",
+    },
+  });
+  await service.close({ paneId: "pane-m", terminalId: "terminal-m" });
+  assert.equal(closeCount, 1);
+  assert.equal(store.state.herdrResources?.[missingAgentId]?.state, "closed");
+  assert.equal(
+    store.state.herdrResources?.[missingAgentId]?.cleanupOutcome,
+    "already_absent",
+  );
+
+  const movedAgentId = createId("agt");
+  await store.append({
+    type: "herdr.provision.intent",
+    actor: { principalId: "prn_00000000000000000000000000", kind: "system" },
+    entityRefs: { agentId: movedAgentId },
+    payload: { agentId: movedAgentId },
+  });
+  await store.append({
+    type: "herdr.provision.outcome",
+    actor: { principalId: "prn_00000000000000000000000000", kind: "system" },
+    entityRefs: { agentId: movedAgentId },
+    payload: {
+      agentId: movedAgentId,
+      ownerId: movedAgentId,
+      state: "registered",
+      paneId: "pane-old",
+      terminalId: "terminal-old",
+      generation: 1,
+    },
+  });
+  await store.append({
+    type: "herdr.reconciled",
+    actor: { principalId: "prn_00000000000000000000000000", kind: "system" },
+    entityRefs: { agentId: movedAgentId },
+    payload: {
+      agentId: movedAgentId,
+      state: "missing",
+      reason: "Recorded pane is absent.",
+    },
+  });
+  livePanes = [
+    {
+      id: "pane-new",
+      terminalId: "terminal-new",
+      occupant: { agentId: movedAgentId, terminalId: "terminal-new" },
+    },
+  ];
+  liveAgents = [
+    {
+      agentId: movedAgentId,
+      paneId: "pane-new",
+      terminalId: "terminal-new",
+    },
+  ];
+  await assert.rejects(
+    service.close({ paneId: "pane-old", terminalId: "terminal-old" }),
+    /HERDR_IDENTITY_MISMATCH/,
+  );
+  assert.equal(closeCount, 1);
+  assert.equal(store.state.herdrResources?.[movedAgentId]?.state, "missing");
+
+  const worktreeAgentId = createId("agt");
+  await store.append({
+    type: "herdr.provision.intent",
+    actor: { principalId: "prn_00000000000000000000000000", kind: "system" },
+    entityRefs: { agentId: worktreeAgentId },
+    payload: { agentId: worktreeAgentId },
+  });
+  await store.append({
+    type: "herdr.provision.outcome",
+    actor: { principalId: "prn_00000000000000000000000000", kind: "system" },
+    entityRefs: { agentId: worktreeAgentId },
+    payload: {
+      agentId: worktreeAgentId,
+      ownerId: worktreeAgentId,
+      state: "registered",
+      paneId: "pane-worktree",
+      terminalId: "terminal-worktree",
+      workspaceId: "workspace-worktree",
+      worktreeId: "worktree-id",
+      worktreePath: "/repo/worktree",
+      generation: 1,
+    },
+  });
+  await store.append({
+    type: "herdr.reconciled",
+    actor: { principalId: "prn_00000000000000000000000000", kind: "system" },
+    entityRefs: { agentId: worktreeAgentId },
+    payload: {
+      agentId: worktreeAgentId,
+      state: "missing",
+      reason: "Recorded pane is absent.",
+    },
+  });
+  livePanes = [];
+  liveAgents = [];
+  liveWorkspaces = [{ id: "workspace-worktree" }];
+  await assert.rejects(
+    service.close({
+      paneId: "pane-worktree",
+      terminalId: "terminal-worktree",
+    }),
+    /HERDR_IDENTITY_MISMATCH/,
+  );
+  liveWorkspaces = [];
+  await assert.rejects(
+    service.close({
+      paneId: "pane-worktree",
+      terminalId: "terminal-worktree",
+    }),
+    /HERDR_IDENTITY_MISMATCH/,
+  );
+  worktreeInventoryPresent = true;
+  liveWorktrees = [];
+  await service.close({
+    paneId: "pane-worktree",
+    terminalId: "terminal-worktree",
+  });
+  assert.equal(closeCount, 1);
+  assert.equal(store.state.herdrResources?.[worktreeAgentId]?.state, "closed");
+  assert.equal(
+    store.state.herdrResources?.[worktreeAgentId]?.cleanupOutcome,
+    "already_absent",
+  );
 });
 
 test("M2 token digest is the only durable token value", () => {

@@ -806,6 +806,62 @@ export class HerdrService {
       const resource = agentId.startsWith("pane:")
         ? undefined
         : this.resources[agentId];
+      if (resource?.state === "closed") return;
+      if (resource?.state === "missing") {
+        const snapshot = await this.#cli.snapshot();
+        const terminalId = guard.terminalId ?? resource.terminalId;
+        const expectedAgentId = resource.ownerId ?? resource.agentId;
+        const recordedLocationPresent =
+          snapshot.panes.some(
+            (pane) =>
+              pane.id === guard.paneId ||
+              (terminalId !== undefined &&
+                (pane.terminalId === terminalId ||
+                  pane.occupant?.terminalId === terminalId)),
+          ) ||
+          snapshot.agents.some(
+            (agent) =>
+              agent.paneId === guard.paneId ||
+              (terminalId !== undefined && agent.terminalId === terminalId),
+          );
+        const managedIdentityPresent =
+          snapshot.agents.some((agent) => agent.agentId === expectedAgentId) ||
+          snapshot.panes.some(
+            (pane) => pane.occupant?.agentId === expectedAgentId,
+          );
+        const recordedWorkspacePresent =
+          resource.workspaceId !== undefined &&
+          snapshot.workspaces.some(
+            (workspace) => workspace.id === resource.workspaceId,
+          );
+        const hasRecordedWorktree =
+          resource.worktreeId !== undefined ||
+          resource.worktreePath !== undefined;
+        const recordedWorktreePresent =
+          (resource.worktreeId !== undefined &&
+            snapshot.worktrees.some(
+              (worktree) => worktree.id === resource.worktreeId,
+            )) ||
+          (resource.worktreePath !== undefined &&
+            snapshot.worktrees.some(
+              (worktree) => worktree.path === resource.worktreePath,
+            ));
+        const worktreeAbsenceProven =
+          !hasRecordedWorktree ||
+          (snapshot.worktreeInventoryPresent === true &&
+            !recordedWorktreePresent);
+        if (!recordedLocationPresent) {
+          if (
+            managedIdentityPresent ||
+            recordedWorkspacePresent ||
+            recordedWorktreePresent ||
+            !worktreeAbsenceProven
+          )
+            throw new Error("HERDR_IDENTITY_MISMATCH");
+          await this.recordLifecycle(agentId, "closed", "already_absent");
+          return;
+        }
+      }
       if (resource?.dirty) throw new Error("HERDR_DIRTY_WORKTREE");
       if (resource?.worktreeId && !resource.worktreePath)
         throw new Error("HERDR_GIT_EVIDENCE_UNKNOWN");
@@ -834,7 +890,6 @@ export class HerdrService {
           );
         }
       }
-      if (resource?.state === "closed") return;
       if (!agentId.startsWith("pane:"))
         await this.recordLifecycle(
           agentId,

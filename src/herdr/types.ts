@@ -78,6 +78,7 @@ export interface HerdrSnapshot {
   panes: HerdrPane[];
   agents: HerdrAgent[];
   worktrees: HerdrWorktree[];
+  worktreeInventoryPresent?: boolean;
   [key: string]: unknown;
 }
 export interface HerdrEvent {

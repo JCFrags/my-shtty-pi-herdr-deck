@@ -99,6 +99,7 @@ export function normalizeAgent(raw: unknown): HerdrAgent | undefined {
     terminalId = id(r, "terminal_id", "terminalId"),
     workspaceId = id(r, "workspace_id", "workspaceId"),
     tabId = id(r, "tab_id", "tabId"),
+    agentId = id(r, "agent_id", "agentId"),
     kind = str(r.kind ?? r.agent),
     sessionId = id(r, "session_id", "sessionId"),
     rawSession = record(r.agent_session ?? r.sessionReference),
@@ -113,6 +114,7 @@ export function normalizeAgent(raw: unknown): HerdrAgent | undefined {
         ...(terminalId ? { terminalId } : {}),
         ...(workspaceId ? { workspaceId } : {}),
         ...(tabId ? { tabId } : {}),
+        ...(agentId ? { agentId } : {}),
         ...(kind ? { kind } : {}),
         ...(sessionId ? { sessionId } : {}),
         ...(sessionSource && sessionAgent && sessionKind && sessionValue
@@ -169,6 +171,7 @@ export function normalizeSnapshot(raw: unknown): HerdrSnapshot {
       const x = normalizeWorktree(v);
       return x ? [x] : [];
     }),
+    worktreeInventoryPresent: Array.isArray(root.worktrees),
   } as HerdrSnapshot;
 }
 export function normalizeEvent(raw: unknown): HerdrEvent | undefined {
