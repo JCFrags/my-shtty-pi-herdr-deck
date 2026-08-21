@@ -189,4 +189,96 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
     assert.equal(Object.hasOwn(call.params, "parentAgentId"), false);
     assert.equal(typeof call.options?.idempotencyKey, "string");
   }
+  const delegateTool = tools.find((item) => item.name === "delegate");
+  const stepProfile = (
+    delegateTool?.parameters as {
+      properties?: {
+        steps?: {
+          items?: { properties?: { profileId?: { enum?: string[] } } };
+        };
+      };
+    }
+  ).properties?.steps?.items?.properties?.profileId?.enum;
+  assert.deepEqual(stepProfile, [
+    "implementer",
+    "planner",
+    "reviewer",
+    "scout",
+    "test-runner",
+  ]);
+});
+
+test("delegate wait polls task state through automatic execution", async () => {
+  const tools: Array<{
+    name: string;
+    parameters: unknown;
+    execute: (...args: never[]) => Promise<any>;
+  }> = [];
+  let taskPolls = 0;
+  const calls: string[] = [];
+  const client = {
+    connected: true,
+    principal: {
+      id: "principal",
+      kind: "pi_parent" as const,
+      permissions: ["delegate", "read:state"],
+      agentId: "parent",
+    },
+    request: async (method: string) => {
+      calls.push(method);
+      if (method === "delegate.execute")
+        return {
+          workflowId: "wfl_test",
+          state: "running",
+          tasks: [{ key: "one", taskId: "tsk_test", state: "provisioning" }],
+        };
+      if (method === "task.get") {
+        taskPolls++;
+        if (taskPolls === 1)
+          throw Object.assign(new Error("AGENT_DISCONNECTED"), {
+            code: "AGENT_DISCONNECTED",
+            retryable: true,
+          });
+        return {
+          id: "tsk_test",
+          state: taskPolls === 2 ? "running" : "succeeded",
+        };
+      }
+      throw new Error(`unexpected method ${method}`);
+    },
+  };
+  registerParentTools(
+    {
+      registerTool: (definition: (typeof tools)[number]) =>
+        tools.push(definition),
+    } as never,
+    { safeState: () => state } as never,
+    client as never,
+  );
+  const delegateTool = tools.find((item) => item.name === "delegate");
+  assert.ok(delegateTool);
+  const output = await (
+    delegateTool.execute as unknown as (...args: unknown[]) => Promise<any>
+  )(
+    "wait-delegate",
+    {
+      ...inputs.delegate,
+      mode: "single",
+      wait: true,
+      dryRun: false,
+      waitUntil: ["terminal", "blocked"],
+      timeoutMs: 5_000,
+    },
+    AbortSignal.timeout(6_000),
+    undefined,
+    {},
+  );
+  assert.equal(output.details.state, "succeeded");
+  assert.equal(output.details.tasks[0].state, "succeeded");
+  assert.deepEqual(calls, [
+    "delegate.execute",
+    "task.get",
+    "task.get",
+    "task.get",
+  ]);
 });

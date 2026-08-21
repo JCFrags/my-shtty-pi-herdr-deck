@@ -15,6 +15,7 @@ import type { PiAdapter } from "./adapter.js";
 import type { CorrelationState } from "./correlation.js";
 import type { PiBrokerClient } from "./broker-client.js";
 import type { PiApiLike, PiContextLike } from "./types.js";
+import { SHIPPED_TASK_PROFILES } from "../broker/model-policy.js";
 
 const MAX_BODY_BYTES = 262_144;
 const MAX_TEXT_BYTES = 16_384;
@@ -494,7 +495,7 @@ function validateExactNested(input: Record<string, unknown>): void {
               "budgets",
             ]
           : key === "select"
-            ? ["summary", "status", "result"]
+            ? ["taskId", "state", "summary", "status", "result"]
             : undefined;
       if (allowed && value.some((item) => !allowed.includes(item as string)))
         throw new Error("INVALID_REQUEST");
@@ -564,6 +565,8 @@ function validateExactNested(input: Record<string, unknown>): void {
         );
         assertInputString(step.key, 256);
         assertInputString(step.profileId, 256);
+        if (!SHIPPED_TASK_PROFILES.includes(step.profileId as string))
+          throw new Error("INVALID_REQUEST");
         assertInputString(step.title);
         assertInputString(step.objective);
         if (
@@ -780,6 +783,8 @@ function validateParentInput(
       )
     )
       throw new Error("INVALID_REQUEST");
+    if (key === "profileId" && !SHIPPED_TASK_PROFILES.includes(value as string))
+      throw new Error("INVALID_REQUEST");
     if (
       key === "delivery" &&
       !["normal", "steer", "follow_up"].includes(value as string)
@@ -896,6 +901,8 @@ function schemaForKey(key: string): unknown {
     };
   if (["delivery"].includes(key))
     return { type: "string", enum: ["normal", "steer", "follow_up"] };
+  if (key === "profileId")
+    return { type: "string", enum: [...SHIPPED_TASK_PROFILES] };
   if (key === "modelProfileId")
     return { type: "string", enum: ["manager", "subagent"] };
   if (key === "placement")
@@ -940,7 +947,16 @@ function schemaForKey(key: string): unknown {
         ],
       },
     };
-  if (["ids", "taskIds", "select", "agentIds", "followUps"].includes(key))
+  if (key === "select")
+    return {
+      type: "array",
+      maxItems: 64,
+      items: {
+        type: "string",
+        enum: ["taskId", "state", "summary", "status", "result"],
+      },
+    };
+  if (["ids", "taskIds", "agentIds", "followUps"].includes(key))
     return {
       type: "array",
       maxItems: 64,
@@ -957,7 +973,7 @@ function schemaForKey(key: string): unknown {
         required: ["key", "profileId", "title", "objective"],
         properties: {
           key: { type: "string", maxLength: 256 },
-          profileId: { type: "string", maxLength: 256 },
+          profileId: { type: "string", enum: [...SHIPPED_TASK_PROFILES] },
           title: { type: "string", maxLength: MAX_TEXT_BYTES },
           objective: { type: "string", maxLength: MAX_TEXT_BYTES },
           constraints: {
@@ -1742,6 +1758,99 @@ function executeParentWaitRequest(
   });
 }
 
+async function waitForDelegation(
+  service: ParentToolService,
+  response: ParentToolResponse,
+  principal: ToolPrincipal,
+  signal: AbortSignal,
+  timeoutMs: number,
+  waitUntil: readonly string[],
+): Promise<ParentToolResponse> {
+  if (!response.ok) return response;
+  const initial = response.result as Record<string, unknown> | undefined;
+  const initialTasks = Array.isArray(initial?.tasks) ? initial.tasks : [];
+  const taskIds = initialTasks
+    .map((item) =>
+      item && typeof item === "object" && !Array.isArray(item)
+        ? (item as Record<string, unknown>).taskId
+        : undefined,
+    )
+    .filter((id): id is string => typeof id === "string");
+  if (taskIds.length === 0) return response;
+  const wanted = new Set(waitUntil);
+  const terminal = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
+  const deadline = Date.now() + timeoutMs;
+  let latestTasks = initialTasks;
+  while (Date.now() < deadline) {
+    const snapshots: Record<string, unknown>[] = [];
+    for (const taskId of taskIds) {
+      let next: ParentToolResponse | undefined;
+      do {
+        next = await executeParentWaitRequest(
+          service,
+          { tool: "task_get", input: { taskId } },
+          principal,
+          signal,
+          deadline,
+        );
+        if (!next) throw new Error("WAIT_TIMEOUT");
+        if (
+          !next.ok &&
+          next.error?.code === "AGENT_DISCONNECTED" &&
+          Date.now() < deadline
+        ) {
+          await waitForParentPoll(
+            Math.min(100, Math.max(1, deadline - Date.now())),
+            signal,
+          );
+          next = undefined;
+        }
+      } while (!next);
+      if (!next.ok) return next;
+      if (next.result && typeof next.result === "object")
+        snapshots.push(next.result as Record<string, unknown>);
+    }
+    latestTasks = initialTasks.map((item) => {
+      const initialTask = item as Record<string, unknown>;
+      const snapshot = snapshots.find(
+        (candidate) => candidate.id === initialTask.taskId,
+      );
+      return snapshot
+        ? {
+            ...initialTask,
+            ...(typeof snapshot.state === "string"
+              ? { state: snapshot.state }
+              : {}),
+          }
+        : initialTask;
+    });
+    const states = snapshots.map((task) => String(task.state));
+    const blocked = states.some((state) => state === "blocked");
+    const allTerminal =
+      states.length === taskIds.length &&
+      states.every((state) => terminal.has(state));
+    if (
+      (wanted.has("blocked") && blocked) ||
+      (wanted.has("terminal") && allTerminal)
+    ) {
+      const state = blocked
+        ? "blocked"
+        : states.every((item) => item === "succeeded")
+          ? "succeeded"
+          : "failed";
+      return {
+        ...response,
+        result: { ...initial, state, tasks: latestTasks },
+      };
+    }
+    await waitForParentPoll(
+      Math.min(100, Math.max(1, deadline - Date.now())),
+      signal,
+    );
+  }
+  throw new Error("WAIT_TIMEOUT");
+}
+
 export function registerParentTools(
   api: PiApiLike,
   adapterOrBinding: PiAdapter | PiToolBinding,
@@ -1875,7 +1984,25 @@ export function registerParentTools(
             if (!next) break;
             response = next;
           }
-        } else response = await service.execute(request, principal, signal);
+        } else {
+          response = await service.execute(request, principal, signal);
+          if (
+            (tool === "delegate" || tool === "delegate_compact") &&
+            raw.wait === true &&
+            raw.dryRun !== true &&
+            response.ok
+          )
+            response = await waitForDelegation(
+              service,
+              response,
+              principal,
+              signal,
+              typeof raw.timeoutMs === "number" ? raw.timeoutMs : 120_000,
+              Array.isArray(raw.waitUntil)
+                ? (raw.waitUntil as string[])
+                : ["terminal", "blocked"],
+            );
+        }
         if (!response.ok) {
           const error = boundedSecretFree(
             response.error ?? {

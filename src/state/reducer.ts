@@ -213,7 +213,7 @@ export function reduce(
         if (
           typeof taskId !== "string" ||
           !/^tsk_[A-Za-z0-9_-]{1,128}$/u.test(taskId) ||
-          Object.keys(definition).length !== 10 ||
+          ![10, 11].includes(Object.keys(definition).length) ||
           ![
             "taskId",
             "title",
@@ -226,6 +226,22 @@ export function reduce(
             "project",
             "timeoutAt",
           ].every((field) => Object.hasOwn(definition, field)) ||
+          Object.keys(definition).some(
+            (field) =>
+              ![
+                "taskId",
+                "title",
+                "objective",
+                "createdAt",
+                "parentAgentId",
+                "workflowId",
+                "profileId",
+                "constraints",
+                "dependencies",
+                "project",
+                "timeoutAt",
+              ].includes(field),
+          ) ||
           tasks[taskId] ||
           definition.workflowId !== workflowId ||
           definition.parentAgentId !== parentAgentId ||
@@ -238,6 +254,14 @@ export function reduce(
           typeof definition.createdAt !== "string" ||
           !Number.isFinite(Date.parse(definition.createdAt)) ||
           typeof definition.profileId !== "string" ||
+          (definition.constraints !== undefined &&
+            (!Array.isArray(definition.constraints) ||
+              definition.constraints.length > 64 ||
+              definition.constraints.some(
+                (item) =>
+                  typeof item !== "string" ||
+                  Buffer.byteLength(item, "utf8") > 8_192,
+              ))) ||
           !Array.isArray(definition.dependencies) ||
           definition.dependencies.some((item) => typeof item !== "string") ||
           !project ||
@@ -284,6 +308,9 @@ export function reduce(
           parentAgentId,
           workflowId,
           profileId: definition.profileId,
+          constraints: Array.isArray(definition.constraints)
+            ? [...definition.constraints]
+            : [],
           dependencies: [...(definition.dependencies as string[])],
           timeoutAt: definition.timeoutAt,
           project,
@@ -496,6 +523,13 @@ export function reduce(
             : {}),
           ...(typeof p.profileId === "string"
             ? { profileId: p.profileId }
+            : {}),
+          ...(Array.isArray(p.constraints)
+            ? {
+                constraints: p.constraints.filter(
+                  (value): value is string => typeof value === "string",
+                ),
+              }
             : {}),
           ...(typeof p.isolationMode === "string" &&
           [
