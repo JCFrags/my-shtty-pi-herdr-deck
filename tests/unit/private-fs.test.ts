@@ -1,9 +1,41 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
-import { readPrivateLines } from "../../src/shared/private-fs.js";
+import {
+  readPrivateLines,
+  replacePrivateRegular,
+} from "../../src/shared/private-fs.js";
+
+test("replacePrivateRegular preserves private mode and refuses a symlink", async () => {
+  const root = await mkdtemp(join(tmpdir(), "private-fs-replace-"));
+  const path = join(root, "config.json");
+  const target = join(root, "target.json");
+  try {
+    await writeFile(path, "old\n", { mode: 0o600 });
+    await replacePrivateRegular(path, "new\n");
+    assert.equal(await readFile(path, "utf8"), "new\n");
+    assert.equal((await lstat(path)).mode & 0o777, 0o600);
+    await rm(path);
+    await writeFile(target, "keep\n", { mode: 0o600 });
+    await symlink(target, path);
+    await assert.rejects(
+      replacePrivateRegular(path, "bad\n"),
+      /Unsafe private file/u,
+    );
+    assert.equal(await readFile(target, "utf8"), "keep\n");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("readPrivateLines closes one owned stream on early generator cancellation", async () => {
   const root = await mkdtemp(join(tmpdir(), "private-fs-cancel-"));

@@ -177,6 +177,25 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "defaults": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "global": { "$ref": "#/$defs/modelSelection" },
+            "roles": {
+              "type": "object",
+              "propertyNames": { "pattern": "^[a-z][a-z0-9_-]{0,63}$" },
+              "additionalProperties": { "$ref": "#/$defs/modelSelection" }
+            },
+            "projects": {
+              "type": "object",
+              "propertyNames": {
+                "pattern": "^/[^\\u0000-\\u001F\\u007F]{0,4095}$"
+              },
+              "additionalProperties": { "$ref": "#/$defs/modelSelection" }
+            }
+          }
+        },
         "profiles": {
           "type": "object",
           "additionalProperties": false,
@@ -201,6 +220,13 @@
             "items": { "enum": ["manager", "subagent"] }
           }
         }
+      }
+    },
+    "lifecyclePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "autoCloseCompletedTemporary": { "type": "boolean", "default": false }
       }
     },
     "ui": {
@@ -249,7 +275,7 @@
         "provider": { "type": "string", "minLength": 1, "maxLength": 128 },
         "modelId": { "type": "string", "minLength": 1, "maxLength": 256 },
         "thinkingLevel": {
-          "enum": ["off", "minimal", "low", "medium", "high", "xhigh"]
+          "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
         }
       }
     }

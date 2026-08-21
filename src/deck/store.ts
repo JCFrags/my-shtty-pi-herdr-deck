@@ -189,7 +189,28 @@ export class DeckStore {
         state: "queued",
         createdAt: String(data.createdAt ?? event.timestamp ?? ""),
       });
-    else if (event.event === "task.state_changed" && taskId) {
+    else if (event.event === "task.collected" && taskId) {
+      const item = next.tasks.get(taskId);
+      if (item && typeof data.collectedAt === "string") {
+        const updated = { ...item, resultCollectedAt: data.collectedAt };
+        next.tasks.set(item.id, updated);
+        if (updated.assignedAgentId) {
+          const agent = next.agents.get(updated.assignedAgentId);
+          if (
+            agent &&
+            (agent.lifecycleClass ?? "temporary") === "temporary" &&
+            !agent.keepForReuse &&
+            agent.state !== "blocked"
+          )
+            next.agents.set(agent.id, {
+              ...agent,
+              closeRecommendation: "close",
+              closeReason:
+                "The temporary task is complete and its result was collected.",
+            });
+        }
+      }
+    } else if (event.event === "task.state_changed" && taskId) {
       const item = next.tasks.get(taskId);
       if (item && typeof data.to === "string")
         next.tasks.set(item.id, { ...item, state: data.to as Task["state"] });

@@ -74,16 +74,34 @@ function validTaskProject(value: unknown): boolean {
   const modelPolicyKeys = hasModelPolicy
     ? ["requestedSpawnPolicy", "effectiveSpawnPolicy", "modelPolicyHash"]
     : [];
+  const lifecycleKeys = Object.hasOwn(project, "lifecycleClass")
+    ? ["lifecycleClass", "keepForReuse"]
+    : [];
   const baseKeys = ["cwd", "workspaceId"];
   if (
-    !exactKeys(project, [...baseKeys, ...modelPolicyKeys]) &&
-    !exactKeys(project, [...baseKeys, "isolation", ...modelPolicyKeys]) &&
+    !exactKeys(project, [...baseKeys, ...modelPolicyKeys, ...lifecycleKeys]) &&
+    !exactKeys(project, [
+      ...baseKeys,
+      "isolation",
+      ...modelPolicyKeys,
+      ...lifecycleKeys,
+    ]) &&
     !exactKeys(project, [
       ...baseKeys,
       "worktreeId",
       "isolation",
       ...modelPolicyKeys,
+      ...lifecycleKeys,
     ])
+  )
+    return false;
+  if (
+    (project.lifecycleClass !== undefined &&
+      !["temporary", "reusable", "retained", "pinned"].includes(
+        project.lifecycleClass as string,
+      )) ||
+    (project.keepForReuse !== undefined &&
+      typeof project.keepForReuse !== "boolean")
   )
     return false;
   if (
@@ -112,7 +130,7 @@ function validTaskProject(value: unknown): boolean {
   if (
     !exactKeys(
       requestedRecord,
-      ["placement", "modelProfileId"].filter((key) =>
+      ["placement", "modelProfileId", "projectKey", "model"].filter((key) =>
         Object.hasOwn(requestedRecord, key),
       ),
     ) ||
@@ -121,7 +139,30 @@ function validTaskProject(value: unknown): boolean {
       requestedRecord.placement !== "new-workspace") ||
     (requestedRecord.modelProfileId !== undefined &&
       requestedRecord.modelProfileId !== "manager" &&
-      requestedRecord.modelProfileId !== "subagent")
+      requestedRecord.modelProfileId !== "subagent") ||
+    (requestedRecord.projectKey !== undefined &&
+      !boundedText(requestedRecord.projectKey, 4096)) ||
+    (requestedRecord.model !== undefined &&
+      (!requestedRecord.model ||
+        typeof requestedRecord.model !== "object" ||
+        Array.isArray(requestedRecord.model) ||
+        !exactKeys(requestedRecord.model as Record<string, unknown>, [
+          "provider",
+          "modelId",
+          "thinkingLevel",
+        ]) ||
+        !boundedText(
+          (requestedRecord.model as Record<string, unknown>).provider,
+          128,
+        ) ||
+        !boundedText(
+          (requestedRecord.model as Record<string, unknown>).modelId,
+          256,
+        ) ||
+        !boundedText(
+          (requestedRecord.model as Record<string, unknown>).thinkingLevel,
+          32,
+        )))
   )
     return false;
   const effectiveRecord = effective as Record<string, unknown>;

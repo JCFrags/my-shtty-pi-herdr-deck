@@ -62,7 +62,8 @@ export interface RegistrationRetentionStatus {
   maxBytes: number;
   maxAgeMs: number;
 }
-const DEFAULT_SUBAGENT_MODEL: ModelSelection = Object.freeze({
+/** Low-level rollback compatibility only. Broker creation always supplies the resolved scoped model. */
+const ROLLBACK_COMPATIBILITY_MODEL: ModelSelection = Object.freeze({
   provider: "openai-codex",
   modelId: "gpt-5.6-luna",
   thinkingLevel: "medium",
@@ -234,7 +235,7 @@ export class HerdrProvisioner {
   async provision(input: ProvisionInput): Promise<ProvisionResult> {
     assertReuseWorktreeIdentity(input);
     assertManagedEnvironmentNotOverridden(input);
-    const selectedModel = input.model ?? DEFAULT_SUBAGENT_MODEL;
+    const selectedModel = input.model ?? ROLLBACK_COMPATIBILITY_MODEL;
     await this.piCapabilities.validate(selectedModel);
     await mkdir(this.promptRoot, { recursive: true, mode: 0o700 });
     const canonicalRoot = await realpath(resolve(this.promptRoot));

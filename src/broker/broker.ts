@@ -81,6 +81,11 @@ import {
   type CompactPolicyContext,
 } from "./compact-delegation.js";
 import {
+  agentWithLifecycle,
+  projectAgentLifecycle,
+} from "./agent-lifecycle.js";
+import { InstalledPiCapabilities } from "../pi/model-capabilities.js";
+import {
   modelSelectionMatches,
   resolveSpawnPolicy,
   validateModelSelection,
@@ -512,6 +517,11 @@ export interface BrokerOptions {
     paths: CanonicalResolvedPaths,
   ) => Promise<HerdrService>;
   modelPolicy?: ModelPolicyConfig;
+  lifecyclePolicy?: { autoCloseCompletedTemporary?: boolean };
+  persistModelPolicy?: (policy: ModelPolicyConfig) => Promise<void>;
+  persistLifecyclePolicy?: (policy: {
+    autoCloseCompletedTemporary?: boolean;
+  }) => Promise<void>;
   compactDelegationEnabled?: boolean;
 }
 export class Broker {
@@ -541,7 +551,14 @@ export class Broker {
   #setTimeout: (callback: () => void, delayMs: number) => NodeJS.Timeout;
   #clearTimeout: (timer: NodeJS.Timeout) => void;
   #herdr?: HerdrService;
-  readonly #modelPolicy: ModelPolicyConfig;
+  #modelPolicy: ModelPolicyConfig;
+  readonly #piCapabilities = new InstalledPiCapabilities();
+  readonly #persistModelPolicy:
+    ((policy: ModelPolicyConfig) => Promise<void>) | undefined;
+  readonly #persistLifecyclePolicy:
+    | ((policy: { autoCloseCompletedTemporary?: boolean }) => Promise<void>)
+    | undefined;
+  #autoCloseCompletedTemporary: boolean;
   readonly #compactDelegationEnabled: boolean;
   readonly #herdrFactory:
     | ((
@@ -570,6 +587,10 @@ export class Broker {
       ((callback, delayMs) => setTimeout(callback, delayMs));
     this.#clearTimeout = options.clearTimeout ?? clearTimeout;
     this.#modelPolicy = options.modelPolicy ?? {};
+    this.#persistModelPolicy = options.persistModelPolicy;
+    this.#persistLifecyclePolicy = options.persistLifecyclePolicy;
+    this.#autoCloseCompletedTemporary =
+      options.lifecyclePolicy?.autoCloseCompletedTemporary === true;
     this.#compactDelegationEnabled =
       options.compactDelegationEnabled ??
       process.env.PI_HERDR_COMPACT_DELEGATION !== "0";
@@ -1993,9 +2014,11 @@ export class Broker {
             ? {
                 snapshot: {
                   seq: currentSeq,
-                  agents: Object.values(this.store.state.agents).filter(
-                    (item) => this.#canAccessAgentSync(principal, item.id),
-                  ),
+                  agents: Object.values(this.store.state.agents)
+                    .filter((item) =>
+                      this.#canAccessAgentSync(principal, item.id),
+                    )
+                    .map((item) => agentWithLifecycle(item, this.store.state)),
                   tasks: Object.values(this.store.state.tasks).filter((item) =>
                     this.#canAccessTaskSync(principal, item.id),
                   ),
@@ -2972,13 +2995,104 @@ export class Broker {
             };
           }
         }
+      } else if (request.method === "model.capabilities") {
+        requirePermission(principal, "read:state");
+        result = await this.#piCapabilities.snapshot();
+      } else if (request.method === "model.policy.get") {
+        requirePermission(principal, "read:state");
+        result = {
+          policy: this.#modelPolicy,
+          lifecyclePolicy: {
+            autoCloseCompletedTemporary: this.#autoCloseCompletedTemporary,
+          },
+          precedence: ["task", "project", "role", "global", "legacy-profile"],
+        };
+      } else if (request.method === "lifecycle.policy.set") {
+        requirePermission(principal, "configure");
+        const p = request.params;
+        if (
+          !exactKeys(p, ["autoCloseCompletedTemporary"]) ||
+          typeof p.autoCloseCompletedTemporary !== "boolean"
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Lifecycle policy is invalid.",
+          );
+        const nextPolicy = {
+          autoCloseCompletedTemporary: p.autoCloseCompletedTemporary,
+        };
+        if (this.#persistLifecyclePolicy)
+          await this.#persistLifecyclePolicy(nextPolicy);
+        this.#autoCloseCompletedTemporary = p.autoCloseCompletedTemporary;
+        result = {
+          accepted: true,
+          persisted: Boolean(this.#persistLifecyclePolicy),
+          lifecyclePolicy: nextPolicy,
+        };
+      } else if (request.method === "model.policy.set") {
+        requirePermission(principal, "configure");
+        const p = request.params;
+        if (
+          !exactKeys(p, ["scope", "key", "model"]) ||
+          !["global", "role", "project"].includes(String(p.scope))
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Model default scope is invalid.",
+          );
+        const model = validateModelSelection(p.model);
+        await this.#piCapabilities.validate(model);
+        if (
+          this.#modelPolicy.allowlist &&
+          !this.#modelPolicy.allowlist.some(
+            (allowed) =>
+              allowed.provider === model.provider &&
+              allowed.modelId === model.modelId &&
+              allowed.thinkingLevel === model.thinkingLevel,
+          )
+        )
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "The model selection is not in the configured allowlist.",
+          );
+        const defaults = { ...(this.#modelPolicy.defaults ?? {}) };
+        if (p.scope === "global") defaults.global = model;
+        else {
+          const validKey =
+            p.scope === "project"
+              ? safeText(p.key, 4096) && (p.key as string).startsWith("/")
+              : typeof p.key === "string" &&
+                /^[a-z][a-z0-9_-]{0,63}$/u.test(p.key);
+          if (!validKey)
+            throw new OrchestratorError(
+              "INVALID_REQUEST",
+              "Model default key is invalid.",
+            );
+          const field = p.scope === "role" ? "roles" : "projects";
+          defaults[field] = {
+            ...(defaults[field] ?? {}),
+            [p.key as string]: model,
+          };
+        }
+        const nextPolicy = { ...this.#modelPolicy, defaults };
+        if (this.#persistModelPolicy)
+          await this.#persistModelPolicy(nextPolicy);
+        this.#modelPolicy = nextPolicy;
+        result = {
+          accepted: true,
+          persisted: Boolean(this.#persistModelPolicy),
+          policy: this.#modelPolicy,
+        };
       } else if (request.method === "agent.list") {
         requirePermission(principal, "read:state");
         const items = (
           await Promise.all(
             Object.values(this.store.state.agents).map(async (agent) =>
               (await this.#canAccessAgent(principal, agent.id))
-                ? { ...agent, tokenDigest: undefined }
+                ? {
+                    ...agentWithLifecycle(agent, this.store.state),
+                    tokenDigest: undefined,
+                  }
                 : undefined,
             ),
           )
@@ -3006,7 +3120,10 @@ export class Broker {
             "PERMISSION_DENIED",
             "Agent is outside the descendant scope.",
           );
-        result = { ...agent, tokenDigest: undefined };
+        result = {
+          ...agentWithLifecycle(agent, this.store.state),
+          tokenDigest: undefined,
+        };
       } else if (
         request.method === "agent.prompt" ||
         request.method === "agent.steer" ||
@@ -4221,6 +4338,58 @@ export class Broker {
             "LIMIT_EXCEEDED",
             "Collection cannot fit the requested output bound.",
           );
+        const collectedAt = new Date(this.#now()).toISOString();
+        const collectedTaskIds = bounded.flatMap((item) => {
+          const row = item as {
+            taskId?: unknown;
+            result?: unknown;
+            truncated?: unknown;
+          };
+          return typeof row.taskId === "string" &&
+            row.result &&
+            row.truncated !== true
+            ? [row.taskId]
+            : [];
+        });
+        for (const taskId of collectedTaskIds)
+          await this.store.append({
+            type: "task.collected",
+            actor: { principalId: principal.id, kind: principal.kind },
+            entityRefs: { taskId },
+            payload: { taskId, collectedAt },
+          });
+        if (this.#autoCloseCompletedTemporary && this.#herdr) {
+          for (const agent of Object.values(this.store.state.agents)) {
+            const recommendation = projectAgentLifecycle(
+              agent,
+              this.store.state,
+            );
+            const resource = this.store.state.herdrResources?.[agent.id];
+            if (
+              recommendation.closeRecommendation !== "close" ||
+              !resource?.paneId
+            )
+              continue;
+            await this.#herdr.close({
+              paneId: resource.paneId,
+              ...(resource.terminalId
+                ? { terminalId: resource.terminalId }
+                : {}),
+              ...(resource.sessionId ? { sessionId: resource.sessionId } : {}),
+            } as never);
+            if (
+              ["idle", "working", "blocked"].includes(
+                this.store.state.agents[agent.id]?.state ?? "",
+              )
+            )
+              await this.store.append({
+                type: "agent.state_changed",
+                actor: { principalId: principal.id, kind: principal.kind },
+                entityRefs: { agentId: agent.id },
+                payload: { agentId: agent.id, state: "stopping" },
+              });
+          }
+        }
         result = collection;
       } else if (
         request.method === "metadata.get" ||
@@ -4374,7 +4543,10 @@ export class Broker {
                 "task",
                 "profileId",
                 "modelProfileId",
+                "model",
                 "placement",
+                "lifecycleClass",
+                "keepForReuse",
                 "project",
                 "isolation",
                 "budget",
@@ -4460,9 +4632,24 @@ export class Broker {
             : undefined;
         if (
           request.method === "agent.spawn" &&
-          ((p.placement !== undefined &&
-            p.placement !== "current-workspace" &&
-            p.placement !== "new-workspace") ||
+          ((p.lifecycleClass !== undefined &&
+            !["temporary", "reusable", "retained", "pinned"].includes(
+              p.lifecycleClass as string,
+            )) ||
+            (p.keepForReuse !== undefined &&
+              typeof p.keepForReuse !== "boolean") ||
+            (p.model !== undefined &&
+              (() => {
+                try {
+                  validateModelSelection(p.model);
+                  return false;
+                } catch {
+                  return true;
+                }
+              })()) ||
+            (p.placement !== undefined &&
+              p.placement !== "current-workspace" &&
+              p.placement !== "new-workspace") ||
             (p.modelProfileId !== undefined &&
               p.modelProfileId !== "manager" &&
               p.modelProfileId !== "subagent"))
@@ -4567,6 +4754,10 @@ export class Broker {
                 p.modelProfileId === "subagent")
                 ? { modelProfileId: p.modelProfileId as ModelProfileId }
                 : {}),
+              ...(request.method === "agent.spawn" && p.model
+                ? { model: validateModelSelection(p.model) }
+                : {}),
+              projectKey: String(inheritedProject.cwd),
             },
             this.#modelPolicy,
           );
@@ -4614,6 +4805,14 @@ export class Broker {
               : [],
             isolation: resolveIsolation(profileId, requested),
             spawnPolicy,
+            lifecycleClass:
+              request.method === "agent.spawn" &&
+              typeof p.lifecycleClass === "string"
+                ? p.lifecycleClass
+                : "temporary",
+            keepForReuse:
+              request.method === "agent.spawn" &&
+              (p.keepForReuse === true || p.lifecycleClass === "reusable"),
           };
         });
         const taskIds = planned.map(() => createId("tsk"));
@@ -4795,6 +4994,12 @@ export class Broker {
                   requestedSpawnPolicy: step.spawnPolicy.requested,
                   effectiveSpawnPolicy: step.spawnPolicy.effective,
                   modelPolicyHash: step.spawnPolicy.policyHash,
+                  ...(!compact
+                    ? {
+                        lifecycleClass: step.lifecycleClass,
+                        keepForReuse: step.keepForReuse,
+                      }
+                    : {}),
                   ...(compact
                     ? {
                         compact: {
@@ -6677,6 +6882,11 @@ export class Broker {
           modelPolicyHash: safeText(project.modelPolicyHash, 64)
             ? project.modelPolicyHash
             : replayPolicy.policyHash,
+          lifecycleClass:
+            typeof project.lifecycleClass === "string"
+              ? project.lifecycleClass
+              : "temporary",
+          keepForReuse: project.keepForReuse === true,
         },
       });
       await this.store.append({

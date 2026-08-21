@@ -48,6 +48,44 @@ test("model policy defaults task agents to visible current-workspace Luna", () =
   assert.match(resolved.policyHash, /^[0-9a-f]{64}$/u);
 });
 
+test("scoped model defaults use task, project, role, then global precedence", () => {
+  const global = { ...luna, thinkingLevel: "low" as const };
+  const role = { ...luna, thinkingLevel: "high" as const };
+  const project = { ...sol, thinkingLevel: "xhigh" as const };
+  const explicit = { ...sol, thinkingLevel: "max" as const };
+  const config = {
+    defaults: {
+      global,
+      roles: { implementer: role },
+      projects: { "/project": project },
+    },
+    allowlist: [global, role, project, explicit],
+  };
+  assert.deepEqual(
+    resolveSpawnPolicy({ taskProfileId: "scout" }, config).effective.model,
+    global,
+  );
+  assert.deepEqual(
+    resolveSpawnPolicy({ taskProfileId: "implementer" }, config).effective
+      .model,
+    role,
+  );
+  assert.deepEqual(
+    resolveSpawnPolicy(
+      { taskProfileId: "implementer", projectKey: "/project" },
+      config,
+    ).effective.model,
+    project,
+  );
+  assert.deepEqual(
+    resolveSpawnPolicy(
+      { taskProfileId: "implementer", projectKey: "/project", model: explicit },
+      config,
+    ).effective.model,
+    explicit,
+  );
+});
+
 test("model policy assigns dedicated workspace agents to Sol", () => {
   const resolved = resolveSpawnPolicy({
     taskProfileId: "implementer",
@@ -84,8 +122,12 @@ test("model policy enforces optional task compatibility and the allowlist", () =
       resolveSpawnPolicy({ taskProfileId: "reviewer" }, { allowlist: [sol] }),
     /allowlist/u,
   );
+  assert.deepEqual(validateModelSelection({ ...sol, thinkingLevel: "max" }), {
+    ...sol,
+    thinkingLevel: "max",
+  });
   assert.throws(
-    () => validateModelSelection({ ...sol, thinkingLevel: "max" }),
+    () => validateModelSelection({ ...sol, thinkingLevel: "extreme" }),
     /invalid/u,
   );
 });
@@ -351,11 +393,20 @@ test("broker model configuration validates controlled overrides", () => {
     },
   });
   assert.deepEqual(config.modelPolicy?.profiles?.subagent, luna);
+  assert.deepEqual(
+    validateConfig({
+      version: 1,
+      modelPolicy: { defaults: { global: { ...sol, thinkingLevel: "max" } } },
+    }).modelPolicy?.defaults?.global,
+    { ...sol, thinkingLevel: "max" },
+  );
   assert.throws(
     () =>
       validateConfig({
         version: 1,
-        modelPolicy: { allowlist: [{ ...sol, thinkingLevel: "max" }] },
+        modelPolicy: {
+          defaults: { global: { ...sol, thinkingLevel: "extreme" } },
+        },
       }),
     /invalid/u,
   );

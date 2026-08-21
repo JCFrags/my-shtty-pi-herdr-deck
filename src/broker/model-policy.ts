@@ -21,7 +21,16 @@ export interface ModelSelection {
   readonly thinkingLevel: ThinkingLevel;
 }
 
+export interface ScopedModelDefaults {
+  readonly global?: ModelSelection;
+  readonly roles?: Readonly<Record<string, ModelSelection>>;
+  readonly projects?: Readonly<Record<string, ModelSelection>>;
+}
+
 export interface ModelPolicyConfig {
+  /** Scoped defaults. Explicit task selection has the highest precedence. */
+  readonly defaults?: ScopedModelDefaults;
+  /** Legacy profile defaults. Kept for rollback compatibility. */
   readonly profiles?: Partial<Record<ModelProfileId, ModelSelection>>;
   readonly allowlist?: readonly ModelSelection[];
   readonly compatibility?: Readonly<Record<string, readonly ModelProfileId[]>>;
@@ -31,12 +40,16 @@ export interface SpawnPolicyRequest {
   readonly taskProfileId: string;
   readonly placement?: AgentPlacement;
   readonly modelProfileId?: ModelProfileId;
+  readonly projectKey?: string;
+  readonly model?: ModelSelection;
 }
 
 export interface ResolvedSpawnPolicy {
   readonly requested: {
     readonly placement?: AgentPlacement;
     readonly modelProfileId?: ModelProfileId;
+    readonly projectKey?: string;
+    readonly model?: ModelSelection;
   };
   readonly effective: {
     readonly placement: AgentPlacement;
@@ -90,8 +103,7 @@ export function validateModelSelection(value: unknown): ModelSelection {
     ) ||
     !bounded(record.provider, 128) ||
     !bounded(record.modelId, 256) ||
-    !THINKING_LEVELS.includes(record.thinkingLevel as ThinkingLevel) ||
-    record.thinkingLevel === "max"
+    !THINKING_LEVELS.includes(record.thinkingLevel as ThinkingLevel)
   )
     throw new OrchestratorError(
       "INVALID_REQUEST",
@@ -149,13 +161,19 @@ export function resolveSpawnPolicy(
       "INVALID_REQUEST",
       "The task profile has no model compatibility policy.",
     );
+  const scoped = config.defaults;
   const model = validateModelSelection(
-    config.profiles?.[modelProfileId] ?? DEFAULT_PROFILES[modelProfileId],
+    request.model ??
+      (request.projectKey
+        ? scoped?.projects?.[request.projectKey]
+        : undefined) ??
+      scoped?.roles?.[request.taskProfileId] ??
+      scoped?.global ??
+      config.profiles?.[modelProfileId] ??
+      DEFAULT_PROFILES[modelProfileId],
   );
-  const allowlist = (config.allowlist ?? Object.values(DEFAULT_PROFILES)).map(
-    validateModelSelection,
-  );
-  if (!allowlist.some((allowed) => sameModel(allowed, model)))
+  const allowlist = config.allowlist?.map(validateModelSelection);
+  if (allowlist && !allowlist.some((allowed) => sameModel(allowed, model)))
     throw new OrchestratorError(
       "PERMISSION_DENIED",
       "The effective model selection is outside the configured allowlist.",
@@ -166,6 +184,10 @@ export function resolveSpawnPolicy(
       ...(request.placement ? { placement: request.placement } : {}),
       ...(request.modelProfileId
         ? { modelProfileId: request.modelProfileId }
+        : {}),
+      ...(request.projectKey ? { projectKey: request.projectKey } : {}),
+      ...(request.model
+        ? { model: validateModelSelection(request.model) }
         : {}),
     },
     effective,

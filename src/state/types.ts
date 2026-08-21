@@ -39,6 +39,9 @@ export interface ErrorSummary {
   code: "TIMEOUT" | "BUDGET_EXCEEDED";
   message: string;
 }
+export type AgentLifecycleClass =
+  "temporary" | "reusable" | "retained" | "pinned";
+export type CloseRecommendation = "close" | "keep" | "blocked";
 export interface Task {
   id: string;
   title: string;
@@ -60,6 +63,7 @@ export interface Task {
   assignedAgentId?: string;
   runIds?: string[];
   resultId?: string;
+  resultCollectedAt?: string;
   timeoutAt?: string;
   terminalReason?: ErrorSummary;
   project?: Record<string, unknown>;
@@ -105,6 +109,10 @@ export interface Agent {
   effectiveModel?: AgentModelMetadata;
   actualModel?: AgentModelMetadata;
   modelPolicyHash?: string;
+  lifecycleClass?: AgentLifecycleClass;
+  keepForReuse?: boolean;
+  closeRecommendation?: CloseRecommendation;
+  closeReason?: string;
   terminalId?: string;
   paneId?: string;
   workspaceId?: string;

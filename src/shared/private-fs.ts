@@ -1,7 +1,9 @@
+import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
+import { dirname } from "node:path";
 import { finished } from "node:stream/promises";
 import type { Stats } from "node:fs";
-import { lstat, open } from "node:fs/promises";
+import { lstat, open, rename, unlink } from "node:fs/promises";
 import { LIMITS } from "./limits.js";
 import type { FileHandle } from "node:fs/promises";
 const noFollow =
@@ -102,6 +104,28 @@ export async function createPrivateExclusive(
     await handle.close();
   }
 }
+export async function replacePrivateRegular(
+  path: string,
+  content: string,
+): Promise<void> {
+  await verifyPrivatePath(path);
+  const temporary = `${path}.tmp-${process.pid}-${randomUUID()}`;
+  try {
+    await createPrivateExclusive(temporary, content);
+    await rename(temporary, path);
+    const directory = await open(dirname(path), constants.O_RDONLY);
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
+  } finally {
+    await unlink(temporary).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+    });
+  }
+}
+
 export async function verifyPrivatePath(path: string): Promise<void> {
   const stat = await lstat(path);
   const uid = process.getuid?.();

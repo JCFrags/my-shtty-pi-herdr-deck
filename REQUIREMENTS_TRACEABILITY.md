@@ -84,6 +84,8 @@ The exact ranges below cover all 113 accepted functional IDs.
 | C-013 | Operator documentation and deployed commit pair | `README.md`, `docs/OPERATIONS_M7.md`, `docs/OPERATIONS_M7_RELEASE.md` | Documentation implemented; deployed pair pending live acceptance |
 | C-014 | Confirmed work closure and final acceptance | No product-source mapping; this is a delivery control | Pending final delivery and acceptance |
 | C-015 | Files UI stays deferred | `README.md` deferred-scope statement; no Files UI source is included | Deferred as required |
+| C-016 | Dynamic installed provider, model, and thinking selection with task, project, role, and global scope | `src/broker/model-policy.ts`, `src/pi/model-capabilities.ts`, `src/deck/broker-app.ts`, parent tool schema; model policy tests | Source implemented; live Pi selection acceptance pending |
+| C-017 | Lifecycle class, close recommendation, result-aware reminder, and safe optional automatic closure | `src/broker/agent-lifecycle.ts`, broker collection path, Deck views and Settings; lifecycle tests | Source implemented; live Herdr closure acceptance pending |
 
 ## Release boundary
 

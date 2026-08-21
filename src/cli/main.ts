@@ -6,7 +6,10 @@ import { Broker } from "../broker/broker.js";
 import { ensurePrivateDirectory, resolveHerdrPaths } from "../shared/paths.js";
 import { brokerStatus, ensureBroker, stopBroker } from "../broker/startup.js";
 import { brokerRequest } from "./client.js";
-import { readPrivateRegular } from "../shared/private-fs.js";
+import {
+  readPrivateRegular,
+  replacePrivateRegular,
+} from "../shared/private-fs.js";
 import { access } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -351,11 +354,41 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
         trustedProject: process.env.PI_HERDR_ORCH_PROJECT_TRUSTED === "1",
       })
     : undefined;
+  let persistedBrokerConfig = brokerConfig;
+  const persistBrokerConfig =
+    brokerConfigPath && brokerConfig
+      ? async (next: typeof brokerConfig): Promise<void> => {
+          await replacePrivateRegular(
+            brokerConfigPath,
+            `${JSON.stringify(next, null, 2)}\n`,
+          );
+          persistedBrokerConfig = next;
+        }
+      : undefined;
   const broker = new Broker(paths, {
     herdrFactory: (store, resolved) =>
       createProductionHerdrService(store, resolved),
     ...(brokerConfig?.modelPolicy
       ? { modelPolicy: brokerConfig.modelPolicy }
+      : {}),
+    ...(brokerConfig?.lifecyclePolicy
+      ? { lifecyclePolicy: brokerConfig.lifecyclePolicy }
+      : {}),
+    ...(persistBrokerConfig && persistedBrokerConfig
+      ? {
+          persistModelPolicy: async (modelPolicy) => {
+            await persistBrokerConfig({
+              ...persistedBrokerConfig!,
+              modelPolicy,
+            });
+          },
+          persistLifecyclePolicy: async (lifecyclePolicy) => {
+            await persistBrokerConfig({
+              ...persistedBrokerConfig!,
+              lifecyclePolicy,
+            });
+          },
+        }
       : {}),
   });
   if (

@@ -43,15 +43,49 @@ npm run validate
 
 The build emits the Pi extension and runtime under `dist/`. Validation runs type checks, schema checks, the static release-document check, the build, unit and integration tests, and the package smoke test. Tests use local fakes and do not need a live Pi or Herdr process.
 
-## Managed model and placement policy
+## Managed model, placement, and lifecycle policy
 
-A task agent uses `current-workspace` placement by default. It starts in a new visible tab in the authenticated parent workspace. The default `subagent` model profile is `openai-codex/gpt-5.6-luna` with `medium` thinking.
+Each new agent has an explicit provider, model, and thinking selection. Selection precedence is task, project, role, global, then the legacy model profile. The configured scoped selection is authoritative. A settings change does not change an agent that is already running.
 
-A caller can request `new-workspace` placement with the `manager` model profile. Herdr creates the visible workspace before Pi starts. The default manager selection is `openai-codex/gpt-5.6-sol` with `medium` thinking. A worktree task uses the new workspace that Herdr creates for the worktree.
+The broker reads `~/.config/pi-herdr-orchestrator/config.json` by default. Set `PI_HERDR_ORCH_CONFIG_PATH` to use a different owner-controlled file. Use `modelPolicy.defaults.global`, `modelPolicy.defaults.projects`, and `modelPolicy.defaults.roles` for scoped defaults. An optional allowlist can restrict the effective selection. The broker and provisioner validate the model and its exact thinking levels against the installed Pi catalog before they create a Herdr resource. This includes `xhigh` and `max` only when the installed model reports support.
 
-The broker resolves task-profile compatibility and the model allowlist first. The provisioner then reads the installed Pi model catalog and CLI thinking capabilities before it creates registration files or Herdr resources. Pi starts with explicit `--provider`, provider-qualified `--model`, and `--thinking` arguments. Managed registration must report the same provider, model, and thinking level. A mismatch fails registration and compensates the pending visible resources.
+The Deck Settings tab shows installed choices. Press `d` to save a scoped default. Press `n` to create an agent with an explicit provider, model, thinking level, and lifecycle class. The `agent_spawn` tool provides the same explicit fields for direct tool workflows. Pi always starts with explicit `--provider`, provider-qualified `--model`, and `--thinking` arguments. Managed registration must report the same selection.
 
-Broker configuration can override the `manager` and `subagent` selections, the allowlist, and task-profile compatibility through `modelPolicy`. The broker reads `~/.config/pi-herdr-orchestrator/config.json` by default. Set `PI_HERDR_ORCH_CONFIG_PATH` to use a different owner-controlled file. The effective selection must be in the allowlist. The `max` thinking level is not permitted.
+Lifecycle classes are `temporary`, `reusable`, `retained`, and `pinned`. Agent lists and the inspector show the class and close recommendation. A temporary agent is recommended for close only after its task is terminal and its result is collected. Reusable agents stay idle and marked for reuse. Press `o` in Settings to enable or disable safe automatic closure. Automatic closure never closes a pinned, retained, reusable, blocked, or active agent. It also never closes an agent with an uncollected result.
+
+A task agent uses `current-workspace` placement by default. A caller can request `new-workspace` placement. Herdr creates the visible workspace before Pi starts. A worktree task uses the new workspace that Herdr creates for the worktree. Legacy `manager` and `subagent` model profiles remain only for rollback compatibility.
+
+Example configuration:
+
+```json
+{
+  "version": 1,
+  "modelPolicy": {
+    "defaults": {
+      "global": {
+        "provider": "openai-codex",
+        "modelId": "gpt-5.6-luna",
+        "thinkingLevel": "medium"
+      },
+      "roles": {
+        "planner": {
+          "provider": "openai-codex",
+          "modelId": "gpt-5.6-sol",
+          "thinkingLevel": "high"
+        }
+      },
+      "projects": {
+        "/home/mainpc/Projects/example": {
+          "provider": "openai-codex",
+          "modelId": "gpt-5.6-sol",
+          "thinkingLevel": "max"
+        }
+      }
+    }
+  },
+  "lifecyclePolicy": { "autoCloseCompletedTemporary": false }
+}
+```
 
 ## Compact delegation rollback switch
 

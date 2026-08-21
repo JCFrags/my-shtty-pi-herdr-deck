@@ -425,6 +425,15 @@ export function reduce(
           ...(typeof p.modelPolicyHash === "string"
             ? { modelPolicyHash: p.modelPolicyHash }
             : {}),
+          ...(typeof p.lifecycleClass === "string"
+            ? {
+                lifecycleClass:
+                  p.lifecycleClass as import("./types.js").AgentLifecycleClass,
+              }
+            : {}),
+          ...(typeof p.keepForReuse === "boolean"
+            ? { keepForReuse: p.keepForReuse }
+            : {}),
           ...(typeof p.paneId === "string" ? { paneId: p.paneId } : {}),
           ...(typeof p.terminalId === "string"
             ? { terminalId: p.terminalId }
@@ -842,6 +851,18 @@ export function reduce(
             : {}),
         },
       };
+      const resultTask = next.tasks[event.entityRefs.taskId];
+      const resultRun = next.runs[event.entityRefs.runId];
+      if (resultTask)
+        next.tasks = {
+          ...next.tasks,
+          [resultTask.id]: { ...resultTask, resultId: id },
+        };
+      if (resultRun)
+        next.runs = {
+          ...next.runs,
+          [resultRun.id]: { ...resultRun, resultId: id },
+        };
       break;
     }
     case "result.validated": {
@@ -862,8 +883,25 @@ export function reduce(
     case "run.result_missing":
     case "scheduler.admitted":
     case "scheduler.blocked":
-    case "task.collected":
       break;
+    case "task.collected": {
+      const id = event.entityRefs?.taskId ?? String(p.taskId ?? "");
+      const task = next.tasks[id];
+      if (
+        !task ||
+        typeof p.collectedAt !== "string" ||
+        !Number.isFinite(Date.parse(p.collectedAt))
+      )
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Task collection evidence is invalid.",
+        );
+      next.tasks = {
+        ...next.tasks,
+        [id]: { ...task, resultCollectedAt: p.collectedAt },
+      };
+      break;
+    }
     case "group.created": {
       const id = event.entityRefs?.groupId ?? String(p.groupId);
       if (

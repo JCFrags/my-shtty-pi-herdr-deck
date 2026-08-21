@@ -258,7 +258,10 @@ const parentInputKeys: Readonly<Record<ParentToolName, readonly string[]>> =
       "task",
       "profileId",
       "modelProfileId",
+      "model",
       "placement",
+      "lifecycleClass",
+      "keepForReuse",
       "project",
       "isolation",
       "budget",
@@ -456,6 +459,7 @@ function validateExactNested(input: Record<string, unknown>): void {
     "profileId",
     "modelProfileId",
     "placement",
+    "lifecycleClass",
     "workspaceId",
     "message",
     "reason",
@@ -501,7 +505,11 @@ function validateExactNested(input: Record<string, unknown>): void {
         throw new Error("INVALID_REQUEST");
       continue;
     }
-    if (["task", "project", "isolation", "budget", "answer"].includes(key)) {
+    if (
+      ["task", "project", "isolation", "budget", "answer", "model"].includes(
+        key,
+      )
+    ) {
       if (key === "task") {
         assertExactObject(
           value,
@@ -531,6 +539,21 @@ function validateExactNested(input: Record<string, unknown>): void {
         assertExactObject(value, ["mode"], ["mode"]);
         assertInputString(value.mode, 64);
         if (!["shared-readonly", "worktree"].includes(value.mode))
+          throw new Error("INVALID_REQUEST");
+      } else if (key === "model") {
+        assertExactObject(
+          value,
+          ["provider", "modelId", "thinkingLevel"],
+          ["provider", "modelId", "thinkingLevel"],
+        );
+        assertInputString(value.provider, 128);
+        assertInputString(value.modelId, 256);
+        assertInputString(value.thinkingLevel, 32);
+        if (
+          !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(
+            value.thinkingLevel,
+          )
+        )
           throw new Error("INVALID_REQUEST");
       } else if (key === "budget") {
         assertExactObject(value, ["wallTimeMs"], ["wallTimeMs"]);
@@ -605,6 +628,15 @@ function validateExactNested(input: Record<string, unknown>): void {
         throw new Error("INVALID_REQUEST");
       continue;
     }
+    if (key === "lifecycleClass") {
+      if (
+        !["temporary", "reusable", "retained", "pinned"].includes(
+          value as string,
+        )
+      )
+        throw new Error("INVALID_REQUEST");
+      continue;
+    }
     if (key === "placement") {
       if (value !== "current-workspace" && value !== "new-workspace")
         throw new Error("INVALID_REQUEST");
@@ -624,6 +656,7 @@ function validateExactNested(input: Record<string, unknown>): void {
         "confirm",
         "createTask",
         "cascade",
+        "keepForReuse",
       ].includes(key)
     ) {
       if (typeof value !== "boolean") throw new Error("INVALID_REQUEST");
@@ -905,6 +938,25 @@ function schemaForKey(key: string): unknown {
     return { type: "string", enum: [...SHIPPED_TASK_PROFILES] };
   if (key === "modelProfileId")
     return { type: "string", enum: ["manager", "subagent"] };
+  if (key === "model")
+    return {
+      type: "object",
+      additionalProperties: false,
+      required: ["provider", "modelId", "thinkingLevel"],
+      properties: {
+        provider: { type: "string", minLength: 1, maxLength: 128 },
+        modelId: { type: "string", minLength: 1, maxLength: 256 },
+        thinkingLevel: {
+          type: "string",
+          enum: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+        },
+      },
+    };
+  if (key === "lifecycleClass")
+    return {
+      type: "string",
+      enum: ["temporary", "reusable", "retained", "pinned"],
+    };
   if (key === "placement")
     return {
       type: "string",
