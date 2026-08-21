@@ -921,11 +921,26 @@ function schemaForKey(key: string): unknown {
         enum: ["succeeded", "failed", "cancelled", "timed_out", "blocked"],
       },
     };
-  if (
-    ["ids", "taskIds", "include", "select", "agentIds", "followUps"].includes(
-      key,
-    )
-  )
+  if (key === "include")
+    return {
+      type: "array",
+      maxItems: 64,
+      items: {
+        type: "string",
+        enum: [
+          "capabilities",
+          "runHistory",
+          "auditSummary",
+          "dependencies",
+          "runs",
+          "blockers",
+          "resultValidation",
+          "worktree",
+          "budgets",
+        ],
+      },
+    };
+  if (["ids", "taskIds", "select", "agentIds", "followUps"].includes(key))
     return {
       type: "array",
       maxItems: 64,
