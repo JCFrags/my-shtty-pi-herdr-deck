@@ -437,6 +437,7 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
             profileId: "scout",
             title: "Root",
             objective: "inspect",
+            constraints: ["Keep the delegated task read-only."],
             dependsOn: [],
           },
           {
@@ -614,6 +615,9 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
       false,
     );
     assert.ok(assignmentFrame);
+    assert.deepEqual(assignmentFrame.frame.params.assignment.constraints, [
+      "Keep the delegated task read-only.",
+    ]);
     const assignmentAccepted = new Promise<void>((resolve) => {
       removeAssignmentAccepted = broker.store.onAppend((event) => {
         if (
@@ -998,14 +1002,62 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
     const collected = ok(
       await send(p1.socket, "task.collect", {
         taskIds: [taskId],
+        select: ["taskId", "state", "result"],
         maxBytes: 512,
       }),
     );
     assert.equal(collected.items.length, 1);
     assert.ok(Buffer.byteLength(JSON.stringify(collected)) <= 512);
     assert.equal(
-      ok(await send(p1.socket, "result.get", { taskId })).payload.summary,
+      ok(
+        await send(p1.socket, "result.get", {
+          taskId,
+          resultId: earlyResult.resultId,
+          include: ["runs"],
+          maxBytes: 32_768,
+        }),
+      ).payload.summary,
       "vertical",
+    );
+    assert.equal(
+      ok(
+        await send(p1.socket, "task.get", {
+          taskId,
+          include: ["runs"],
+          maxBytes: 32_768,
+        }),
+      ).id,
+      taskId,
+    );
+    const listed = ok(
+      await send(p1.socket, "task.list", {
+        state: "succeeded",
+        profileId: "scout",
+        workspaceId: "w",
+        include: ["runs"],
+        maxBytes: 32_768,
+        limit: 500,
+      }),
+    );
+    assert.equal(
+      listed.items.some((item: { id: string }) => item.id === taskId),
+      true,
+    );
+    assert.equal(
+      ok(
+        await send(p1.socket, "agent.close", {
+          agentId: childId,
+          runId,
+          assignmentGeneration: 1,
+          reason: "Regression close",
+          confirm: true,
+        }),
+      ).state,
+      "closed",
+    );
+    assert.equal(
+      ok(await send(p1.socket, "agent.get", { agentId: childId })).state,
+      "stopping",
     );
     await Promise.all(
       eventReceipts.map((receipt, index) =>

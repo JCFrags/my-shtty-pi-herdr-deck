@@ -621,11 +621,12 @@ export class EventStore {
         "parentAgentId",
         "workflowId",
         "profileId",
+        "constraints",
         "dependencies",
         "project",
         "isolationMode",
       ];
-      for (let mask = 0; mask < 64; mask++)
+      for (let mask = 0; mask < 128; mask++)
         for (const hasTimeout of [false, true]) {
           const keys = ["taskId", "title", "objective", "createdAt"];
           if (hasTimeout) keys.push("timeoutAt");
@@ -650,6 +651,10 @@ export class EventStore {
         (p.parentAgentId === undefined || isEntityId(p.parentAgentId, "agt")) &&
         (p.workflowId === undefined || isEntityId(p.workflowId, "wfl")) &&
         (p.profileId === undefined || boundedText(p.profileId, 256)) &&
+        (p.constraints === undefined ||
+          (Array.isArray(p.constraints) &&
+            p.constraints.length <= 64 &&
+            p.constraints.every((item) => boundedText(item, 8_192)))) &&
         (p.isolationMode === undefined ||
           [
             "profile-default",

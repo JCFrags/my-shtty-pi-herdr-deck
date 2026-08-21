@@ -3126,6 +3126,18 @@ export class Broker {
           } as never;
           if (request.method === "agent.stop") await this.#herdr.stop(guard);
           else await this.#herdr.close(guard);
+          const closedAgent = this.store.state.agents[target];
+          if (
+            request.method === "agent.close" &&
+            closedAgent &&
+            ["idle", "working", "blocked"].includes(closedAgent.state)
+          )
+            await this.store.append({
+              type: "agent.state_changed",
+              actor: { principalId: principal.id, kind: principal.kind },
+              entityRefs: { agentId: target },
+              payload: { agentId: target, state: "stopping" },
+            });
           result = {
             agentId: target,
             state: request.method === "agent.stop" ? "stopped" : "closed",
@@ -3700,10 +3712,17 @@ export class Broker {
         requirePermission(principal, "read:results");
         if (
           Object.keys(request.params).some(
-            (key) => !["resultId", "taskId"].includes(key),
+            (key) =>
+              !["resultId", "taskId", "include", "maxBytes"].includes(key),
           ) ||
           (!safeText(request.params.resultId) &&
-            !safeText(request.params.taskId))
+            !safeText(request.params.taskId)) ||
+          (request.params.include !== undefined &&
+            !Array.isArray(request.params.include)) ||
+          (request.params.maxBytes !== undefined &&
+            (!Number.isSafeInteger(request.params.maxBytes) ||
+              Number(request.params.maxBytes) < 1 ||
+              Number(request.params.maxBytes) > 262_144))
         )
           throw new OrchestratorError(
             "INVALID_REQUEST",
@@ -4101,10 +4120,12 @@ export class Broker {
         requirePermission(principal, "read:results");
         if (
           Object.keys(request.params).some(
-            (key) => !["taskIds", "maxBytes"].includes(key),
+            (key) => !["taskIds", "select", "maxBytes"].includes(key),
           ) ||
           !Array.isArray(request.params.taskIds) ||
-          request.params.taskIds.length > 64
+          request.params.taskIds.length > 64 ||
+          (request.params.select !== undefined &&
+            !Array.isArray(request.params.select))
         )
           throw new OrchestratorError(
             "INVALID_REQUEST",
@@ -4695,6 +4716,9 @@ export class Broker {
                 parentAgentId,
                 workflowId,
                 profileId: step.profileId,
+                constraints: step.constraints.filter(
+                  (item): item is string => typeof item === "string",
+                ),
                 dependencies: step.dependsOn
                   .map((key) =>
                     planned.find((candidate) => candidate.key === key),
@@ -4756,6 +4780,9 @@ export class Broker {
                 parentAgentId,
                 workflowId,
                 profileId: step.profileId,
+                constraints: step.constraints.filter(
+                  (item): item is string => typeof item === "string",
+                ),
                 dependencies: step.dependsOn
                   .map((key) =>
                     planned.find((candidate) => candidate.key === key),
@@ -4926,6 +4953,7 @@ export class Broker {
                     }
                   : {}),
                 profileId: step.profileId,
+                constraints: [...step.constraints],
                 isolationMode: step.requestedIsolationMode,
                 dependencies: step.dependsOn
                   .map((key) => plan.steps.find((x) => x.key === key)?.taskId)
@@ -5247,31 +5275,87 @@ export class Broker {
         result = { taskId, state: "queued" };
       } else if (request.method === "task.list") {
         requirePermission(principal, "read:state");
-        if (Object.keys(request.params).length)
+        const p = request.params;
+        if (
+          Object.keys(p).some(
+            (key) =>
+              ![
+                "state",
+                "profileId",
+                "workspaceId",
+                "include",
+                "maxBytes",
+                "cursor",
+                "limit",
+              ].includes(key),
+          ) ||
+          (p.state !== undefined && !safeText(p.state, 64)) ||
+          (p.profileId !== undefined && !safeText(p.profileId, 256)) ||
+          (p.workspaceId !== undefined && !safeText(p.workspaceId, 256)) ||
+          (p.include !== undefined && !Array.isArray(p.include)) ||
+          (p.maxBytes !== undefined &&
+            (!Number.isSafeInteger(p.maxBytes) ||
+              Number(p.maxBytes) < 1 ||
+              Number(p.maxBytes) > 262_144)) ||
+          (p.cursor !== undefined &&
+            (typeof p.cursor !== "string" || !/^\d+$/u.test(p.cursor))) ||
+          (p.limit !== undefined &&
+            (!Number.isSafeInteger(p.limit) ||
+              Number(p.limit) < 1 ||
+              Number(p.limit) > 500))
+        )
           throw new OrchestratorError(
             "INVALID_REQUEST",
-            "M1 task list parameters must be empty.",
+            "Task list parameters are invalid.",
           );
+        const accessible = (
+          await Promise.all(
+            Object.values(this.store.state.tasks).map(async (task) =>
+              (await this.#canAccessTask(principal, task.id))
+                ? task
+                : undefined,
+            ),
+          )
+        )
+          .filter((task): task is NonNullable<typeof task> => Boolean(task))
+          .filter(
+            (task) =>
+              (p.state === undefined || task.state === p.state) &&
+              (p.profileId === undefined || task.profileId === p.profileId) &&
+              (p.workspaceId === undefined ||
+                task.project?.workspaceId === p.workspaceId),
+          )
+          .sort(
+            (left, right) =>
+              left.createdAt.localeCompare(right.createdAt) ||
+              left.id.localeCompare(right.id),
+          );
+        const offset = p.cursor === undefined ? 0 : Number(p.cursor);
+        const limit =
+          p.limit === undefined ? accessible.length : Number(p.limit);
+        const items = accessible.slice(offset, offset + limit);
         result = {
-          items: (
-            await Promise.all(
-              Object.values(this.store.state.tasks).map(async (task) =>
-                (await this.#canAccessTask(principal, task.id))
-                  ? task
-                  : undefined,
-              ),
-            )
-          ).filter((task): task is NonNullable<typeof task> => Boolean(task)),
-          nextCursor: null,
+          items,
+          nextCursor:
+            offset + items.length < accessible.length
+              ? String(offset + items.length)
+              : null,
           snapshotSeq: this.store.state.lastEventSeq,
         };
       } else if (request.method === "task.get") {
         requirePermission(principal, "read:state");
         if (
-          !exactKeys(request.params, ["taskId"]) ||
-          Object.keys(request.params).length !== 1 ||
+          Object.keys(request.params).some(
+            (key) => !["taskId", "include", "maxBytes"].includes(key),
+          ) ||
           typeof request.params.taskId !== "string" ||
-          !/^tsk_[0-9A-HJKMNP-TV-Z]{26}$/.test(request.params.taskId)
+          !/^tsk_[0-9A-HJKMNP-TV-Z]{26}$/.test(request.params.taskId) ||
+          (request.params.include !== undefined &&
+            !Array.isArray(request.params.include)) ||
+          (request.params.maxBytes !== undefined &&
+            (!Number.isSafeInteger(request.params.maxBytes) ||
+              Number(request.params.maxBytes) < 1 ||
+              Number(request.params.maxBytes) > 262_144))
         )
           throw new OrchestratorError("INVALID_REQUEST", "Task ID is invalid.");
         const task = this.store.state.tasks[request.params.taskId];

@@ -60,7 +60,7 @@ const DEFAULT_PROFILES: Readonly<Record<ModelProfileId, ModelSelection>> =
     }),
   });
 
-const SHIPPED_TASK_PROFILES = Object.freeze([
+export const SHIPPED_TASK_PROFILES = Object.freeze([
   "implementer",
   "planner",
   "reviewer",
