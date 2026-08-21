@@ -16,6 +16,8 @@ import {
   renderTasks,
 } from "./views.js";
 import type { Agent, Task } from "../state/types.js";
+import type { PiCapabilitySnapshot } from "../pi/model-capabilities.js";
+import type { ModelPolicyConfig } from "../broker/model-policy.js";
 import type { DeckGroup, DeckQuestion, DeckResult } from "./types.js";
 
 export interface BrokerDeckAppOptions {
@@ -25,8 +27,9 @@ export interface BrokerDeckAppOptions {
   onClose?(): void;
 }
 
-type DeckTab = "agents" | "groups" | "tasks" | "results" | "questions";
-type InputMode = "prompt" | "ask" | "answer";
+type DeckTab =
+  "agents" | "groups" | "tasks" | "results" | "questions" | "settings";
+type InputMode = "prompt" | "ask" | "answer" | "create" | "default";
 
 export class BrokerDeckApp implements Component {
   readonly #client: BrokerClient;
@@ -46,6 +49,10 @@ export class BrokerDeckApp implements Component {
   #inputMode: InputMode | undefined;
   #input = "";
   #closeConfirmation: string | undefined;
+  #capabilities: PiCapabilitySnapshot | undefined;
+  #modelPolicy: ModelPolicyConfig | undefined;
+  #autoCloseCompletedTemporary = false;
+  #settingsScroll = 0;
 
   constructor(options: BrokerDeckAppOptions) {
     this.#client = options.client;
@@ -76,12 +83,13 @@ export class BrokerDeckApp implements Component {
       "tasks",
       "results",
       "questions",
+      "settings",
     ];
     const lines = [
       "Pi Herdr Deck",
       `Broker: ${this.#status}  Sequence: ${state.seq}`,
       `Tabs: ${tabs.map((tab, index) => `[${this.#tab === tab ? tab.toUpperCase() : tab} ${index + 1}]`).join(" ")}`,
-      "Keys: ↑/↓ select · r refresh · q close deck",
+      "Keys: ↑/↓ select · r refresh · n create agent · q close deck",
       "",
     ];
     if (this.#tab === "agents") {
@@ -99,7 +107,7 @@ export class BrokerDeckApp implements Component {
     } else if (this.#tab === "results") {
       const result = this.selectedResult();
       lines.push(...renderResultDetail(result, safeWidth));
-    } else {
+    } else if (this.#tab === "questions") {
       const question = this.selectedQuestion();
       lines.push(
         ...renderQuestions(
@@ -110,6 +118,8 @@ export class BrokerDeckApp implements Component {
         "",
       );
       lines.push(...renderQuestionDetail(question, safeWidth));
+    } else {
+      lines.push(...this.renderSettings(safeWidth));
     }
     lines.push("");
     lines.push(
@@ -117,6 +127,15 @@ export class BrokerDeckApp implements Component {
     );
     if (this.#inputMode) {
       lines.push(`${this.#inputMode.toUpperCase()}: ${this.#input}█`);
+      if (this.#inputMode === "create") {
+        lines.push(
+          "Format: title|objective|profile|provider|model|thinking|lifecycle.",
+        );
+        lines.push("Lifecycle is temporary, reusable, retained, or pinned.");
+      } else if (this.#inputMode === "default")
+        lines.push(
+          "Format: global||provider|model|thinking, role|profile|provider|model|thinking, or project|cwd|provider|model|thinking.",
+        );
       lines.push("Enter submits. Escape cancels. Backspace edits.");
     }
     if (this.#message) lines.push(`Notice: ${this.#message}`);
@@ -144,12 +163,35 @@ export class BrokerDeckApp implements Component {
       this.#onClose();
       return;
     }
-    if (data >= "1" && data <= "5") {
+    if (data >= "1" && data <= "6") {
       this.#tab = (
-        ["agents", "groups", "tasks", "results", "questions"] as DeckTab[]
+        [
+          "agents",
+          "groups",
+          "tasks",
+          "results",
+          "questions",
+          "settings",
+        ] as DeckTab[]
       )[Number(data) - 1]!;
       this.#closeConfirmation = undefined;
-    } else if (data === "r") void this.run("refresh");
+      if (this.#tab === "settings") {
+        this.#settingsScroll = 0;
+        void this.loadSettings();
+      }
+    } else if (data === "r")
+      void (this.#tab === "settings"
+        ? this.loadSettings()
+        : this.run("refresh"));
+    else if (
+      data === "n" &&
+      (this.#tab === "agents" || this.#tab === "settings")
+    )
+      this.beginInput("create");
+    else if (data === "d" && this.#tab === "settings")
+      this.beginInput("default");
+    else if (data === "o" && this.#tab === "settings")
+      void this.toggleAutoClose();
     else if (data === "f" && this.#tab === "agents") void this.run("focus");
     else if (data === "p" && this.#tab === "agents") this.beginInput("prompt");
     else if (data === "a" && this.#tab === "agents") this.beginInput("ask");
@@ -239,11 +281,19 @@ export class BrokerDeckApp implements Component {
         this.selectedResult()?.id,
         delta,
       );
-    else
+    else if (this.#tab === "questions")
       this.#selectedQuestion = this.nextId(
         [...state.questions.values()],
         this.selectedQuestion()?.id,
         delta,
+      );
+    else
+      this.#settingsScroll = Math.max(
+        0,
+        Math.min(
+          Math.max(0, (this.#capabilities?.models.length ?? 0) - 1),
+          this.#settingsScroll + delta,
+        ),
       );
     this.#closeConfirmation = undefined;
   }
@@ -292,8 +342,16 @@ export class BrokerDeckApp implements Component {
 
   private beginInput(mode: InputMode): void {
     const target = this.target();
-    const action = mode === "answer" ? "answer" : mode;
-    const denied = this.#actions.authorize(action, target);
+    if (mode === "create" && !target.agent) {
+      this.#message = "Select a parent agent first.";
+      return;
+    }
+    const action: DeckAction =
+      mode === "answer" ? "answer" : (mode as DeckAction);
+    const denied =
+      mode === "create" || mode === "default"
+        ? undefined
+        : this.#actions.authorize(action, target);
     if (denied) {
       this.#message = denied;
       return;
@@ -324,13 +382,174 @@ export class BrokerDeckApp implements Component {
       }
       this.#inputMode = undefined;
       this.#input = "";
-      void this.run(mode === "answer" ? "answer" : mode, value);
+      if (mode === "create") void this.createAgent(value);
+      else if (mode === "default") void this.setDefault(value);
+      else void this.run(mode === "answer" ? "answer" : mode, value);
     } else if (
       data.length > 0 &&
       !data.includes("\u001b") &&
       [...data].every((character) => character.codePointAt(0)! >= 0x20)
     )
       this.#input = `${this.#input}${data}`.slice(0, 16_384);
+  }
+
+  private renderSettings(_width: number): string[] {
+    const defaults = this.#modelPolicy?.defaults;
+    const lines = [
+      "Model and lifecycle settings",
+      "Precedence: explicit task > project > role > global > legacy profile.",
+      "Press d to set a scoped default. Press n to create an agent. Press o to toggle safe automatic closure.",
+      `Automatic close after result collection: ${this.#autoCloseCompletedTemporary ? "on" : "off"}`,
+      "Scoped defaults apply to new agents. The broker saves them when it has a private config file. Running agents do not change.",
+      `Global default: ${defaults?.global ? `${defaults.global.provider}/${defaults.global.modelId} / ${defaults.global.thinkingLevel}` : "not configured"}`,
+      ...Object.entries(defaults?.roles ?? {}).map(
+        ([key, model]) =>
+          `Role ${key}: ${model.provider}/${model.modelId} / ${model.thinkingLevel}`,
+      ),
+      ...Object.entries(defaults?.projects ?? {}).map(
+        ([key, model]) =>
+          `Project ${key}: ${model.provider}/${model.modelId} / ${model.thinkingLevel}`,
+      ),
+      "",
+      "Installed choices (provider/model: thinking levels):",
+    ];
+    if (!this.#capabilities) lines.push("Loading installed Pi capabilities…");
+    else {
+      lines.push(
+        `Choice ${this.#settingsScroll + 1} of ${this.#capabilities.models.length}. Use ↑/↓ to scroll.`,
+      );
+      for (const model of this.#capabilities.models.slice(
+        this.#settingsScroll,
+        this.#settingsScroll +
+          Math.max(1, this.#getHeight() - lines.length - 4),
+      ))
+        lines.push(
+          `${model.provider}/${model.modelId}: ${model.thinkingLevels.join(", ")}`,
+        );
+    }
+    return lines;
+  }
+
+  private async loadSettings(): Promise<void> {
+    try {
+      const [capabilities, settings] = await Promise.all([
+        this.#client.request("model.capabilities", {}),
+        this.#client.request("model.policy.get", {}),
+      ]);
+      this.#capabilities = capabilities as PiCapabilitySnapshot;
+      const loaded = settings as {
+        policy?: ModelPolicyConfig;
+        lifecyclePolicy?: { autoCloseCompletedTemporary?: boolean };
+      };
+      this.#modelPolicy = loaded.policy;
+      this.#autoCloseCompletedTemporary =
+        loaded.lifecyclePolicy?.autoCloseCompletedTemporary === true;
+      this.#message = "Installed model choices loaded.";
+    } catch (error) {
+      this.#message = error instanceof Error ? error.message : String(error);
+    }
+    this.#requestRender();
+  }
+
+  private async toggleAutoClose(): Promise<void> {
+    try {
+      const enabled = !this.#autoCloseCompletedTemporary;
+      await this.#client.request("lifecycle.policy.set", {
+        autoCloseCompletedTemporary: enabled,
+      });
+      this.#autoCloseCompletedTemporary = enabled;
+      this.#message = `Safe automatic closure is ${enabled ? "on" : "off"}. Protected and uncollected agents stay open.`;
+    } catch (error) {
+      this.#message = error instanceof Error ? error.message : String(error);
+    }
+    this.#requestRender();
+  }
+
+  private async setDefault(value: string): Promise<void> {
+    const [scope, key, provider, modelId, thinkingLevel, ...extra] = value
+      .split("|")
+      .map((part) => part.trim());
+    if (
+      extra.length ||
+      !scope ||
+      !provider ||
+      !modelId ||
+      !thinkingLevel ||
+      !["global", "role", "project"].includes(scope)
+    ) {
+      this.#message =
+        "Use scope|key|provider|model|thinking. The global key is empty.";
+      this.#requestRender();
+      return;
+    }
+    try {
+      await this.#client.request("model.policy.set", {
+        scope,
+        key: key ?? "",
+        model: { provider, modelId, thinkingLevel },
+      });
+      await this.loadSettings();
+      this.#message =
+        "The scoped default was accepted for new agents. Running agents were not changed.";
+    } catch (error) {
+      this.#message = error instanceof Error ? error.message : String(error);
+    }
+    this.#requestRender();
+  }
+
+  private async createAgent(value: string): Promise<void> {
+    const [
+      title,
+      objective,
+      profileId,
+      provider,
+      modelId,
+      thinkingLevel,
+      lifecycleClass,
+      ...extra
+    ] = value.split("|").map((part) => part.trim());
+    const parent = this.selectedAgent();
+    if (
+      extra.length ||
+      !parent?.cwd ||
+      !title ||
+      !objective ||
+      !profileId ||
+      !provider ||
+      !modelId ||
+      !thinkingLevel ||
+      !["temporary", "reusable", "retained", "pinned"].includes(
+        lifecycleClass ?? "",
+      )
+    ) {
+      this.#message =
+        "Use title|objective|profile|provider|model|thinking|lifecycle with a parent that has a project.";
+      this.#requestRender();
+      return;
+    }
+    try {
+      await this.#client.request("agent.spawn", {
+        parentAgentId: parent.id,
+        task: { title, objective },
+        profileId,
+        model: { provider, modelId, thinkingLevel },
+        lifecycleClass,
+        keepForReuse: lifecycleClass === "reusable",
+        project: { cwd: parent.cwd },
+        isolation: {
+          mode: ["scout", "reviewer"].includes(profileId)
+            ? "shared-readonly"
+            : "worktree",
+        },
+        budget: { wallTimeMs: 1_800_000 },
+        wait: false,
+      });
+      this.#message = `Creation accepted with explicit ${provider}/${modelId} and ${thinkingLevel} thinking.`;
+      await this.#client.refresh();
+    } catch (error) {
+      this.#message = error instanceof Error ? error.message : String(error);
+    }
+    this.#requestRender();
   }
 
   private confirmClose(): void {

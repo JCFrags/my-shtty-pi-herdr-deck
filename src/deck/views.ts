@@ -120,7 +120,7 @@ export function renderAgents(
   const lines = [
     "AGENTS",
     "State: ▶ working | ○ idle | ! blocked | × failed | ✓ succeeded | ? orphaned | ≠ replaced",
-    "State  name                 profile        placement                    model / thinking     task/status",
+    "State  name                 lifecycle/recommendation  profile        placement                    model / thinking     task/status",
   ];
   const visited = new Set<string>();
   const visit = (parent: string | undefined, depth: number): void => {
@@ -139,8 +139,9 @@ export function renderAgents(
         text(actual?.thinkingLevel, effective?.thinkingLevel) ?? "unavailable";
       const placement = `${agent.workspaceId ?? "-"}/${agent.tabId ?? "-"}/${agent.paneId ?? "-"}`;
       const task = agent.currentRunId ? `run:${agent.currentRunId}` : "no run";
+      const lifecycle = `${agent.lifecycleClass ?? (agent.parentAgentId ? "temporary" : "retained")}/${agent.closeRecommendation ?? "keep"}`;
       lines.push(
-        `${marker}${"  ".repeat(depth)}${stateIcon(agent.state)} ${pad(agent.displayName ?? agent.herdrName ?? agent.id, 20)} ${pad(agent.profileId ?? "default", 14)} ${pad(clip(placement, 28), 28)} ${pad(clip(`${actualModel} / ${thinking}`, 20), 20)} ${task} ${agent.coarseStatus ?? agent.state}`,
+        `${marker}${"  ".repeat(depth)}${stateIcon(agent.state)} ${pad(agent.displayName ?? agent.herdrName ?? agent.id, 20)} ${pad(clip(lifecycle, 25), 25)} ${pad(agent.profileId ?? "default", 14)} ${pad(clip(placement, 28), 28)} ${pad(clip(`${actualModel} / ${thinking}`, 20), 20)} ${task} ${agent.coarseStatus ?? agent.state}`,
       );
       visit(agent.id, depth + 1);
     }
@@ -268,6 +269,8 @@ export function renderAgentInspector(
       `Identity: ${agent.id} (generation ${agent.generation})`,
       `State: ${stateIcon(agent.state)} ${agent.state}; detected: ${agent.coarseStatus ?? "unavailable"}`,
       `Profile: ${agent.profileId ?? "default"}`,
+      `Lifecycle: ${agent.lifecycleClass ?? (agent.parentAgentId ? "temporary" : "retained")}; keep for reuse: ${agent.keepForReuse === true ? "yes" : "no"}`,
+      `Close recommendation: ${agent.closeRecommendation ?? "keep"} — ${agent.closeReason ?? "No lifecycle reason was supplied."}`,
       `Placement: workspace ${agent.workspaceId ?? "unavailable"}; tab ${agent.tabId ?? "unavailable"}; pane ${agent.paneId ?? "unavailable"}`,
       `Terminal/session: ${agent.terminalId ?? "unavailable"} / ${agent.piSessionId ?? "unavailable"}`,
       `CWD/worktree: ${agent.cwd ?? "unavailable"} / ${agent.worktreeId ?? "unavailable"}`,

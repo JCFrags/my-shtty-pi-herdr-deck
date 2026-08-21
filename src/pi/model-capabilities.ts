@@ -1,3 +1,5 @@
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { runProcess } from "../shared/subprocess.js";
 import type { ModelSelection, ThinkingLevel } from "../broker/model-policy.js";
 
@@ -9,6 +11,7 @@ export interface PiModelCapability {
   readonly provider: string;
   readonly modelId: string;
   readonly reasoning: boolean;
+  readonly thinkingLevels: readonly ThinkingLevel[];
 }
 
 export interface PiCapabilitySnapshot {
@@ -29,13 +32,15 @@ function parseThinkingLevels(help: string): ThinkingLevel[] {
   return [...new Set(values)] as ThinkingLevel[];
 }
 
-function parseModels(output: string): PiModelCapability[] {
+function parseModels(
+  output: string,
+): Array<Omit<PiModelCapability, "thinkingLevels">> {
   const lines = output.split(/\r?\n/u).filter((line) => line.trim().length > 0);
   const header = lines.findIndex(
     (line) => /\bprovider\b/u.test(line) && /\bmodel\b/u.test(line),
   );
   if (header < 0) throw new Error("PI_MODEL_CATALOG_INVALID");
-  const models: PiModelCapability[] = [];
+  const models: Array<Omit<PiModelCapability, "thinkingLevels">> = [];
   for (const line of lines.slice(header + 1)) {
     const columns = line.trim().split(/\s+/u);
     if (columns.length < 5) continue;
@@ -56,7 +61,78 @@ export function parsePiCapabilities(
   const thinkingLevels = parseThinkingLevels(help);
   if (thinkingLevels.length === 0)
     throw new Error("PI_THINKING_CAPABILITY_INVALID");
-  return { models: parseModels(modelList), thinkingLevels };
+  return {
+    models: parseModels(modelList).map((model) => ({
+      ...model,
+      thinkingLevels: model.reasoning
+        ? thinkingLevels.filter((level) => !["xhigh", "max"].includes(level))
+        : (["off"] as ThinkingLevel[]),
+    })),
+    thinkingLevels,
+  };
+}
+
+type PiAiCatalog = {
+  getModel(provider: string, modelId: string): unknown;
+  getSupportedThinkingLevels(model: unknown): ThinkingLevel[];
+};
+
+async function loadPiAiCatalog(): Promise<PiAiCatalog | undefined> {
+  try {
+    const codingAgentUrl = import.meta
+      .resolve("@earendil-works/pi-coding-agent");
+    const codingAgentEntry = fileURLToPath(codingAgentUrl);
+    const packageRoot = dirname(dirname(codingAgentEntry));
+    const modulePath = join(
+      packageRoot,
+      "node_modules",
+      "@earendil-works",
+      "pi-ai",
+      "dist",
+      "models.js",
+    );
+    const [codingAgent, piAi] = await Promise.all([
+      import(codingAgentUrl) as Promise<{
+        ModelRuntime: {
+          create(options: {
+            refreshOnCreate: boolean;
+          }): Promise<{ getModel(provider: string, modelId: string): unknown }>;
+        };
+      }>,
+      import(pathToFileURL(modulePath).href) as Promise<PiAiCatalog>,
+    ]);
+    const runtime = await codingAgent.ModelRuntime.create({
+      refreshOnCreate: false,
+    });
+    return {
+      getModel: (provider, modelId) => runtime.getModel(provider, modelId),
+      getSupportedThinkingLevels: piAi.getSupportedThinkingLevels,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+async function attestExtendedThinking(
+  snapshot: PiCapabilitySnapshot,
+): Promise<PiCapabilitySnapshot> {
+  const catalog = await loadPiAiCatalog();
+  if (!catalog) return snapshot;
+  return {
+    ...snapshot,
+    models: snapshot.models.map((candidate) => {
+      try {
+        const model = catalog.getModel(candidate.provider, candidate.modelId);
+        if (!model) return candidate;
+        const levels = catalog
+          .getSupportedThinkingLevels(model)
+          .filter((level) => snapshot.thinkingLevels.includes(level));
+        return { ...candidate, thinkingLevels: levels };
+      } catch {
+        return candidate;
+      }
+    }),
+  };
 }
 
 export class InstalledPiCapabilities {
@@ -88,7 +164,9 @@ export class InstalledPiCapabilities {
     ]).then(([help, models]) => {
       if (help.status !== 0 || models.status !== 0)
         throw new Error("PI_CAPABILITY_DISCOVERY_FAILED");
-      return parsePiCapabilities(help.stdout, models.stdout);
+      return attestExtendedThinking(
+        parsePiCapabilities(help.stdout, models.stdout),
+      );
     });
     return await this.#snapshot;
   }
@@ -101,14 +179,8 @@ export class InstalledPiCapabilities {
         candidate.modelId === selection.modelId,
     );
     if (!model) throw new Error("PI_MODEL_UNAVAILABLE");
-    if (!capabilities.thinkingLevels.includes(selection.thinkingLevel))
+    if (!model.thinkingLevels.includes(selection.thinkingLevel))
       throw new Error("PI_THINKING_UNAVAILABLE");
-    if (!model.reasoning && selection.thinkingLevel !== "off")
-      throw new Error("PI_THINKING_UNAVAILABLE");
-    // Pi's table does not expose model-specific extended-level maps. Do not
-    // claim xhigh or max availability without a richer installed capability.
-    if (["xhigh", "max"].includes(selection.thinkingLevel))
-      throw new Error("PI_THINKING_AVAILABILITY_UNATTESTED");
   }
 
   clear(): void {

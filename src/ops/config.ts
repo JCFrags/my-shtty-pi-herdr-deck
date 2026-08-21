@@ -13,6 +13,7 @@ export interface OrchConfig {
   retention?: Record<string, number | boolean>;
   security?: Record<string, number | boolean>;
   modelPolicy?: ModelPolicyConfig;
+  lifecyclePolicy?: { autoCloseCompletedTemporary?: boolean };
   ui?: Record<string, string | boolean>;
   logging?: Record<string, string | number>;
 }
@@ -53,6 +54,7 @@ export function validateConfig(value: unknown): OrchConfig {
     "retention",
     "security",
     "modelPolicy",
+    "lifecyclePolicy",
     "ui",
     "logging",
   ]);
@@ -60,17 +62,60 @@ export function validateConfig(value: unknown): OrchConfig {
     if (!allowed.has(key))
       throw new Error(`Unknown configuration field: ${key}.`);
   walkSafe(value);
+  const lifecyclePolicy = value.lifecyclePolicy;
+  if (lifecyclePolicy !== undefined) {
+    if (
+      !isObject(lifecyclePolicy) ||
+      Object.keys(lifecyclePolicy).some(
+        (key) => key !== "autoCloseCompletedTemporary",
+      ) ||
+      (lifecyclePolicy.autoCloseCompletedTemporary !== undefined &&
+        typeof lifecyclePolicy.autoCloseCompletedTemporary !== "boolean")
+    )
+      throw new Error("lifecyclePolicy is invalid.");
+  }
   const modelPolicy = value.modelPolicy;
   if (modelPolicy !== undefined) {
     if (!isObject(modelPolicy))
       throw new Error("modelPolicy must be an object.");
     const allowedModelKeys = new Set([
+      "defaults",
       "profiles",
       "allowlist",
       "compatibility",
     ]);
     if (Object.keys(modelPolicy).some((key) => !allowedModelKeys.has(key)))
       throw new Error("modelPolicy contains an unknown field.");
+    if (modelPolicy.defaults !== undefined) {
+      if (!isObject(modelPolicy.defaults))
+        throw new Error("modelPolicy.defaults is invalid.");
+      const defaults = modelPolicy.defaults;
+      if (
+        Object.keys(defaults).some(
+          (key) => !["global", "roles", "projects"].includes(key),
+        )
+      )
+        throw new Error("modelPolicy.defaults contains an unknown field.");
+      if (defaults.global !== undefined)
+        validateModelSelection(defaults.global);
+      for (const scope of ["roles", "projects"] as const) {
+        if (defaults[scope] !== undefined && !isObject(defaults[scope]))
+          throw new Error(`modelPolicy.defaults.${scope} is invalid.`);
+        for (const [key, selection] of Object.entries(defaults[scope] ?? {})) {
+          const validKey =
+            scope === "roles"
+              ? /^[a-z][a-z0-9_-]{0,63}$/u.test(key)
+              : key.startsWith("/") &&
+                key.length <= 4096 &&
+                !/[\u0000-\u001f\u007f]/u.test(key);
+          if (!validKey)
+            throw new Error(
+              `modelPolicy.defaults.${scope} has an invalid key.`,
+            );
+          validateModelSelection(selection);
+        }
+      }
+    }
     if (modelPolicy.profiles !== undefined) {
       if (
         !isObject(modelPolicy.profiles) ||
