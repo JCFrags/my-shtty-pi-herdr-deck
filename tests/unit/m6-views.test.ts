@@ -219,15 +219,54 @@ test("provider projection selection prefers the newest pane connection after rel
   const reloaded: DeckState = {
     ...state,
     agents: new Map([
-      ["agt_old", { id: "agt_old", state: "idle", generation: 1, paneId: "p1", piSessionId: "pi-1", connectionGeneration: 4 }],
-      ["agt_new", { id: "agt_new", state: "idle", generation: 1, paneId: "p1", piSessionId: "pi-1", connectionGeneration: 5 }],
+      [
+        "agt_old",
+        {
+          id: "agt_old",
+          state: "idle",
+          generation: 1,
+          paneId: "p1",
+          piSessionId: "pi-1",
+          connectionGeneration: 4,
+        },
+      ],
+      [
+        "agt_new",
+        {
+          id: "agt_new",
+          state: "idle",
+          generation: 1,
+          paneId: "p1",
+          piSessionId: "pi-1",
+          connectionGeneration: 5,
+        },
+      ],
     ]),
     providerProjections: new Map([
-      ["agt_old", { ownerAgentId: "agt_old", piSessionId: "pi-1", agentBoard: { available: false, openCount: 0, items: [] }, todo: { available: false, total: 0, completed: 0, items: [] } }],
-      ["agt_new", { ownerAgentId: "agt_new", piSessionId: "pi-1", agentBoard: { available: true, openCount: 0, items: [] }, todo: { available: true, total: 0, completed: 0, items: [] } }],
+      [
+        "agt_old",
+        {
+          ownerAgentId: "agt_old",
+          piSessionId: "pi-1",
+          agentBoard: { available: false, openCount: 0, items: [] },
+          todo: { available: false, total: 0, completed: 0, items: [] },
+        },
+      ],
+      [
+        "agt_new",
+        {
+          ownerAgentId: "agt_new",
+          piSessionId: "pi-1",
+          agentBoard: { available: true, openCount: 0, items: [] },
+          todo: { available: true, total: 0, completed: 0, items: [] },
+        },
+      ],
     ]),
   };
-  assert.equal(currentProviderProjection(reloaded, "p1")?.ownerAgentId, "agt_new");
+  assert.equal(
+    currentProviderProjection(reloaded, "p1")?.ownerAgentId,
+    "agt_new",
+  );
 });
 
 test("agent filters keep history out of active view and expose paging", () => {
