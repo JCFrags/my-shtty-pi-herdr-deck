@@ -125,7 +125,9 @@ export function currentProviderProjection(
       (agent && projection.piSessionId === agent.piSessionId ? 8 : 0) +
       (agent && !agent.parentAgentId ? 4 : 0) +
       (agent && agent.state !== "idle" ? 1 : 0);
-    return score(b, agentB) - score(a, agentA);
+    const connectionOrder =
+      (agentB?.connectionGeneration ?? 0) - (agentA?.connectionGeneration ?? 0);
+    return connectionOrder || score(b, agentB) - score(a, agentA);
   });
   return ranked[0] ?? (targetPaneId ? undefined : projections[0]);
 }

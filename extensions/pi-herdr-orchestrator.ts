@@ -960,7 +960,12 @@ export default async function piHerdrOrchestrator(
         { heartbeat: (state) => candidateClient.heartbeat(state) },
         {
           heartbeatMs: registration.heartbeatMs,
-          onError: () => scheduleReconnect(),
+          // A semantic heartbeat rejection does not mean the socket is gone.
+          // Re-registering a healthy adapter creates a reconnect loop and makes
+          // provider actions target an identity that changes every second.
+          onError: () => {
+            if (!candidateClient.connected) scheduleReconnect();
+          },
         },
       );
       const flushLifecycle = () => {
@@ -984,7 +989,12 @@ export default async function piHerdrOrchestrator(
             }
           })
           .catch(() => {
-            scheduleReconnect();
+            // A recovered lifecycle frame can become stale after reload. Drop
+            // that frame while the registered socket is still healthy instead
+            // of replacing the adapter forever.
+            if (candidateClient.connected) {
+              if (pendingLifecycle[0] === pending) pendingLifecycle.shift();
+            } else scheduleReconnect();
           })
           .finally(() => {
             lifecycleInFlight = false;
@@ -994,7 +1004,8 @@ export default async function piHerdrOrchestrator(
         () => {
           if (client === candidateClient && candidateClient.connected) {
             flushLifecycle();
-            providerCollector.publish();
+            // Provider event listeners publish changes. Re-publishing the same
+            // projection on every heartbeat redraws the whole Pi Herd pane.
             stateReporter?.report(candidateAdapter.safeState());
           } else if (client === candidateClient) scheduleReconnect();
         },
