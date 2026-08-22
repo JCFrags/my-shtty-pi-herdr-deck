@@ -313,17 +313,37 @@ export class EventStore {
             "STATE_CORRUPT",
             `Noncanonical event line at ${index + 1}.`,
           );
+        index++;
+        // A checksum-authenticated snapshot already verifies the state and
+        // chain cursor before this line. Startup still reads the old prefix to
+        // prove the file shape and exact cursor position, but it does not
+        // repeatedly parse and hash hundreds of thousands of historical JSON
+        // records. `events verify` remains the explicit full-chain audit.
+        if (
+          snapshot &&
+          snapshot.lastEventSeq > 0 &&
+          index < snapshot.lastEventSeq
+        )
+          continue;
         let event: StoredEvent;
         try {
           event = JSON.parse(line) as StoredEvent;
         } catch {
           throw new OrchestratorError(
             "STATE_CORRUPT",
-            `Invalid event at line ${index + 1}.`,
+            `Invalid event at line ${index}.`,
           );
         }
-        index++;
-        this.verifyEvent(event, previous);
+        if (event.seq !== index)
+          throw new OrchestratorError(
+            "STATE_CORRUPT",
+            `Event sequence does not match line ${index}.`,
+          );
+        const verifiedPrevious =
+          snapshot && index === snapshot.lastEventSeq
+            ? ({ seq: event.seq - 1, hash: event.prevHash } as StoredEvent)
+            : previous;
+        this.verifyEvent(event, verifiedPrevious);
         previous = event;
         this.#events.push(event);
         if (this.#events.length > MAX_RETAINED_EVENTS) this.#events.shift();
@@ -444,6 +464,15 @@ export class EventStore {
     }
   }
   async readEventsFrom(fromSeq: number): Promise<StoredEvent[]> {
+    if (!Number.isSafeInteger(fromSeq) || fromSeq < 0)
+      throw new OrchestratorError("CURSOR_INVALID", "Event cursor is invalid.");
+    const firstRetained = this.#events[0]?.seq;
+    if (
+      fromSeq !== Number.MAX_SAFE_INTEGER &&
+      (fromSeq >= this.#lastSeq ||
+        (firstRetained !== undefined && fromSeq >= firstRetained - 1))
+    )
+      return this.#events.filter((event) => event.seq > fromSeq);
     const result: StoredEvent[] = [];
     let previous: StoredEvent | undefined;
     const expectedFile = this.#fileIdentity;

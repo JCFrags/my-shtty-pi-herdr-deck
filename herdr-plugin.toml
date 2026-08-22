@@ -1,7 +1,7 @@
 id = "pi.herdr.orchestrator"
 name = "Pi Herd Orchestrator"
 version = "0.1.0"
-min_herdr_version = "0.8.0"
+min_herdr_version = "0.8.2"
 description = "Herdr-native multi-agent control plane for Pi coding agents"
 platforms = ["linux"]
 

@@ -89,7 +89,7 @@ export function validateReleaseDocs({
     "pi.herdr.orchestrator",
     "The primary plugin ID is stale.",
   );
-  assert.equal(minimumHerdr, "0.8.0", "The minimum Herdr version is stale.");
+  assert.equal(minimumHerdr, "0.8.2", "The minimum Herdr version is stale.");
   assert.equal(paneId, "deck", "The managed pane entrypoint is stale.");
   assert.equal(paneTitle, "Pi Herd", "The managed pane title is stale.");
   assert.deepEqual(

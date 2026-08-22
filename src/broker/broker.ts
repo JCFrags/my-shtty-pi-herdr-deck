@@ -15,6 +15,10 @@ import {
 import { EventStore } from "../state/event-store.js";
 import { createId, isEntityId } from "../shared/ids.js";
 import { canonicalJson, sha256 } from "../shared/canonical-json.js";
+import {
+  validateProviderProjection,
+  type ProviderProjection,
+} from "../shared/provider-projections.js";
 import { NdjsonDecoder, encodeFrame } from "../shared/protocol/codec.js";
 import {
   validateHello,
@@ -544,6 +548,10 @@ export class Broker {
   #secret: string;
   #snapshotAuthentication: string;
   #clients = new Set<Client>();
+  #providerProjections = new Map<
+    string,
+    { projection: ProviderProjection; client: Client }
+  >();
   #questionTimers = new Map<string, NodeJS.Timeout>();
   #deadlineTimers = new Map<string, NodeJS.Timeout>();
   #coordinationSignals = new Map<string, number>();
@@ -645,6 +653,10 @@ export class Broker {
       if (event.type !== "herdr.metadata_projected")
         this.#trackDeferred(() =>
           this.#enqueueMutation(() => this.#projectCompactMetadata(event)),
+        );
+      if (event.type === "herdr.provision.outcome")
+        this.#trackDeferred(() =>
+          this.#enqueueMutation(() => this.#watchHerdrProvisionOutcome(event)),
         );
     });
     this.snapshotStore = new SnapshotStore(this.paths.snapshot);
@@ -1253,6 +1265,11 @@ export class Broker {
       }
       client.serverRequests.clear();
       this.#clients.delete(client);
+      for (const [agentId, entry] of this.#providerProjections)
+        if (entry.client === client) {
+          this.#providerProjections.delete(agentId);
+          this.#sendProviderProjectionEvent(agentId, undefined);
+        }
     });
   }
   async #enqueueMutation<T>(action: () => Promise<T>): Promise<T> {
@@ -1915,6 +1932,223 @@ export class Broker {
         else if (request.method === "herdr.stop") await this.#herdr.stop(guard);
         else await this.#herdr.close(guard);
         result = { ok: true };
+      } else if (request.method === "presentation.projection.update") {
+        if (
+          !exactKeys(request.params, ["projection"]) ||
+          !principal.agentId ||
+          !principal.piSessionId ||
+          (!client.adoptedRegistration &&
+            client.managedConnectionGeneration === undefined)
+        )
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "Only a registered Pi adapter can update its presentation projection.",
+          );
+        let projection: ProviderProjection;
+        try {
+          projection = validateProviderProjection(request.params.projection);
+        } catch {
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Provider presentation projection is invalid or exceeds its limit.",
+          );
+        }
+        if (
+          projection.ownerAgentId !== principal.agentId ||
+          projection.piSessionId !== principal.piSessionId
+        )
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "Provider presentation projection owner does not match this Pi adapter.",
+          );
+        this.#providerProjections.set(principal.agentId, {
+          projection,
+          client,
+        });
+        this.#sendProviderProjectionEvent(principal.agentId, projection);
+        result = { accepted: true, ephemeral: true };
+      } else if (
+        request.method === "provider.todo_action" ||
+        request.method === "provider.agent_board_action" ||
+        request.method === "provider.agent_board_view" ||
+        request.method === "provider.files_open" ||
+        request.method === "provider.files_action"
+      ) {
+        requirePermission(principal, "read:state");
+        const p = request.params;
+        if (!safeText(p.ownerAgentId, 256))
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Provider owner is required.",
+          );
+        const projection = this.#providerProjections.get(p.ownerAgentId);
+        if (
+          !projection ||
+          (projection.client !== client && principal.kind === "deck")
+        ) {
+          // A deck may only address the adapter that published the selected projection.
+          if (!projection)
+            throw new OrchestratorError(
+              "NOT_FOUND",
+              "Provider projection is unavailable.",
+            );
+        }
+        const agent = this.store.state.agents[p.ownerAgentId];
+        if (!agent || agent.piSessionId !== projection.projection.piSessionId)
+          throw new OrchestratorError(
+            "AGENT_DISCONNECTED",
+            "Provider owner identity is stale.",
+          );
+        let method = request.method;
+        let params: Record<string, unknown> = {};
+        if (request.method === "provider.todo_action") {
+          if (
+            !exactKeys(p, ["ownerAgentId", "action", "taskId"]) ||
+            !["start", "done", "clear_wait"].includes(p.action as string) ||
+            !safeText(p.taskId, 256)
+          )
+            throw new OrchestratorError(
+              "INVALID_REQUEST",
+              "Todo action is invalid.",
+            );
+          params = { action: p.action, taskId: p.taskId };
+        } else if (request.method === "provider.files_open") {
+          if (!exactKeys(p, ["ownerAgentId"]))
+            throw new OrchestratorError(
+              "INVALID_REQUEST",
+              "Files request is invalid.",
+            );
+          method = "provider.files_open";
+        } else if (request.method === "provider.files_action") {
+          if (
+            !safeText(p.action, 64) ||
+            !exactKeys(
+              p,
+              [
+                "ownerAgentId",
+                "action",
+                "path",
+                "query",
+                "expanded",
+                "selected",
+                "includedPaths",
+              ].filter((key) => p[key] !== undefined),
+            ) ||
+            (p.query !== undefined &&
+              (typeof p.query !== "string" || p.query.length > 256))
+          )
+            throw new OrchestratorError(
+              "INVALID_REQUEST",
+              "Files provider action is invalid.",
+            );
+          method = "provider.files_action";
+          params = Object.fromEntries(
+            Object.entries(p).filter(([key]) => key !== "ownerAgentId"),
+          );
+        } else if (request.method === "provider.agent_board_view") {
+          if (
+            !exactKeys(
+              p,
+              ["ownerAgentId", "selections"].filter(
+                (key) => p[key] !== undefined,
+              ),
+            )
+          )
+            throw new OrchestratorError(
+              "INVALID_REQUEST",
+              "Agent Board view request is invalid.",
+            );
+          if (p.selections !== undefined) {
+            if (
+              !p.selections ||
+              typeof p.selections !== "object" ||
+              Array.isArray(p.selections)
+            )
+              throw new OrchestratorError(
+                "INVALID_REQUEST",
+                "Agent Board selections are invalid.",
+              );
+            const selections = p.selections as Record<string, unknown>;
+            if (
+              Object.keys(selections).some(
+                (key) =>
+                  !["inbox", "updates", "decisions", "history"].includes(key),
+              ) ||
+              Object.values(selections).some((value) => !safeText(value, 256))
+            )
+              throw new OrchestratorError(
+                "INVALID_REQUEST",
+                "Agent Board selections are invalid.",
+              );
+            params = { selections };
+          }
+          method = "provider.agent_board_view";
+        } else {
+          if (p.action === "open-ui") {
+            if (!exactKeys(p, ["ownerAgentId", "action"]))
+              throw new OrchestratorError(
+                "INVALID_REQUEST",
+                "Agent Board open is invalid.",
+              );
+            method = "provider.agent_board_action";
+            params = { action: "open-ui" };
+          } else {
+            const allowed = [
+              "ownerAgentId",
+              "action",
+              "questionId",
+              "expectedRevision",
+              "value",
+              "answerId",
+              "updateId",
+              "outcome",
+              "summary",
+              "resultingUpdateIds",
+              "attachments",
+            ];
+            if (
+              Object.keys(p).some((key) => !allowed.includes(key)) ||
+              !safeText(p.action, 64)
+            )
+              throw new OrchestratorError(
+                "INVALID_REQUEST",
+                "Agent Board action is invalid.",
+              );
+            if (
+              [
+                "answer-question",
+                "accept-recommendation",
+                "dismiss-question",
+                "retry-delivery",
+                "archive-update",
+              ].includes(p.action as string) &&
+              (!safeText(p.questionId ?? p.updateId, 256) ||
+                !Number.isSafeInteger(p.expectedRevision))
+            )
+              throw new OrchestratorError(
+                "INVALID_REQUEST",
+                "Agent Board revision is invalid.",
+              );
+            params = Object.fromEntries(
+              Object.entries(p).filter(([key]) => key !== "ownerAgentId"),
+            );
+            params = { ...params, schemaVersion: 2 };
+          }
+        }
+        result = await this.#sendAdapterRequest(
+          p.ownerAgentId as string,
+          method,
+          params,
+          {
+            generation: agent.generation,
+            ...(agent.connectionGeneration === undefined
+              ? {}
+              : { connectionGeneration: agent.connectionGeneration }),
+            piSessionId: agent.piSessionId,
+          },
+          10_000,
+          projection.client,
+        );
       } else if (request.method === "events.verify") {
         requirePermission(principal, "read:audit");
         if (Object.keys(request.params).length)
@@ -2048,6 +2282,14 @@ export class Broker {
                   results: Object.values(this.store.state.results ?? {}).filter(
                     (item) => this.#canAccessTaskSync(principal, item.taskId),
                   ),
+                  providerProjections: [...this.#providerProjections.values()]
+                    .map((entry) => entry.projection)
+                    .filter((projection) =>
+                      this.#canAccessAgentSync(
+                        principal,
+                        projection.ownerAgentId,
+                      ),
+                    ),
                 },
               }
             : {}),
@@ -6394,6 +6636,7 @@ export class Broker {
       runId?: string;
     },
     timeoutMs = 10_000,
+    boundClient?: Client,
   ): Promise<unknown> {
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000)
       throw new OrchestratorError("TIMEOUT", "Adapter deadline is invalid.");
@@ -6403,7 +6646,11 @@ export class Broker {
         !item.socket.destroyed &&
         item.principal?.kind === "pi_child" &&
         item.principal.agentId === agentId &&
-        item.managedConnectionGeneration === agent?.connectionGeneration,
+        (boundClient
+          ? item === boundClient &&
+            (item.adoptedRegistration ||
+              item.managedConnectionGeneration === agent?.connectionGeneration)
+          : item.managedConnectionGeneration === agent?.connectionGeneration),
     );
     const client = clients.length === 1 ? clients[0] : undefined;
     if (
@@ -7049,6 +7296,56 @@ export class Broker {
         payload: { workflowId, state: workflowState },
       });
   }
+  async #watchHerdrProvisionOutcome(
+    event: import("../state/types.js").StoredEvent,
+  ): Promise<void> {
+    const payload = (event.payload ?? {}) as Record<string, unknown>;
+    const state = String(payload.state ?? "");
+    if (state !== "timed_out" && state !== "failed") return;
+    const agentId = String(payload.agentId ?? event.entityRefs?.agentId ?? "");
+    const agent = this.store.state.agents[agentId];
+    const run = agent?.currentRunId
+      ? this.store.state.runs[agent.currentRunId]
+      : undefined;
+    if (!agent || !run || isTerminal(run.state)) return;
+    const reason =
+      state === "timed_out"
+        ? "HERDR_REGISTRATION_TIMEOUT"
+        : String(payload.reason ?? "HERDR_PROVISION_FAILED");
+    await this.store.append({
+      type: "run.state_changed",
+      actor: { principalId: "system", kind: "system" },
+      entityRefs: { runId: run.id, taskId: run.taskId },
+      payload:
+        state === "timed_out"
+          ? {
+              runId: run.id,
+              state: "timed_out",
+              reason: {
+                code: "TIMEOUT",
+                message: "The task wall deadline expired.",
+              },
+            }
+          : { runId: run.id, state: "failed" },
+    });
+    const current = this.store.state.agents[agentId];
+    if (
+      current &&
+      !["replaced", "failed", "stopped", "closed"].includes(current.state)
+    )
+      await this.store.append({
+        type: "agent.state_changed",
+        actor: { principalId: "system", kind: "system" },
+        entityRefs: { agentId },
+        payload: {
+          agentId,
+          state: "replaced",
+          reason,
+          message: `Worker dispatch failed before registration: ${reason}. Retry the task or reuse an idle retained worker.`,
+        },
+      });
+  }
+
   #observeAdapterDeliveryFailure(error: unknown): void {
     // These are the only expected adapter-delivery outcomes at this boundary.
     if (!(
@@ -7083,6 +7380,32 @@ export class Broker {
     client.slowClosed = true;
     client.socket.destroy();
   }
+  #sendProviderProjectionEvent(
+    ownerAgentId: string,
+    projection: ProviderProjection | undefined,
+  ): void {
+    const event: import("../state/types.js").StoredEvent = {
+      schemaVersion: 1,
+      seq: this.store.state.lastEventSeq,
+      id: createId("evt"),
+      timestamp: new Date(this.#now()).toISOString(),
+      type: "presentation.projection.changed",
+      actor: { principalId: "broker", kind: "system" },
+      entityRefs: { agentId: ownerAgentId },
+      payload: { ownerAgentId, projection: projection ?? null },
+      prevHash: "ephemeral",
+      hash: "ephemeral",
+    };
+    for (const subscriber of this.#clients)
+      if (
+        subscriber.subscribed &&
+        subscriber.principal &&
+        this.#canAccessAgentSync(subscriber.principal, ownerAgentId) &&
+        this.#matchesFilter(subscriber.eventFilter, event)
+      )
+        this.#sendEvent(subscriber, event);
+  }
+
   #writeFrame(client: Client, frame: unknown): void {
     if (client.slowClosed || client.socket.destroyed) return;
     let encoded: Buffer;

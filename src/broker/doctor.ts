@@ -74,6 +74,14 @@ export async function doctor(
   const git = await safeExecutable("/usr/bin/git");
   checks.push(
     check(
+      "provider-projection-contracts",
+      true,
+      false,
+      "Agent Board and Todo event adapters are installed. Providers are optional.",
+    ),
+  );
+  checks.push(
+    check(
       "git",
       git,
       true,
@@ -90,7 +98,7 @@ export async function doctor(
       true,
       binaryOk
         ? "Authoritative Herdr binary is executable."
-        : "HERDR_BIN_PATH is missing or unsafe. Upgrade to Herdr 0.8.0 or newer and run this command inside its managed pane.",
+        : "HERDR_BIN_PATH is missing or unsafe. Upgrade to Herdr 0.8.2 or newer and run this command inside its managed pane.",
     ),
   );
 
@@ -172,7 +180,7 @@ export async function doctor(
         "herdr-schema",
         false,
         true,
-        "Run inside Herdr 0.8.0 or newer with an injected absolute HERDR_BIN_PATH.",
+        "Run inside Herdr 0.8.2 or newer with an injected absolute HERDR_BIN_PATH.",
       ),
     );
   }

@@ -39,6 +39,23 @@ export const m6Snapshot: DeckSnapshot = {
     },
   ],
   workflows: [],
+  providerProjections: [
+    {
+      ownerAgentId: "agt_alpha",
+      piSessionId: "pi-alpha",
+      agentBoard: {
+        available: true,
+        openCount: 1,
+        items: [{ id: "board-1", title: "Review release?", state: "open" }],
+      },
+      todo: {
+        available: true,
+        total: 2,
+        completed: 1,
+        items: [{ id: "todo-1", text: "Build deck", status: "working" }],
+      },
+    },
+  ],
 };
 
 export const m6Event = (

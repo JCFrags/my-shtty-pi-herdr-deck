@@ -68,6 +68,8 @@ export interface PiApiLike {
   ): void;
   appendEntry?(customType: string, data?: unknown): void;
   events?: {
+    on(event: string, listener: (data: unknown) => void): unknown;
+    off?(event: string, listener: (data: unknown) => void): void;
     emit(event: string, data: unknown): void;
   };
   registerCommand(
@@ -82,6 +84,18 @@ export interface PiApiLike {
     content: string,
     options?: { deliverAs?: "steer" | "followUp" },
   ): void | Promise<void>;
+  sendMessage?(
+    message: {
+      customType: string;
+      content: string;
+      display: boolean;
+      details?: Record<string, unknown>;
+    },
+    options?: {
+      deliverAs?: "steer" | "followUp" | "nextTurn";
+      triggerTurn?: boolean;
+    },
+  ): void;
   getActiveTools?(): string[];
   getAllTools?(): PiToolLike[];
   setActiveTools?(tools: string[]): void;

@@ -1,4 +1,5 @@
 import type { Agent, Run, Task, Workflow } from "../state/types.js";
+import type { ProviderProjection } from "../shared/provider-projections.js";
 
 export interface DeckQuestionOption {
   id: string;
@@ -55,6 +56,7 @@ export interface DeckSnapshot {
   groups?: DeckGroup[];
   questions?: DeckQuestion[];
   results?: DeckResult[];
+  providerProjections?: ProviderProjection[];
 }
 
 export interface DeckEvent {
@@ -75,6 +77,7 @@ export interface DeckState {
   groups: Map<string, DeckGroup>;
   questions: Map<string, DeckQuestion>;
   results: Map<string, DeckResult>;
+  providerProjections: Map<string, ProviderProjection>;
 }
 
 export type DeckNotificationKind =

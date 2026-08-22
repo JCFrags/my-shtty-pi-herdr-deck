@@ -141,6 +141,14 @@ export interface PiServerRequest {
   method: string;
   params: Record<string, unknown>;
 }
+export interface PiBrokerEvent {
+  seq: number;
+  id: string;
+  event: string;
+  timestamp: string;
+  refs: Record<string, string>;
+  data: Record<string, unknown>;
+}
 export interface PiBrokerClientOptions {
   socketPath: string;
   sessionKey: string;
@@ -153,6 +161,7 @@ export interface PiBrokerClientOptions {
   requestTimeoutMs?: number;
   onServerRequest?: (request: PiServerRequest) => Promise<unknown>;
   onControlRequest?: (request: PiServerRequest) => Promise<unknown>;
+  onEvent?: (event: PiBrokerEvent) => void;
 }
 export interface PiHerdrSessionReference {
   source: "herdr:pi";
@@ -354,6 +363,57 @@ export class PiBrokerClient {
         }
         if (frame.type === "server_request") {
           void this.handleServerRequest(frame);
+          continue;
+        }
+        if (frame.type === "event") {
+          try {
+            if (
+              !exactKeys(frame, [
+                "v",
+                "type",
+                "seq",
+                "id",
+                "event",
+                "timestamp",
+                "refs",
+                "data",
+              ]) ||
+              frame.v !== 1 ||
+              !Number.isSafeInteger(frame.seq) ||
+              (frame.seq as number) < 1 ||
+              typeof frame.event !== "string" ||
+              !/^[a-z][a-z0-9_.-]{0,127}$/u.test(frame.event) ||
+              typeof frame.timestamp !== "string" ||
+              Buffer.byteLength(frame.timestamp, "utf8") > 64 ||
+              !frame.refs ||
+              typeof frame.refs !== "object" ||
+              Array.isArray(frame.refs) ||
+              Object.values(frame.refs as Record<string, unknown>).some(
+                (value) =>
+                  typeof value !== "string" ||
+                  Buffer.byteLength(value, "utf8") > 256,
+              ) ||
+              !frame.data ||
+              typeof frame.data !== "object" ||
+              Array.isArray(frame.data) ||
+              !safeErrorDetails(frame.data)
+            )
+              throw new Error("BROKER_EVENT_INVALID");
+            this.#options.onEvent?.({
+              seq: frame.seq as number,
+              id: frame.id,
+              event: frame.event,
+              timestamp: frame.timestamp,
+              refs: frame.refs as Record<string, string>,
+              data: frame.data as Record<string, unknown>,
+            });
+          } catch (error) {
+            this.failClosed(
+              error instanceof Error
+                ? error
+                : new Error("BROKER_EVENT_INVALID"),
+            );
+          }
           continue;
         }
         if (frame.type === "hello_result") {

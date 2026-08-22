@@ -149,6 +149,37 @@ test("Herdr API uses argv CLI wrappers and parses agent.list response", async ()
   ]);
 });
 
+test("target resolution accepts the exact Herdr 0.8.2 plugin pane context", () => {
+  const context = parseHerdrPluginContext(
+    JSON.stringify({
+      workspace_id: "w54",
+      workspace_label: "unified-ui-accept",
+      workspace_cwd: "/home/mainpc/Projects/my-shtty-pi-herdr-deck",
+      tab_id: "w54:t1",
+      tab_label: "1",
+      focused_pane_id: "w54:p1",
+      focused_pane_cwd: "/home/mainpc/Projects/my-shtty-pi-herdr-deck",
+      focused_pane_agent: "pi",
+      focused_pane_status: "done",
+      invocation_source: "api",
+      correlation_id: "plugin-pane",
+    }),
+    "w54:p2",
+  );
+  assert.deepEqual(context.targetPaneCandidates, ["w54:p1"]);
+  const resolution = resolveTargetPane(context, [
+    {
+      terminalId: "term-pi",
+      paneId: "w54:p1",
+      agent: "pi",
+      status: "done",
+      focused: true,
+    },
+  ]);
+  assert.equal(resolution.kind, "resolved");
+  if (resolution.kind === "resolved") assert.equal(resolution.paneId, "w54:p1");
+});
+
 test("target resolution honors one context target and never chooses arbitrarily", () => {
   const selected = parseHerdrPluginContext(
     JSON.stringify({ invocation: { target_pane_id: "pane-b" } }),

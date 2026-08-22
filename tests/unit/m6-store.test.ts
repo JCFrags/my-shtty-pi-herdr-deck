@@ -43,6 +43,41 @@ test("store replaces snapshots without retaining mutable input or state maps", (
   assert.equal(before.tasks.get("tsk_1")?.state, "queued");
 });
 
+test("unchanged heartbeats advance replay state without redrawing the deck", () => {
+  const store = new DeckStore();
+  store.replace({
+    seq: 1,
+    agents: [{ id: "agt_1", state: "idle", generation: 1 }],
+    tasks: [],
+    workflows: [],
+  });
+  let renders = 0;
+  store.onChange(() => renders++);
+  assert.equal(
+    store.apply({
+      seq: 2,
+      id: "heartbeat",
+      event: "agent.heartbeat",
+      refs: { agentId: "agt_1" },
+      data: { state: "idle", adapterSeq: 2 },
+    }),
+    true,
+  );
+  assert.equal(store.state.seq, 2);
+  assert.equal(renders, 0);
+  assert.equal(
+    store.apply({
+      seq: 3,
+      id: "working",
+      event: "agent.heartbeat",
+      refs: { agentId: "agt_1" },
+      data: { state: "working", adapterSeq: 3 },
+    }),
+    true,
+  );
+  assert.equal(renders, 1);
+});
+
 test("replay is ordered and stale events do not overwrite newer state", () => {
   const store = new DeckStore();
   store.replace({

@@ -16,6 +16,7 @@ import {
   createManagedTokenFile,
   verifyManagedTokenFile,
   retainManagedFileForCleanup,
+  archiveManagedFileForCleanup,
 } from "../../src/herdr/token-files.js";
 import {
   projectCapabilities,
@@ -78,6 +79,18 @@ test("token cleanup retains claimed bytes and rejects replacements", async () =>
   assert.equal(await readFile(target, "utf8"), "keep\n");
   assert.equal(await retainManagedFileForCleanup(path), "retained");
   assert.equal(await readFile(path, "utf8"), token.token + "\n");
+});
+
+test("successful registration cleanup archives managed files outside the admission directory", async () => {
+  const base = await mkdtemp(join(tmpdir(), "m2-token-archive-"));
+  const root = join(base, "prompts");
+  const token = createManagedToken();
+  const path = await createManagedTokenFile(root, "agent", token);
+  assert.equal(await archiveManagedFileForCleanup(path), "retained");
+  assert.deepEqual(await readdir(root), []);
+  const archived = await readdir(join(base, "registration-archive"));
+  assert.equal(archived.length, 1);
+  assert.match(archived[0] ?? "", /^\.token-/u);
 });
 
 test("token cleanup is idempotent for a missing path", async () => {

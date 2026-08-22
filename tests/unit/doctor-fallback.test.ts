@@ -48,6 +48,18 @@ test("a safe doctor report never exposes its retained binary path", async () => 
     report.checks.find((check) => check.name === "herdr-binary")?.detail,
     "Authoritative Herdr binary is executable.",
   );
+  assert.deepEqual(
+    report.checks.find(
+      (check) => check.name === "provider-projection-contracts",
+    ),
+    {
+      name: "provider-projection-contracts",
+      available: true,
+      mandatory: false,
+      detail:
+        "Agent Board and Todo event adapters are installed. Providers are optional.",
+    },
+  );
 });
 
 test("doctor report validation rejects malformed and secret-bearing reports without echo", () => {

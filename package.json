@@ -51,7 +51,7 @@
     "lint": "prettier --check \".github/**/*.{yml,yaml}\" \"bin/*\" \"extensions/**/*.ts\" \"src/**/*.ts\" \"tests/**/*.{ts,json}\" \"types/**/*.ts\" \"scripts/**/*.mjs\" \"schemas/**/*.json\" \"profiles/**/*.json\" \"examples/**/*.json\" \"workflows/{parallel-scout,single}.json\" package.json package-lock.json tsconfig.json"
   },
   "dependencies": {
-    "@pi-herdr-deck/tui": "npm:@earendil-works/pi-tui@0.84.1"
+    "@pi-herdr-deck/tui": "npm:@earendil-works/pi-tui@0.84.2"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
