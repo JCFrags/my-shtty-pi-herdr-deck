@@ -1,4 +1,8 @@
 import { LIMITS } from "../shared/limits.js";
+import {
+  validateProviderProjection,
+  type ProviderProjection,
+} from "../shared/provider-projections.js";
 import type { Agent, Run, Task, Workflow } from "../state/types.js";
 import type {
   DeckEvent,
@@ -21,6 +25,7 @@ const empty = (): DeckState => ({
   groups: new Map(),
   questions: new Map(),
   results: new Map(),
+  providerProjections: new Map(),
 });
 const asRecord = (value: unknown): Record<string, unknown> | undefined =>
   value && typeof value === "object" && !Array.isArray(value)
@@ -100,6 +105,12 @@ const cloneState = (state: DeckState): DeckState => ({
       },
     ]),
   ),
+  providerProjections: new Map(
+    [...state.providerProjections].map(([id, value]) => [
+      id,
+      structuredClone(value),
+    ]),
+  ),
 });
 
 export class DeckStore {
@@ -163,11 +174,43 @@ export class DeckStore {
     for (const value of array<DeckResult>(snapshot.results))
       if (idFrom(value.id))
         next.results.set(value.id, this.#normalizeResult(value));
+    for (const value of array<ProviderProjection>(snapshot.providerProjections))
+      try {
+        next.providerProjections.set(
+          value.ownerAgentId,
+          validateProviderProjection(value),
+        );
+      } catch {
+        // Ignore an invalid optional provider projection.
+      }
     this.#state = next;
     this.#emit();
   }
 
   apply(event: DeckEvent): boolean {
+    if (event.event === "presentation.projection.changed") {
+      const data = asRecord(event.data) ?? {};
+      const ownerAgentId = idFrom(data.ownerAgentId ?? event.refs?.agentId);
+      if (!ownerAgentId) return false;
+      const next = cloneState(this.#state);
+      if (data.projection === null)
+        next.providerProjections.delete(ownerAgentId);
+      else {
+        try {
+          const projection = validateProviderProjection(data.projection);
+          if (projection.ownerAgentId !== ownerAgentId) return false;
+          const current = this.#state.providerProjections.get(ownerAgentId);
+          if (current && JSON.stringify(current) === JSON.stringify(projection))
+            return true;
+          next.providerProjections.set(ownerAgentId, projection);
+        } catch {
+          return false;
+        }
+      }
+      this.#state = next;
+      this.#emit();
+      return true;
+    }
     if (!Number.isSafeInteger(event.seq) || event.seq <= this.#state.seq)
       return false;
     const next = cloneState(this.#state);
@@ -228,7 +271,14 @@ export class DeckStore {
       this.#result(next, event, data, taskId, runId);
 
     next.seq = event.seq;
+    const heartbeatStateChanged =
+      event.event === "agent.heartbeat" && agentId
+        ? this.#state.agents.get(agentId)?.state !==
+          next.agents.get(agentId)?.state
+        : false;
     this.#state = next;
+    if (event.event === "agent.heartbeat" && !heartbeatStateChanged)
+      return true;
     this.#notify(event, data);
     this.#emit();
     return true;
@@ -451,6 +501,7 @@ export class DeckStore {
       seq: event.seq,
       text: String(
         data.message ??
+          data.reason ??
           data.summary ??
           data.prompt ??
           body.message ??
@@ -609,5 +660,14 @@ export function snapshotFromBroker(value: unknown): DeckSnapshot {
     results: array<unknown>(record.results)
       .map(normalizeResult)
       .filter(present),
+    providerProjections: array<unknown>(record.providerProjections).flatMap(
+      (value) => {
+        try {
+          return [validateProviderProjection(value)];
+        } catch {
+          return [];
+        }
+      },
+    ),
   };
 }

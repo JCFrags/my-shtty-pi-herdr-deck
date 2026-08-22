@@ -2,14 +2,21 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { DeckActions, type DeckAction } from "../../src/deck/actions.js";
 import { BrokerClient } from "../../src/deck/broker-client.js";
+import { BrokerDeckApp } from "../../src/deck/broker-app.js";
 import {
   renderAgentInspector,
   renderAgents,
+  renderFiles,
   renderGroupDetail,
   renderGroups,
+  renderHome,
+  renderInbox,
   renderNotifications,
   renderResultDetail,
   renderTaskDetail,
+  renderTodoSummary,
+  renderTodoDetail,
+  currentProviderProjection,
 } from "../../src/deck/views.js";
 import type { DeckState } from "../../src/deck/types.js";
 
@@ -69,6 +76,17 @@ const state: DeckState = {
     ],
   ]),
   questions: new Map(),
+  providerProjections: new Map([
+    [
+      "agt_1",
+      {
+        ownerAgentId: "agt_1",
+        piSessionId: "pi-1",
+        agentBoard: { available: false, openCount: 0, items: [] },
+        todo: { available: false, total: 0, completed: 0, items: [] },
+      },
+    ],
+  ]),
   results: new Map([
     [
       "res_1",
@@ -117,6 +135,140 @@ test("views keep every line within narrow terminal widths", () => {
   );
 });
 
+test("unified views expose current work, files, and separate question semantics", () => {
+  state.questions.set("qst_1", {
+    id: "qst_1",
+    taskId: "tsk_1",
+    prompt: "Choose a target.",
+    state: "open",
+  });
+  state.agents.set("agt_history", {
+    id: "agt_history",
+    state: "working",
+    generation: 1,
+    paneId: "p-history",
+    displayName: "Historical noise",
+  });
+  state.providerProjections.delete("agt_1");
+  const homeWithoutProviders = renderHome(state, 120, "p1").join("\n");
+  assert.doesNotMatch(homeWithoutProviders, /scope is unavailable/);
+  assert.match(homeWithoutProviders, /Worker/);
+  state.providerProjections.set("agt_1", {
+    ownerAgentId: "agt_1",
+    piSessionId: "pi-1",
+    agentBoard: {
+      available: true,
+      openCount: 1,
+      items: [{ id: "board-selected", title: "Selected board item" }],
+    },
+    todo: {
+      available: true,
+      total: 2,
+      completed: 1,
+      items: [{ id: "todo-selected", text: "Selected Todo item" }],
+    },
+  });
+  state.providerProjections.set("agt_history", {
+    ownerAgentId: "agt_history",
+    piSessionId: "pi-history",
+    agentBoard: {
+      available: true,
+      openCount: 1,
+      items: [{ id: "board-wrong", title: "Wrong board item" }],
+    },
+    todo: {
+      available: true,
+      total: 1,
+      completed: 0,
+      items: [{ id: "todo-wrong", text: "Wrong Todo item" }],
+    },
+  });
+  const home = renderHome(state, 120, "p1").join("\n");
+  const todo = renderTodoSummary(state, 120, "p1").join("\n");
+  const inbox = renderInbox(state, 120, "qst_1", "p1").join("\n");
+  assert.match(home, /CURRENT SCOPE/);
+  assert.match(home, /ACTIVE WORK/);
+  assert.match(home, /orchestrator question/);
+  assert.match(home, /Providers · Agent Board 1 pending · Todo 1\/2 done/);
+  assert.doesNotMatch(home, /Historical noise/);
+  assert.match(home, /Scope totals · 1 active · 0 idle retained · 0 history/);
+  assert.match(
+    renderFiles(120, state, "p1").join("\n"),
+    /Provider browser: tree navigation/,
+  );
+  assert.match(todo, /Selected Todo item/);
+  assert.doesNotMatch(todo, /Wrong Todo item/);
+  assert.match(inbox, /BLOCKING · Orchestrator questions/);
+  assert.match(inbox, /ask_user_question/);
+  assert.doesNotMatch(
+    inbox,
+    /AGENT BOARD · Provider-owned asynchronous state|Pi Signal Board|Selected board item|Wrong board item/,
+  );
+  state.questions.delete("qst_1");
+  state.agents.delete("agt_history");
+  state.providerProjections.delete("agt_history");
+  state.providerProjections.set("agt_1", {
+    ownerAgentId: "agt_1",
+    piSessionId: "pi-1",
+    agentBoard: { available: false, openCount: 0, items: [] },
+    todo: { available: false, total: 0, completed: 0, items: [] },
+  });
+});
+
+test("agent filters keep history out of active view and expose paging", () => {
+  const many = new Map(state.agents);
+  for (let index = 0; index < 14; index++)
+    many.set(`agt_idle_${index}`, {
+      id: `agt_idle_${index}`,
+      state: "idle",
+      generation: 1,
+      displayName: `Retained ${index}`,
+    });
+  const filtered = { ...state, agents: many };
+  const active = renderAgents(filtered, 120, undefined, "active").join("\\n");
+  assert.doesNotMatch(active, /Retained 0/);
+  assert.match(active, /ACTIVE/);
+  assert.match(
+    renderAgents(filtered, 120, undefined, "idle").join("\\n"),
+    /page 1\//,
+  );
+  assert.match(
+    renderAgents(filtered, 120, undefined, "idle").join("\\n"),
+    /Scroll/,
+  );
+});
+
+test("provider target selection prefers the current session after reload", () => {
+  const reloadState = structuredClone(state);
+  reloadState.agents.set("agt_old", {
+    ...reloadState.agents.get("agt_1")!,
+    id: "agt_old",
+    piSessionId: "pi-new",
+    paneId: "p-reload",
+  });
+  reloadState.agents.set("agt_new", {
+    ...reloadState.agents.get("agt_1")!,
+    id: "agt_new",
+    piSessionId: "pi-new",
+    paneId: "p-reload",
+  });
+  reloadState.providerProjections.set("agt_old", {
+    ...reloadState.providerProjections.get("agt_1")!,
+    ownerAgentId: "agt_old",
+    piSessionId: "pi-old",
+  });
+  reloadState.providerProjections.set("agt_new", {
+    ...reloadState.providerProjections.get("agt_1")!,
+    ownerAgentId: "agt_new",
+    piSessionId: "pi-new",
+    files: { available: true, view: { rows: [{ path: "new.ts" }] } },
+  });
+  assert.equal(
+    currentProviderProjection(reloadState, "p-reload")?.ownerAgentId,
+    "agt_new",
+  );
+});
+
 test("views expose placement, model, thinking, and group detail", () => {
   const inspector = renderAgentInspector(
     state.agents.get("agt_1"),
@@ -148,6 +300,96 @@ test("views expose state and result meaning without color", () => {
     ).join("\n"),
     /\[timeout\]/,
   );
+});
+
+test("switching tabs cancels the active DEFAULT input", () => {
+  const client = new BrokerClient({
+    socketPath: "/tmp/m6-input.sock",
+    secret: "test",
+  });
+  const app = new BrokerDeckApp({
+    client,
+    requestRender: () => undefined,
+    getHeight: () => 40,
+  });
+  app.handleInput("6");
+  app.handleInput("d");
+  assert.match(app.render(120).join("\\n"), /DEFAULT:/);
+  app.handleInput("1");
+  assert.doesNotMatch(app.render(120).join("\\n"), /DEFAULT:/);
+  app.dispose();
+  client.stop();
+});
+
+test("provider Todo actions use the selected provider ID, not an orchestrator task", async () => {
+  const requests: Array<{ method: string; params: unknown }> = [];
+  const client = {
+    request: async (method: string, params: unknown) => {
+      requests.push({ method, params });
+      return {};
+    },
+  } as unknown as BrokerClient;
+  const actions = new DeckActions(client);
+  const worker = state.agents.get("agt_1")!;
+  const orchestratorTask = state.tasks.get("tsk_1")!;
+  assert.equal(
+    actions.authorize("todoStart", { todoTaskId: "todo-exact" }),
+    undefined,
+  );
+  await actions.run("todoStart", { agent: worker, todoTaskId: "todo-exact" });
+  await actions.run("todoDone", {
+    agent: worker,
+    task: orchestratorTask,
+    todoTaskId: "todo-exact",
+  });
+  await actions.run("todoClearWait", {
+    agent: worker,
+    todoTaskId: "todo-exact",
+  });
+  assert.deepEqual(
+    requests.map((entry) => (entry.params as { taskId: string }).taskId),
+    ["todo-exact", "todo-exact", "todo-exact"],
+  );
+  state.providerProjections.set("agt_1", {
+    ownerAgentId: "agt_1",
+    piSessionId: "pi-1",
+    agentBoard: { available: false, openCount: 0, items: [] },
+    todo: {
+      available: true,
+      total: 1,
+      completed: 0,
+      items: [{ id: "todo-exact", text: "Provider work" }],
+    },
+  });
+  assert.match(
+    renderTodoDetail(state, 120, "p1", "todo-exact").join("\\n"),
+    /ID: todo-exact/,
+  );
+});
+
+test("Agent Board view keeps provider-owned selections in the correlated request", async () => {
+  const requests: Array<{ method: string; params: unknown }> = [];
+  const client = {
+    request: async (method: string, params: unknown) => {
+      requests.push({ method, params });
+      return {};
+    },
+  } as unknown as BrokerClient;
+  const actions = new DeckActions(client);
+  const worker = state.agents.get("agt_1")!;
+  await actions.run("boardView", {
+    agent: worker,
+    boardSelections: { inbox: "qst_exact", updates: "upd_exact" },
+  });
+  assert.deepEqual(requests, [
+    {
+      method: "provider.agent_board_view",
+      params: {
+        ownerAgentId: "agt_1",
+        selections: { inbox: "qst_exact", updates: "upd_exact" },
+      },
+    },
+  ]);
 });
 
 test("every action has a keyboard-safe authorization result", () => {

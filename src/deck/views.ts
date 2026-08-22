@@ -105,54 +105,373 @@ function questionForAgent(
   );
 }
 
+export function currentProviderProjection(
+  state: DeckState,
+  targetPaneId?: string,
+) {
+  const projections = [...state.providerProjections.values()];
+  const candidates = projections.filter((projection) => {
+    const agent = state.agents.get(projection.ownerAgentId);
+    return Boolean(
+      agent &&
+      !["closed", "stopped"].includes(agent.state) &&
+      (!targetPaneId || agent.paneId === targetPaneId),
+    );
+  });
+  const ranked = candidates.sort((a, b) => {
+    const agentA = state.agents.get(a.ownerAgentId);
+    const agentB = state.agents.get(b.ownerAgentId);
+    const score = (projection: typeof a, agent: Agent | undefined): number =>
+      (agent && projection.piSessionId === agent.piSessionId ? 8 : 0) +
+      (agent && !agent.parentAgentId ? 4 : 0) +
+      (agent && agent.state !== "idle" ? 1 : 0);
+    return score(b, agentB) - score(a, agentA);
+  });
+  return ranked[0] ?? (targetPaneId ? undefined : projections[0]);
+}
+
+function currentScope(
+  state: DeckState,
+  targetPaneId?: string,
+): { agents: Agent[]; tasks: Task[] } {
+  const projection = currentProviderProjection(state, targetPaneId);
+  const targetedRoot = targetPaneId
+    ? [...state.agents.values()].find((agent) => agent.paneId === targetPaneId)
+    : undefined;
+  const rootAgentId = targetedRoot?.id ?? projection?.ownerAgentId;
+  if (!rootAgentId) return { agents: [], tasks: [] };
+  const included = new Set([rootAgentId]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const agent of state.agents.values())
+      if (
+        !included.has(agent.id) &&
+        agent.parentAgentId &&
+        included.has(agent.parentAgentId)
+      ) {
+        included.add(agent.id);
+        changed = true;
+      }
+  }
+  const agents = [...state.agents.values()].filter((agent) =>
+    included.has(agent.id),
+  );
+  const tasks = [...state.tasks.values()].filter((task) => {
+    const run = task.currentRunId
+      ? state.runs.get(task.currentRunId)
+      : undefined;
+    return Boolean(
+      (task.assignedAgentId && included.has(task.assignedAgentId)) ||
+      (run?.agentId && included.has(run.agentId)),
+    );
+  });
+  return { agents, tasks };
+}
+
+export interface AgentPortfolioCounts {
+  active: number;
+  idleRetained: number;
+  archivedCompleted: number;
+}
+
+export function agentPortfolioCounts(
+  agents: Iterable<Agent>,
+): AgentPortfolioCounts {
+  let active = 0;
+  let idleRetained = 0;
+  let archivedCompleted = 0;
+  for (const agent of agents) {
+    if (
+      ["provisioning", "starting", "working", "blocked", "stopping"].includes(
+        agent.state,
+      )
+    )
+      active++;
+    else if (agent.state === "idle") idleRetained++;
+    else archivedCompleted++;
+  }
+  return { active, idleRetained, archivedCompleted };
+}
+
+export function renderHome(
+  state: DeckState,
+  width: number,
+  targetPaneId?: string,
+): string[] {
+  const { agents, tasks } = currentScope(state, targetPaneId);
+  const provider = currentProviderProjection(state, targetPaneId);
+  const activeAgents = agents.filter((agent) =>
+    ["provisioning", "starting", "working", "blocked", "stopping"].includes(
+      agent.state,
+    ),
+  );
+  const blockedAgents = agents.filter((agent) => agent.state === "blocked");
+  const workingAgents = agents.filter((agent) => agent.state === "working");
+  const activeTasks = tasks.filter((task) =>
+    ["queued", "assigned", "running", "blocked", "collecting"].includes(
+      task.state,
+    ),
+  );
+  const relevantQuestions = [...state.questions.values()].filter(
+    (question) =>
+      !question.answered &&
+      question.state !== "answered" &&
+      ((question.agentId &&
+        agents.some((agent) => agent.id === question.agentId)) ||
+        (question.taskId && tasks.some((task) => task.id === question.taskId))),
+  );
+  const relevantTaskIds = new Set(tasks.map((task) => task.id));
+  const recentResults = [...state.results.values()]
+    .filter((result) =>
+      Boolean(result.taskId && relevantTaskIds.has(result.taskId)),
+    )
+    .sort((a, b) => b.id.localeCompare(a.id))
+    .slice(0, 3);
+  const portfolio = agentPortfolioCounts(agents);
+  const lines = [
+    "HOME · CURRENT SCOPE",
+    agents.length > 0
+      ? `Workers expected ${activeTasks.length} · working ${workingAgents.length} · blocked ${blockedAgents.length} · idle retained ${portfolio.idleRetained}`
+      : "Current adopted Pi scope is unavailable.",
+    provider
+      ? `Providers · Agent Board ${provider.agentBoard.available ? `${provider.agentBoard.openCount} pending` : "unavailable"} · Todo ${provider.todo.available ? `${provider.todo.completed}/${provider.todo.total} done` : "unavailable"}`
+      : "Providers unavailable · select an adopted Pi scope.",
+    "",
+    "NEXT ACTIONS · 1 Work  4 Inbox  5 More",
+    blockedAgents.length > 0
+      ? `! ${blockedAgents.length} blocked worker(s) need attention in Agents.`
+      : "✓ No blocked workers.",
+    relevantQuestions.length > 0
+      ? `! ${relevantQuestions.length} orchestrator question(s) need an answer in Inbox.`
+      : "✓ No blocking orchestrator questions.",
+    "",
+    "ACTIVE WORK",
+    ...(activeAgents.length > 0
+      ? activeAgents
+          .slice(0, 3)
+          .map(
+            (agent) =>
+              `${stateIcon(agent.state)} ${agent.displayName ?? agent.herdrName ?? agent.id} — ${agent.state}`,
+          )
+      : ["No active agents in the current scope."]),
+    ...(activeTasks.length > 0
+      ? activeTasks
+          .slice(0, 4)
+          .map(
+            (task) => `${stateIcon(task.state)} ${task.title} — ${task.state}`,
+          )
+      : ["No current orchestrator tasks in this scope."]),
+    "",
+    "RECENT RESULTS",
+    ...(recentResults.length > 0
+      ? recentResults.map(
+          (result) =>
+            `${stateIcon(result.status)} ${result.summary ?? result.id} — ${result.status}`,
+        )
+      : ["No recent results in this scope."]),
+  ];
+  if (agents.length > 3)
+    lines.splice(
+      9,
+      0,
+      `Showing ${Math.min(activeAgents.length, 3)} active workers · open Agents for the full scoped list.`,
+    );
+  lines.push(
+    "",
+    `Scope totals · ${portfolio.active} active · ${portfolio.idleRetained} idle retained · ${portfolio.archivedCompleted} history · ${activeTasks.length} open tasks · ${recentResults.length} recent results.`,
+  );
+  return fitLines(lines, width);
+}
+
+export function renderFiles(
+  width: number,
+  state?: DeckState,
+  targetPaneId?: string,
+): string[] {
+  const projection = state
+    ? currentProviderProjection(state, targetPaneId)
+    : undefined;
+  const owner = projection?.ownerAgentId ?? "unavailable";
+  return fitLines(
+    [
+      "FILES",
+      projection
+        ? `Provider: connected · owner ${owner}`
+        : "Provider: connection status unavailable.",
+      "Provider browser: tree navigation, selection, preview, and insertion.",
+    ],
+    width,
+  );
+}
+
+export function renderTodoSummary(
+  state: DeckState,
+  width: number,
+  targetPaneId?: string,
+  selectedId?: string,
+): string[] {
+  const todo = currentProviderProjection(state, targetPaneId)?.todo;
+  if (!todo?.available)
+    return fitLines(
+      ["PI TODO · Provider-owned projection", "Todo provider is unavailable."],
+      width,
+    );
+  return fitLines(
+    [
+      "PI TODO · Provider-owned projection",
+      `${todo.completed}/${todo.total} complete · plan size ${todo.planSize ?? todo.total}`,
+      `Current useful task: ${todo.currentUsefulTask?.text ?? "none"}`,
+      `Wait: ${todo.waitReason ?? "none"} · external waits: ${todo.externalWaits?.length ?? 0}`,
+      `Counts by state: ${
+        Object.entries(todo.countsByState ?? {})
+          .map(([key, value]) => `${key}=${value}`)
+          .join(", ") || "none"
+      }`,
+      ...(todo.items.length
+        ? todo.items
+            .slice(0, 8)
+            .map(
+              (item) =>
+                `${selectedId === item.id ? ">" : " "}${item.status ? `[${item.status}] ` : ""}${item.text} · ${item.id}`,
+            )
+        : ["No Todo items are open."]),
+    ],
+    width,
+  );
+}
+
+export function renderTodoDetail(
+  state: DeckState,
+  width: number,
+  targetPaneId?: string,
+  selectedId?: string,
+): string[] {
+  const item = currentProviderProjection(state, targetPaneId)?.todo.items.find(
+    (entry) => entry.id === selectedId,
+  );
+  return fitLines(
+    item
+      ? [
+          "PROVIDER TODO DETAIL",
+          `ID: ${item.id}`,
+          `Item: ${item.text}`,
+          `Status: ${item.status ?? "open"}`,
+          `Wait: ${item.waitReason ?? "none"}`,
+          "Actions: start · done · clear external wait",
+        ]
+      : ["PROVIDER TODO DETAIL", "Select a provider Todo item."],
+    width,
+  );
+}
+
+export function currentBlockingQuestions(
+  state: DeckState,
+  targetPaneId?: string,
+): DeckQuestion[] {
+  const scope = currentScope(state, targetPaneId);
+  const scopeAgentIds = new Set(scope.agents.map((agent) => agent.id));
+  const scopeTaskIds = new Set(scope.tasks.map((task) => task.id));
+  const hasScope =
+    scope.agents.length > 0 ||
+    Boolean(currentProviderProjection(state, targetPaneId));
+  return [...state.questions.values()].filter(
+    (question) =>
+      !question.answered &&
+      question.state !== "answered" &&
+      (!hasScope ||
+        Boolean(
+          (question.agentId && scopeAgentIds.has(question.agentId)) ||
+          (question.taskId && scopeTaskIds.has(question.taskId)),
+        )),
+  );
+}
+
+export function renderInbox(
+  state: DeckState,
+  width: number,
+  selectedId?: string,
+  targetPaneId?: string,
+): string[] {
+  const blocking = currentBlockingQuestions(state, targetPaneId);
+  return fitLines(
+    [
+      "INBOX",
+      "BLOCKING · Orchestrator questions",
+      "These synchronous questions pause managed work. Pi uses ask_user_question for this path.",
+      ...renderQuestions(blocking, width, selectedId),
+    ],
+    width,
+  );
+}
+
+export type AgentViewFilter = "active" | "idle" | "history";
+
 export function renderAgents(
   state: DeckState,
   width: number,
   selectedId?: string,
+  filter: AgentViewFilter = "active",
+  page = 0,
+  pageSize = 12,
 ): string[] {
-  const agents = [...state.agents.values()];
-  const children = new Map<string | undefined, Agent[]>();
-  for (const agent of agents)
-    children.set(agent.parentAgentId, [
-      ...(children.get(agent.parentAgentId) ?? []),
-      agent,
-    ]);
+  const all = [...state.agents.values()];
+  const active = new Set([
+    "provisioning",
+    "starting",
+    "working",
+    "blocked",
+    "stopping",
+  ]);
+  const idle = new Set(["idle"]);
+  const visible = all
+    .filter((agent) =>
+      filter === "active"
+        ? active.has(agent.state)
+        : filter === "idle"
+          ? idle.has(agent.state)
+          : !active.has(agent.state) && !idle.has(agent.state),
+    )
+    .sort((a, b) => b.id.localeCompare(a.id));
+  const pages = Math.max(1, Math.ceil(visible.length / pageSize));
+  const safePage = Math.min(Math.max(0, page), pages - 1);
+  const shown = visible.slice(safePage * pageSize, (safePage + 1) * pageSize);
   const lines = [
-    "AGENTS",
-    "State: ▶ working | ○ idle | ! blocked | × failed | ✓ succeeded | ? orphaned | ≠ replaced",
-    "State  name                 lifecycle/recommendation  profile        placement                    model / thinking     task/status",
+    `AGENTS · ${filter.toUpperCase()}`,
+    "Scope only · Active workers, retained idle workers, or terminal history. Use tabs to change view.",
+    `State: ▶ working · ! blocked · ○ idle · × failed · ✓ succeeded · page ${safePage + 1}/${pages} · ${visible.length} matching`,
+    "",
   ];
-  const visited = new Set<string>();
-  const visit = (parent: string | undefined, depth: number): void => {
-    for (const agent of [...(children.get(parent) ?? [])].sort((a, b) =>
-      a.id.localeCompare(b.id),
-    )) {
-      if (visited.has(agent.id)) continue;
-      visited.add(agent.id);
-      const marker = selectedId === agent.id ? ">" : " ";
-      const meta = record(agent);
-      const actual = record(meta.actualModel);
-      const effective = record(meta.effectiveModel);
-      const actualModel =
-        modelText(actual ?? effective ?? meta.model) ?? "unavailable";
-      const thinking =
-        text(actual?.thinkingLevel, effective?.thinkingLevel) ?? "unavailable";
-      const placement = `${agent.workspaceId ?? "-"}/${agent.tabId ?? "-"}/${agent.paneId ?? "-"}`;
-      const task = agent.currentRunId ? `run:${agent.currentRunId}` : "no run";
-      const lifecycle = `${agent.lifecycleClass ?? (agent.parentAgentId ? "temporary" : "retained")}/${agent.closeRecommendation ?? "keep"}`;
-      lines.push(
-        `${marker}${"  ".repeat(depth)}${stateIcon(agent.state)} ${pad(agent.displayName ?? agent.herdrName ?? agent.id, 20)} ${pad(clip(lifecycle, 25), 25)} ${pad(agent.profileId ?? "default", 14)} ${pad(clip(placement, 28), 28)} ${pad(clip(`${actualModel} / ${thinking}`, 20), 20)} ${task} ${agent.coarseStatus ?? agent.state}`,
-      );
-      visit(agent.id, depth + 1);
-    }
-  };
-  visit(undefined, 0);
-  for (const agent of agents.sort((a, b) => a.id.localeCompare(b.id)))
-    if (!visited.has(agent.id)) {
-      children.set(undefined, [agent]);
-      visit(undefined, 0);
-    }
-  if (agents.length === 0) lines.push("No agents are visible.");
+  for (const agent of shown) {
+    const marker = selectedId === agent.id ? ">" : " ";
+    const meta = record(agent);
+    const model =
+      modelText(record(meta.actualModel)) ??
+      modelText(record(meta.effectiveModel)) ??
+      "model unavailable";
+    const task = agent.currentRunId
+      ? `run ${agent.currentRunId}`
+      : "no current run";
+    lines.push(
+      `${marker}${stateIcon(agent.state)} ${clip(agent.displayName ?? agent.herdrName ?? agent.id, 24)} · ${agent.state} · ${clip(task, 25)}`,
+    );
+    lines.push(
+      `   ${agent.lifecycleClass ?? "retained"}${agent.keepForReuse ? " · reusable" : ""} · ${clip(model, 30)}`,
+    );
+  }
+  if (shown.length === 0)
+    lines.push(
+      filter === "active"
+        ? "No active or blocked workers in this scope."
+        : filter === "idle"
+          ? "No retained idle workers in this scope."
+          : "No terminal agent history in this scope.",
+    );
+  if (visible.length > pageSize)
+    lines.push(
+      "",
+      `↕ Scroll with ↑/↓ · page ${safePage + 1}/${pages} · ${shown.length} shown of ${visible.length}`,
+    );
   return fitLines(lines, width);
 }
 
@@ -209,11 +528,14 @@ export function renderTasks(
   const tasks = [...state.tasks.values()].filter(
     (task) => !filter || task.state === filter,
   );
+  const terminal = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
+  const current = tasks.filter((task) => !terminal.has(task.state));
+  const history = tasks.filter((task) => terminal.has(task.state));
   const lines = [
-    "TASKS",
+    "TASKS · CURRENT",
     "State  ID                         title                         assignee/result",
   ];
-  for (const task of tasks.sort((a, b) => a.id.localeCompare(b.id))) {
+  const renderTask = (task: Task): void => {
     const run = task.currentRunId
       ? state.runs.get(task.currentRunId)
       : undefined;
@@ -222,6 +544,19 @@ export function renderTasks(
     lines.push(
       `${marker}${stateIcon(task.state)} ${pad(task.state, 12)} ${pad(task.id, 27)} ${pad(task.title, 30)} ${assignee}${task.resultId ? ` result:${task.resultId}` : ""}`,
     );
+  };
+  const orderedCurrent = current.sort((a, b) => a.id.localeCompare(b.id));
+  for (const task of orderedCurrent.slice(0, 10)) renderTask(task);
+  if (orderedCurrent.length > 10)
+    lines.push(
+      `↕ ${orderedCurrent.length - 10} more current tasks · use selection/navigation`,
+    );
+  if (history.length > 0) {
+    lines.push("", "HISTORY · TERMINAL TASKS (retained)");
+    const orderedHistory = history.sort((a, b) => a.id.localeCompare(b.id));
+    for (const task of orderedHistory.slice(0, 8)) renderTask(task);
+    if (orderedHistory.length > 8)
+      lines.push(`↕ ${orderedHistory.length - 8} more terminal tasks retained`);
   }
   if (tasks.length === 0) lines.push("No tasks match the current filter.");
   return fitLines(lines, width);
@@ -327,9 +662,8 @@ export function renderQuestions(
     "QUESTIONS",
     "State  ID                         task/agent                    prompt",
   ];
-  for (const question of [...questions].sort((a, b) =>
-    a.id.localeCompare(b.id),
-  )) {
+  const ordered = [...questions].sort((a, b) => a.id.localeCompare(b.id));
+  for (const question of ordered.slice(0, 10)) {
     const status = question.state ?? (question.answered ? "answered" : "open");
     const marker = selectedId === question.id ? ">" : " ";
     lines.push(
@@ -337,6 +671,8 @@ export function renderQuestions(
     );
   }
   if (questions.length === 0) lines.push("No questions are visible.");
+  else if (questions.length > 10)
+    lines.push(`↕ ${questions.length - 10} more questions · use ↑/↓ to select`);
   return fitLines(lines, width);
 }
 

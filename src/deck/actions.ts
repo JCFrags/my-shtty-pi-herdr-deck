@@ -17,19 +17,50 @@ export type DeckAction =
   | "stop"
   | "close"
   | "cancelTask"
+  | "groupWait"
+  | "groupStop"
+  | "groupClose"
   | "openWorktree"
   | "copyId"
-  | "refresh";
+  | "refresh"
+  | "todoStart"
+  | "todoDone"
+  | "todoClearWait"
+  | "agentBoardOpen"
+  | "agentBoardAnswer"
+  | "filesOpen"
+  | "filesAction"
+  | "boardView"
+  | "boardAction";
 export interface ActionTarget {
   agent?: Agent;
   task?: Task;
+  group?: { id: string; state: string };
   question?: DeckQuestion;
   questionId?: string;
+  boardQuestion?: {
+    questionId: string;
+    revision: number;
+    response: { kind: string; options: Array<{ id: string; label: string }> };
+  };
   paneId?: string;
   terminalId?: string;
   sessionId?: string;
   generation?: number;
   runId?: string;
+  /** Provider-owned Todo identifier. This is not an orchestrator task. */
+  todoTaskId?: string;
+  todoHasWait?: boolean;
+  filesAction?: {
+    action: string;
+    path?: string;
+    query?: string;
+    expanded?: boolean;
+    selected?: boolean;
+    includedPaths?: string[];
+  };
+  boardSelections?: Record<string, string>;
+  boardAction?: { action: string; fields?: Record<string, unknown> };
 }
 
 export interface QuestionAnswer {
@@ -66,10 +97,34 @@ const guards: Record<DeckAction, Guard> = {
   stop: requireAgent,
   close: requireAgent,
   cancelTask: (target) => (target.task ? undefined : "Select a task first."),
-  openWorktree: requireAgent,
+  groupWait: (target) => (target.group ? undefined : "Select a group first."),
+  groupStop: (target) => (target.group ? undefined : "Select a group first."),
+  groupClose: (target) => (target.group ? undefined : "Select a group first."),
+  openWorktree: (target) =>
+    target.agent?.workspaceId ? undefined : "Agent worktree is unavailable.",
   copyId: (target) =>
     target.agent || target.task ? undefined : "Select an agent or task first.",
   refresh: () => undefined,
+  todoStart: (target) =>
+    target.todoTaskId ? undefined : "Select a provider Todo item first.",
+  todoDone: (target) =>
+    target.todoTaskId ? undefined : "Select a provider Todo item first.",
+  todoClearWait: (target) =>
+    target.todoTaskId ? undefined : "Select a provider Todo item first.",
+  agentBoardOpen: () => undefined,
+  agentBoardAnswer: requireQuestion,
+  filesOpen: (target) =>
+    target.agent ? undefined : "Provider owner is unavailable.",
+  filesAction: (target) =>
+    target.agent && target.filesAction
+      ? undefined
+      : "Select a provider Files action.",
+  boardView: (target) =>
+    target.agent ? undefined : "Provider owner is unavailable.",
+  boardAction: (target) =>
+    target.agent && target.boardAction
+      ? undefined
+      : "Select an Agent Board action.",
 };
 
 export class DeckActions {
@@ -82,7 +137,7 @@ export class DeckActions {
   async run(
     action: DeckAction,
     target: ActionTarget,
-    value?: string | QuestionAnswer,
+    value?: string | QuestionAnswer | Record<string, unknown>,
   ): Promise<unknown> {
     const denied = this.authorize(action, target);
     if (denied) throw new Error(denied);
@@ -115,14 +170,68 @@ export class DeckActions {
         });
       case "answer": {
         const answer =
-          typeof value === "object"
-            ? value
-            : this.answerFromText(target.question, value ?? "");
+          typeof value === "object" && value !== null && "optionId" in value
+            ? (value as QuestionAnswer)
+            : this.answerFromText(
+                target.question,
+                typeof value === "string" ? value : "",
+              );
         return this.client.answer(
           target.questionId ?? target.question!.id,
           answer,
         );
       }
+      case "filesOpen":
+        return this.client.request("provider.files_open", {
+          ownerAgentId: target.agent?.id ?? target.question?.agentId ?? "",
+        });
+      case "filesAction":
+        return this.client.request("provider.files_action", {
+          ownerAgentId: target.agent!.id,
+          ...target.filesAction,
+        });
+      case "boardView":
+        return this.client.request("provider.agent_board_view", {
+          ownerAgentId: target.agent!.id,
+          ...(target.boardSelections
+            ? { selections: target.boardSelections }
+            : {}),
+        });
+      case "boardAction":
+        return this.client.request("provider.agent_board_action", {
+          ownerAgentId: target.agent!.id,
+          ...(target.boardAction?.fields ?? {}),
+          action: target.boardAction!.action,
+        });
+      case "todoStart":
+      case "todoDone":
+      case "todoClearWait":
+        return this.client.request("provider.todo_action", {
+          ownerAgentId: target.agent?.id ?? "",
+          action:
+            action === "todoStart"
+              ? "start"
+              : action === "todoDone"
+                ? "done"
+                : "clear_wait",
+          taskId: target.todoTaskId!,
+        });
+      case "agentBoardOpen":
+        return this.client.request("provider.agent_board_action", {
+          action: "open-ui",
+          ownerAgentId: target.agent?.id ?? "",
+        });
+      case "agentBoardAnswer":
+        return this.client.request("provider.agent_board_action", {
+          ownerAgentId: target.agent?.id ?? "",
+          action: "answer-question",
+          questionId: target.boardQuestion?.questionId ?? target.question!.id,
+          expectedRevision: target.boardQuestion?.revision ?? 0,
+          source: "manual",
+          ...(typeof value === "object"
+            ? { value }
+            : { value: { kind: "text", text: value ?? "" } }),
+        });
       case "cancelTask":
         return this.client.request("task.cancel", {
           taskId: target.task!.id,
@@ -131,6 +240,31 @@ export class DeckActions {
               ? value
               : "Cancelled from Pi Herdr Deck.",
           cascade: false,
+        });
+      case "groupWait":
+        return this.client.request("group.wait", {
+          groupId: target.group!.id,
+          until: ["succeeded", "failed", "cancelled", "timed_out", "blocked"],
+          mode: "any",
+          timeoutMs: 10_000,
+        });
+      case "groupStop":
+        return this.client.request("group.stop", {
+          groupId: target.group!.id,
+          reason:
+            typeof value === "string" && value
+              ? value
+              : "Stopped from Pi Herdr Deck.",
+          force: false,
+        });
+      case "groupClose":
+        return this.client.request("group.close", {
+          groupId: target.group!.id,
+          reason:
+            typeof value === "string" && value
+              ? value
+              : "Closed from Pi Herdr Deck.",
+          confirm: true,
         });
       case "prompt":
         return this.client.request("agent.prompt", {

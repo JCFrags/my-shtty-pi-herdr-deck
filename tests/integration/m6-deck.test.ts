@@ -32,9 +32,19 @@ test("production deck entry binds to an authenticated fake broker snapshot", asy
     getHeight: () => 40,
   });
   const output = app.render(120).join("\\n");
-  assert.match(output, /Pi Herdr Deck/);
+  assert.match(output, /PI HERD/);
   assert.match(output, /Alpha/);
   assert.match(output, /Build deck/);
+  const narrowNavigation = app.render(30).slice(1, 4).join(" ");
+  for (const label of ["HOME", "Work", "Files", "Agents", "Board", "Settings"])
+    assert.match(narrowNavigation, new RegExp(label));
+  app.handleInput("2");
+  assert.match(
+    app.render(120).join("\n"),
+    /PI TODO · Provider-owned projection/,
+  );
+  app.handleInput("5");
+  assert.match(app.render(120).join("\n"), /Review release\?/);
   assert.equal(
     resolveBrokerSocketPath({
       PI_HERDR_ORCH_BROKER_SOCKET: "/run/user/1000/orchestrator.sock",
@@ -275,6 +285,7 @@ test("broker deck keyboard entry prompts and confirms close", async () => {
     getHeight: () => 60,
   });
 
+  app.handleInput("4");
   app.handleInput("p");
   assert.match(app.render(120).join("\n"), /PROMPT: /);
   app.handleInput("Build now.");
@@ -295,6 +306,56 @@ test("broker deck keyboard entry prompts and confirms close", async () => {
   app.handleInput("x");
   await waitForM6(() =>
     broker.requests.some((request) => request.method === "agent.close"),
+  );
+  app.dispose();
+  client.stop();
+});
+
+test("broker deck mouse opens stable navigation and activates a button", async () => {
+  const broker = new FakeDeckBroker();
+  const client = new BrokerClient({
+    socketPath: "/tmp/m6-mouse-navigation.sock",
+    secret: "fixture-secret",
+    socketFactory: () => broker.createSocket(),
+  });
+  await client.start();
+  await waitForM6(() => client.status === "connected");
+  const app = new BrokerDeckApp({
+    client,
+    requestRender: () => undefined,
+    getHeight: () => 40,
+  });
+  app.render(120);
+  for (const type of ["press", "release"] as const)
+    app.handleMouse({
+      type,
+      button: "left",
+      x: 19,
+      y: 1,
+      shift: false,
+      alt: false,
+      ctrl: false,
+    });
+  assert.match(app.render(120).join("\n"), /FILES/);
+  const filesView = app.render(120);
+  const openY = filesView.findIndex((line) =>
+    line.includes("Open standalone view"),
+  );
+  assert.ok(openY >= 0);
+  const openX = Math.max(0, filesView[openY]!.indexOf("Open standalone view"));
+  assert.ok(openY >= 0);
+  for (const type of ["press", "release"] as const)
+    app.handleMouse({
+      type,
+      button: "left",
+      x: openX,
+      y: openY,
+      shift: false,
+      alt: false,
+      ctrl: false,
+    });
+  await waitForM6(() =>
+    broker.requests.some((request) => request.method === "provider.files_open"),
   );
   app.dispose();
   client.stop();

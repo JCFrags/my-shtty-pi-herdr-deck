@@ -17,6 +17,7 @@ import {
   type PiToolBinding,
 } from "../src/pi/tools.js";
 import { PARENT_TOOL_NAMES } from "../src/pi/parent-tool-schema.js";
+import { openPiHerd } from "../src/herdr/pi-herd-command.js";
 import {
   createStateReporter,
   type PiStateReporter,
@@ -27,6 +28,8 @@ import {
   siblingSecretPath,
 } from "../src/pi/token-file.js";
 import { resolveHerdrPaths } from "../src/shared/paths.js";
+import { ProviderProjectionCollector } from "../src/pi/provider-projection-collector.js";
+import { ProviderEventAdapters } from "../src/pi/provider-event-adapters.js";
 export const ORCHESTRATION_TOOLS = new Set([
   "orchestrator_result",
   "orchestrator_ask",
@@ -373,12 +376,63 @@ export default async function piHerdrOrchestrator(
   let runtimeToken: string | undefined = runtimeCredential;
   let reconnectNow: () => void = () => undefined;
   let reconnectAttempts = 0;
-  let reconnectDeadline = 0;
   let stateReporter: PiStateReporter | undefined;
   let childToolsRegistered = false;
   let parentToolsRegistered = false;
   let adapter: PiAdapter | undefined;
   let client: PiBrokerClient | undefined;
+  const notifiedTerminalTasks = new Set<string>();
+  const handleBrokerEvent = (
+    event: import("../src/pi/broker-client.js").PiBrokerEvent,
+  ): void => {
+    if (
+      event.event !== "task.state_changed" ||
+      typeof event.refs.taskId !== "string" ||
+      !["succeeded", "failed", "cancelled", "timed_out", "blocked"].includes(
+        String(event.data.to ?? ""),
+      ) ||
+      notifiedTerminalTasks.has(event.refs.taskId)
+    )
+      return;
+    const activeClient = client;
+    const activeAdapter = adapter;
+    if (!activeClient?.connected || !activeAdapter) return;
+    const taskId = event.refs.taskId;
+    void activeClient
+      .request("task.get", { taskId }, { timeoutMs: 10_000 })
+      .then((value) => {
+        if (!value || typeof value !== "object" || Array.isArray(value)) return;
+        const task = value as Record<string, unknown>;
+        if (task.parentAgentId !== activeAdapter.safeState().agentId) return;
+        notifiedTerminalTasks.add(taskId);
+        if (notifiedTerminalTasks.size > 1_024)
+          notifiedTerminalTasks.delete(
+            notifiedTerminalTasks.values().next().value as string,
+          );
+        const state = String(task.state ?? event.data.to ?? "terminal");
+        const title = typeof task.title === "string" ? task.title : taskId;
+        pi.sendMessage?.(
+          {
+            customType: "pi-herdr-task-terminal",
+            content: `Managed task ${taskId} (${title}) reached ${state}. Collect its result now and continue the remaining work without waiting for a user prompt.`,
+            display: true,
+            details: { taskId, state },
+          },
+          { deliverAs: "followUp", triggerTurn: true },
+        );
+      })
+      .catch(() => undefined);
+  };
+  const providerCollector = new ProviderProjectionCollector(
+    pi.events,
+    async (projection) => {
+      if (!client?.connected) throw new Error("AGENT_DISCONNECTED");
+      await client.request("presentation.projection.update", { projection });
+    },
+  );
+  let providerActions = pi.events
+    ? new ProviderEventAdapters(pi.events)
+    : undefined;
   let reconnectTimer: NodeJS.Timeout | undefined;
   let reconnectDelay = 1_000;
   const pendingClients = new Set<PiBrokerClient>();
@@ -411,6 +465,7 @@ export default async function piHerdrOrchestrator(
       );
       startEpoch++;
       if (heartbeat) clearInterval(heartbeat);
+      providerCollector.stop();
       stateReporter?.dispose();
       stateReporter = undefined;
       if (reconnectTimer) clearTimeout(reconnectTimer);
@@ -437,10 +492,15 @@ export default async function piHerdrOrchestrator(
     next: PiContextLike,
     reconnect = false,
   ): Promise<void> => {
+    // Rebind event-backed provider actions for every session/reload. The Pi
+    // host can replace its event bus while retaining this extension runtime.
+    providerActions = pi.events
+      ? new ProviderEventAdapters(pi.events)
+      : undefined;
+    providerCollector.start();
     if (!reconnect) {
       reconnectAttempts = 0;
       reconnectDelay = 1_000;
-      reconnectDeadline = Date.now() + 120_000;
     }
     const epoch = ++startEpoch;
     if (adapter) binding.correlationState = adapter.correlationState();
@@ -463,13 +523,7 @@ export default async function piHerdrOrchestrator(
       return;
     }
     const scheduleAttachRetry = (): void => {
-      if (
-        epoch !== startEpoch ||
-        reconnectTimer ||
-        reconnectAttempts >= 8 ||
-        Date.now() >= reconnectDeadline
-      )
-        return;
+      if (epoch !== startEpoch || reconnectTimer) return;
       const delay = reconnectDelay;
       reconnectAttempts++;
       reconnectDelay = Math.min(30_000, reconnectDelay * 2);
@@ -639,6 +693,83 @@ export default async function piHerdrOrchestrator(
           throw new Error("QUESTION_DELIVERY_INVALID");
         return { accepted: true };
       }
+      if (request.method === "provider.files_open") {
+        if (!providerActions) throw new Error("PROVIDER_UNAVAILABLE");
+        return await providerActions.filesOpen();
+      }
+      if (request.method === "provider.files_action") {
+        if (!providerActions || typeof request.params.action !== "string")
+          throw new Error("PROVIDER_UNAVAILABLE");
+        const { action, expected: _expected, ...fields } = request.params;
+        return await providerActions.files(
+          action as import("../src/pi/provider-event-adapters.js").FilesProviderAction,
+          fields as never,
+        );
+      }
+      if (request.method === "provider.agent_board_view") {
+        if (!providerActions) throw new Error("PROVIDER_UNAVAILABLE");
+        const selections = request.params.selections;
+        if (
+          selections !== undefined &&
+          (!selections ||
+            typeof selections !== "object" ||
+            Array.isArray(selections))
+        )
+          throw new Error("INVALID_REQUEST");
+        return await providerActions.boardView(
+          selections as Record<string, string> | undefined,
+        );
+      }
+      if (request.method === "provider.todo_action") {
+        const p = request.params;
+        if (
+          Object.keys(p).some(
+            (key) => !["action", "taskId", "expected"].includes(key),
+          ) ||
+          !["start", "done", "clear_wait"].includes(p.action as string) ||
+          typeof p.taskId !== "string" ||
+          p.taskId.length === 0
+        )
+          throw new Error("INVALID_REQUEST");
+        const expected = p.expected;
+        if (
+          !expected ||
+          typeof expected !== "object" ||
+          Array.isArray(expected)
+        )
+          throw new Error("INVALID_REQUEST");
+        const guard = expected as Record<string, unknown>;
+        if (
+          Object.keys(guard).some(
+            (key) =>
+              ![
+                "agentId",
+                "generation",
+                "connectionGeneration",
+                "piSessionId",
+              ].includes(key),
+          ) ||
+          text(guard.agentId, 256) !== state.agentId ||
+          integer(guard.generation) !== state.generation ||
+          text(guard.piSessionId, 256) !== state.sessionId ||
+          integer(guard.connectionGeneration) !== state.connectionGeneration
+        )
+          throw new Error("PI_IDENTITY_MISMATCH");
+        if (!providerActions) throw new Error("PROVIDER_UNAVAILABLE");
+        return await providerActions.todo(
+          p.action as "start" | "done" | "clear_wait",
+          p.taskId,
+        );
+      }
+      if (request.method === "provider.agent_board_action") {
+        const p = request.params;
+        if (!providerActions || typeof p.action !== "string")
+          throw new Error("PROVIDER_UNAVAILABLE");
+        const { expected: _expected, ...fields } = p;
+        if (p.action === "open-ui")
+          return await providerActions.agentBoardOpen(2);
+        return await providerActions.agentBoardAction(p.action, fields);
+      }
       if (request.method !== "assignment.deliver")
         throw new Error("PI_METHOD_UNAVAILABLE");
       if (
@@ -713,6 +844,7 @@ export default async function piHerdrOrchestrator(
             token,
             onServerRequest: handleServerRequest,
             onControlRequest: handleControlRequest,
+            onEvent: handleBrokerEvent,
           })
         : new PiBrokerClient({
             socketPath,
@@ -721,10 +853,18 @@ export default async function piHerdrOrchestrator(
             secret: secret!,
             onServerRequest: handleServerRequest,
             onControlRequest: handleControlRequest,
+            onEvent: handleBrokerEvent,
           });
     pendingClients.add(candidateClient);
     try {
-      await candidateClient.connect();
+      const connected = (await candidateClient.connect()) as {
+        broker?: { lastEventSeq?: unknown };
+      };
+      const subscriptionCursor = Number.isSafeInteger(
+        connected.broker?.lastEventSeq,
+      )
+        ? (connected.broker?.lastEventSeq as number)
+        : 0;
       if (epoch !== startEpoch) {
         pendingClients.delete(candidateClient);
         candidateClient.close();
@@ -799,10 +939,22 @@ export default async function piHerdrOrchestrator(
         ...(parentAuthorized ? PARENT_TOOL_NAMES : []),
       ]);
       candidateClient.markRegistrationReady();
-      scheduleReconnect = () => {
-        if (reconnectAttempts === 0) reconnectDeadline = Date.now() + 120_000;
-        scheduleAttachRetry();
-      };
+      if (parentAuthorized)
+        await candidateClient.request(
+          "events.subscribe",
+          {
+            fromSeq: subscriptionCursor,
+            filters: { events: ["task.state_changed"] },
+            includeSnapshot: false,
+          },
+          { timeoutMs: 10_000 },
+        );
+      providerCollector.bind(
+        registration.agentId,
+        candidateAdapter.safeState().sessionId,
+      );
+      providerCollector.request();
+      scheduleReconnect = scheduleAttachRetry;
       reconnectNow = scheduleReconnect;
       stateReporter = createStateReporter(
         { heartbeat: (state) => candidateClient.heartbeat(state) },
@@ -842,6 +994,7 @@ export default async function piHerdrOrchestrator(
         () => {
           if (client === candidateClient && candidateClient.connected) {
             flushLifecycle();
+            providerCollector.publish();
             stateReporter?.report(candidateAdapter.safeState());
           } else if (client === candidateClient) scheduleReconnect();
         },
@@ -860,8 +1013,6 @@ export default async function piHerdrOrchestrator(
           "pi-herdr-orchestrator",
           "Broker unavailable; orchestration controls are disabled.",
         );
-        if (reconnectAttempts === 0) reconnectDeadline = Date.now() + 120_000;
-        if (reconnectAttempts >= 8 || Date.now() >= reconnectDeadline) return;
         const delay = reconnectDelay;
         reconnectAttempts++;
         reconnectDelay = Math.min(30_000, reconnectDelay * 2);
@@ -873,10 +1024,25 @@ export default async function piHerdrOrchestrator(
       }
     }
   };
+  api.registerCommand("pi-herd", {
+    description: "Open and focus the Pi Herd deck beside this Pi pane",
+    handler: async (_args, raw) => {
+      const context = raw as PiContextLike;
+      try {
+        context.ui.notify?.(await openPiHerd(), "info");
+      } catch (error) {
+        context.ui.notify?.(
+          error instanceof Error ? error.message : String(error),
+          "warning",
+        );
+      }
+    },
+  });
   api.registerCommand("orchestrator-status", {
     description: "Show Pi Herd Orchestrator status",
     handler: async (_args, next) => {
       await start(next as PiContextLike);
+      providerCollector.request();
       (next as PiContextLike).ui.notify?.(
         client?.connected
           ? "Pi Herd Orchestrator connected."

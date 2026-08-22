@@ -1,7 +1,7 @@
-import { mkdir, open } from "node:fs/promises";
+import { mkdir, open, rename } from "node:fs/promises";
 import { constants } from "node:fs";
 import { timingSafeEqual } from "node:crypto";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { randomToken, tokenDigest } from "./names.js";
 export interface ManagedToken {
   token: string;
@@ -160,6 +160,38 @@ export async function createPromptFile(
   }
   return path;
 }
+export async function archiveManagedFileForCleanup(
+  path: string,
+  expectedIdentity?: FileIdentity,
+): Promise<ManagedFileCleanupResult> {
+  let handle;
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const stat = await handle.stat();
+    if (!isSafeManagedStat(stat) || !sameIdentity(stat, expectedIdentity))
+      return "retained";
+    if (expectedIdentity === undefined && !isClaimed(path, stat))
+      return "retained";
+    const archiveRoot = join(dirname(dirname(path)), "registration-archive");
+    await mkdir(archiveRoot, { recursive: true, mode: 0o700 });
+    const beforeMove = await handle.stat();
+    if (!isSafeManagedStat(beforeMove) || !sameIdentity(beforeMove, stat))
+      return "retained";
+    const destination = join(
+      archiveRoot,
+      `${basename(path)}-${process.pid}-${randomToken()}`,
+    );
+    await rename(path, destination);
+    fileClaims.delete(path);
+    return "retained";
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing";
+    throw error;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
 export async function retainManagedFileForCleanup(
   path: string,
   expectedIdentity?: FileIdentity,

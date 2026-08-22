@@ -6,14 +6,14 @@ This release is for reviewed local use. It does not publish an npm package or cr
 
 ## Requirements
 
-| Component | Minimum or requirement                                    |
-| --------- | --------------------------------------------------------- |
-| Linux     | Required                                                  |
-| Node.js   | 22.19.0                                                   |
-| Herdr     | 0.8.0                                                     |
-| Pi        | A compatible build of Pi with the required extension APIs |
+| Component | Minimum or requirement                  |
+| --------- | --------------------------------------- |
+| Linux     | Required                                |
+| Node.js   | 22.19.0                                 |
+| Herdr     | 0.8.2                                   |
+| Pi        | 0.84.2 with the required extension APIs |
 
-The plugin manifest requires Herdr 0.8.0. Herdr 0.7.5 and older versions cannot load this plugin metadata. Upgrade Herdr before you link or open the plugin.
+The plugin manifest requires Herdr 0.8.2. Upgrade Herdr before you link or open the plugin.
 
 The Pi control deck also requires component mouse events, per-tool expansion state, current-turn and session bulk expansion selectors, and expansion-change subscription. If these APIs are absent, the deck reports an incompatibility and does not emulate them with terminal input.
 
@@ -28,7 +28,7 @@ The Pi control deck also requires component mouse events, per-tool expansion sta
 | Managed pane title        | `Pi Herd`                                    |
 | Managed pane command      | `./bin/pi-herdr-orchestrator deck`           |
 | Startup hook command      | `./bin/pi-herdr-orchestrator broker startup` |
-| Minimum Herdr             | `0.8.0`                                      |
+| Minimum Herdr             | `0.8.2`                                      |
 
 The package manifest and plugin manifest are the source of truth for these identifiers.
 
@@ -49,7 +49,7 @@ Each new agent has an explicit provider, model, and thinking selection. Selectio
 
 The broker reads `~/.config/pi-herdr-orchestrator/config.json` by default. Set `PI_HERDR_ORCH_CONFIG_PATH` to use a different owner-controlled file. Use `modelPolicy.defaults.global`, `modelPolicy.defaults.projects`, and `modelPolicy.defaults.roles` for scoped defaults. An optional allowlist can restrict the effective selection. The broker and provisioner validate the model and its exact thinking levels against the installed Pi catalog before they create a Herdr resource. This includes `xhigh` and `max` only when the installed model reports support.
 
-The Deck Settings tab shows installed choices. Press `d` to save a scoped default. Press `n` to create an agent with an explicit provider, model, thinking level, and lifecycle class. The `agent_spawn` tool provides the same explicit fields for direct tool workflows. Pi always starts with explicit `--provider`, provider-qualified `--model`, and `--thinking` arguments. Managed registration must report the same selection.
+The More view shows installed choices. Press `d` to save a scoped default. Open Agents and press `n` to create an agent with an explicit provider, model, thinking level, and lifecycle class. The `agent_spawn` tool provides the same explicit fields for direct tool workflows. Pi always starts with explicit `--provider`, provider-qualified `--model`, and `--thinking` arguments. Managed registration must report the same selection.
 
 Lifecycle classes are `temporary`, `reusable`, `retained`, and `pinned`. Agent lists and the inspector show the class and close recommendation. A temporary agent is recommended for close only after its task is terminal and its result is collected. Reusable agents stay idle and marked for reuse. Press `o` in Settings to enable or disable safe automatic closure. Automatic closure never closes a pinned, retained, reusable, blocked, or active agent. It also never closes an agent with an uncollected result.
 
@@ -95,7 +95,7 @@ Set `PI_HERDR_COMPACT_DELEGATION=0` in the trusted broker startup environment to
 
 ## Link the Herdr plugin and run startup
 
-Confirm that Herdr is version 0.8.0 or newer. Then link the reviewed package root:
+Confirm that Herdr is version 0.8.2 or newer. Then link the reviewed package root:
 
 ```bash
 PACKAGE_ROOT=$(pwd)
@@ -136,6 +136,30 @@ Open a new Pi session inside Herdr after startup verification. Pi loads `./dist/
 Do not set a broker socket, client secret, session key, token, terminal ID, or Herdr binary path for normal installed use. Ordinary Pi panes do not need the binary value. The broker never searches `PATH` for Herdr.
 
 ## Open Pi Herd
+
+Inside a Pi pane managed by Herdr, run `/pi-herd` to open the `pi.herdr.orchestrator` deck as a focused right split targeting that pane. The command uses Herdr's `HERDR_BIN_PATH` and `HERDR_PANE_ID` values and reports a clear notification when run outside Herdr. `/orchestrator-status` remains available.
+
+Pi Herd is a mouse-first right-side control surface. Its stable views are:
+
+- **Home** shows the connected adopted root and its current project work first. It does not lead with the global historical portfolio.
+- **Work** contains broker-owned Tasks, Results, and Groups beside the provider-owned Pi Todo summary.
+- **Files** can focus the adopted Pi pane. Run `/files` there because Pi 0.84.2 does not expose a safe extension API that opens this built-in view remotely.
+- **Agents** keeps broker-owned lifecycle, model, thinking, prompt, ask, stop, and close controls.
+- **Inbox** keeps broker-owned blocking questions separate from provider-owned asynchronous Agent Board questions. Blocking questions keep `ask_user_question` semantics. Agent Board is the user-facing name for Pi Signal Board.
+- **More** contains settings and lower-frequency controls.
+
+The installed Pi extension requests and watches provider summaries through these stable `pi.events` names:
+
+- `pi-agent-board:request-summary-v1`
+- `pi-agent-board:summary-v1`
+- `pi-agent-board:summary-changed-v1`
+- `pi-todo:request-summary-v1`
+- `pi-todo:summary-v1`
+- `pi-todo:summary-changed-v1`
+
+Provider callback wrappers can change. The adapters accept common `summary`, `snapshot`, and `data` wrappers. Each projection is bounded and serializable. The authenticated Pi adapter sends it to the broker. The broker keeps it only in memory and includes it in deck snapshots and change events. The provider keeps authority. The broker does not persist these projections. A missing provider appears as unavailable and does not fail the deck.
+
+Click tabs, entity rows, and action buttons in the managed pane. Mouse tracking is enabled only in that managed pane. The main Pi pane keeps its normal mouse behavior.
 
 List live agents and select the target Pi pane:
 
@@ -280,4 +304,4 @@ The legacy deck uses a same-user Unix socket, explicit target selection, bounded
 
 ## Deferred scope
 
-The Files UI is deferred. Version 0.1.0 does not provide a file browser, arbitrary shell execution, transcript mirroring, or raw terminal keystroke control.
+The Files view is an entry seam for `/files`; it is not a duplicate file browser. It can focus the adopted Pi pane, but it cannot invoke Pi's built-in `/files` view through Pi 0.84.2. Version 0.1.0 does not provide direct file IPC, arbitrary shell execution, transcript mirroring, or raw terminal keystroke control.

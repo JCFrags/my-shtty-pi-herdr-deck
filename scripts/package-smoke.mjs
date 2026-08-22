@@ -48,7 +48,7 @@ function assertExactPluginManifest(value, source) {
 assertExactPluginManifest(manifest, "source manifest");
 for (const expected of [
   'id = "pi.herdr.orchestrator"',
-  'min_herdr_version = "0.8.0"',
+  'min_herdr_version = "0.8.2"',
   'platforms = ["linux"]',
   'command = ["npm", "run", "build"]',
   'id = "deck"',

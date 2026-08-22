@@ -177,6 +177,69 @@ test("PiBrokerClient accepts real hello_result and binds adopted registration id
   await fake.close();
 });
 
+test("PiBrokerClient delivers bounded subscribed events without closing the connection", async () => {
+  let resolveEvent!: (value: {
+    event: string;
+    refs: Record<string, string>;
+    data: Record<string, unknown>;
+  }) => void;
+  const delivered = new Promise<{
+    event: string;
+    refs: Record<string, string>;
+    data: Record<string, unknown>;
+  }>((resolve) => {
+    resolveEvent = resolve;
+  });
+  const fake = await server((frame, socket) => {
+    if (frame.type === "hello") {
+      socket.write(encodeFrame(hello(frame)));
+      return;
+    }
+    socket.write(
+      encodeFrame({
+        v: 1,
+        type: "response",
+        id: frame.id,
+        method: frame.method,
+        ok: true,
+        result: { subscriptionId: "sub-1" },
+      }),
+    );
+    socket.write(
+      encodeFrame({
+        v: 1,
+        type: "event",
+        seq: 8,
+        id: "evt_terminal",
+        event: "task.state_changed",
+        timestamp: "2026-08-21T00:00:00.000Z",
+        refs: { taskId: "tsk_done" },
+        data: { to: "succeeded" },
+      }),
+    );
+  });
+  const client = new PiBrokerClient({
+    socketPath: fake.path,
+    sessionKey: "session",
+    piSessionId: "pi-session",
+    secret: "secret",
+    onEvent: (event) => resolveEvent(event),
+  });
+  await client.connect();
+  await client.request("events.subscribe", {
+    fromSeq: 7,
+    filters: { events: ["task.state_changed"] },
+    includeSnapshot: false,
+  });
+  const event = await delivered;
+  assert.equal(event.event, "task.state_changed");
+  assert.deepEqual(event.refs, { taskId: "tsk_done" });
+  assert.deepEqual(event.data, { to: "succeeded" });
+  assert.equal(client.connected, true);
+  client.close();
+  await fake.close();
+});
+
 test("PiBrokerClient emits the exact managed registration frame", async () => {
   const requests: Record<string, unknown>[] = [];
   const fake = await server((frame, socket) => {

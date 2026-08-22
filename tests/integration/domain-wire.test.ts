@@ -473,6 +473,36 @@ test("broker domain wire persists correlated result, question, workflow, and rep
         },
       }),
     );
+    assert.deepEqual(
+      resultOf(
+        await request(socket, "presentation.projection.update", {
+          projection: {
+            ownerAgentId: registered.agentId,
+            piSessionId: "session",
+            agentBoard: {
+              available: true,
+              openCount: 1,
+              items: [{ id: "board-1", title: "Review?", state: "open" }],
+            },
+            todo: {
+              available: true,
+              total: 1,
+              completed: 0,
+              items: [{ id: "todo-1", text: "Inspect", status: "working" }],
+            },
+          },
+        }),
+      ),
+      { accepted: true, ephemeral: true },
+    );
+    const projectionSnapshot = resultOf(
+      await request(socket, "events.subscribe", {
+        fromSeq: 0,
+        includeSnapshot: true,
+      }),
+    ).snapshot;
+    assert.equal(projectionSnapshot.providerProjections.length, 1);
+    assert.equal(projectionSnapshot.providerProjections[0].todo.total, 1);
     const workflow = resultOf(
       await request(socket, "workflow.create", {
         objective: "inspect",
@@ -628,6 +658,7 @@ test("broker domain wire persists correlated result, question, workflow, and rep
     assert.equal(replay.snapshot.workflows.length, 1);
     assert.equal(replay.snapshot.questions.length, 2);
     assert.equal(replay.snapshot.results.length, 1);
+    assert.equal(replay.snapshot.providerProjections.length, 0);
     socket.destroy();
     await restarted.stop();
   } finally {
