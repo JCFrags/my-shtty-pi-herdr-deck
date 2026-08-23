@@ -1,4 +1,11 @@
-import type { DeckNotification, DeckState } from "./types.js";
+import type { Agent, Task } from "../state/types.js";
+import type { BoardRecord } from "./board-presentation.js";
+import type {
+  DeckGroup,
+  DeckNotification,
+  DeckResult,
+  DeckState,
+} from "./types.js";
 import {
   selectActivityPresentation,
   type ActivityFilter,
@@ -15,6 +22,131 @@ import {
 import { selectAdoptedScope } from "./scope.js";
 
 export type ActivityAction = "copy-id" | "focus" | "archive" | "retry-delivery";
+export interface SignalActivityDetail {
+  kind: "signal-update" | "signal-decision" | "signal-history";
+  id: string;
+  title: string;
+  state: string;
+  summary: string;
+  changedAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  terminalAt?: string;
+  detail?: string;
+  stage?: string;
+  outcome?: string;
+  answer?: string;
+  revision?: number;
+  deliveryState?: string;
+  retryableDelivery: boolean;
+  archivable: boolean;
+}
+export interface SystemActivityDetail {
+  kind: "system-error" | "system-recovery";
+  id: string;
+  title: string;
+  state: string;
+  summary: string;
+  notificationKind: string;
+  sequence: number;
+}
+export type ActivityDetail =
+  | {
+      kind: "result";
+      source: DeckResult;
+      id: string;
+      title: string;
+      state: string;
+      summary: string;
+    }
+  | {
+      kind: "terminal-task";
+      source: Task;
+      id: string;
+      title: string;
+      state: string;
+      summary: string;
+    }
+  | {
+      kind: "terminal-group";
+      source: DeckGroup;
+      id: string;
+      title: string;
+      state: string;
+      summary: string;
+    }
+  | {
+      kind: "terminal-agent";
+      source: Agent;
+      id: string;
+      title: string;
+      state: string;
+      summary: string;
+    }
+  | SignalActivityDetail
+  | SystemActivityDetail;
+export function activityDetail(item: ActivityItem): ActivityDetail {
+  const base = {
+    id: item.entityId,
+    title: item.title,
+    state: item.state,
+    summary: item.summary,
+  };
+  switch (item.kind) {
+    case "result":
+    case "terminal-task":
+    case "terminal-group":
+    case "terminal-agent":
+      return {
+        kind: item.kind,
+        source: item.source,
+        ...base,
+      } as ActivityDetail;
+    case "system-error":
+    case "system-recovery": {
+      const source = item.source as BoardRecord;
+      return {
+        kind: item.kind,
+        ...base,
+        notificationKind: String(source.state ?? item.state),
+        sequence: Number(source.sequence ?? 0),
+      } as ActivityDetail;
+    }
+    default: {
+      const source = item.source as BoardRecord;
+      return {
+        kind: item.kind,
+        ...base,
+        ...(typeof source.changedAt === "string"
+          ? { changedAt: source.changedAt }
+          : {}),
+        ...(typeof source.createdAt === "string"
+          ? { createdAt: source.createdAt }
+          : {}),
+        ...(typeof source.updatedAt === "string"
+          ? { updatedAt: source.updatedAt }
+          : {}),
+        ...(typeof source.terminalAt === "string"
+          ? { terminalAt: source.terminalAt }
+          : {}),
+        ...(typeof source.detail === "string" ? { detail: source.detail } : {}),
+        ...(typeof source.stage === "string" ? { stage: source.stage } : {}),
+        ...(typeof source.outcome === "string"
+          ? { outcome: source.outcome }
+          : {}),
+        ...(typeof source.answer === "string" ? { answer: source.answer } : {}),
+        ...(typeof source.revision === "number"
+          ? { revision: source.revision }
+          : {}),
+        ...(typeof source.deliveryState === "string"
+          ? { deliveryState: source.deliveryState }
+          : {}),
+        retryableDelivery: source.retryableDelivery === true,
+        archivable: source.archivable === true,
+      } as ActivityDetail;
+    }
+  }
+}
 export interface ActivityActionContract {
   isAllowed(item: ActivityItem, action: ActivityAction): boolean;
   activate(item: ActivityItem, action: ActivityAction): void;
@@ -46,8 +178,16 @@ const sourceBadge = (item: ActivityItem): string => {
   if (item.kind.startsWith("system-")) return "SYSTEM";
   return "ORCHESTRATOR";
 };
+const supportedActions = new Set<ActivityAction>([
+  "copy-id",
+  "focus",
+  "archive",
+  "retry-delivery",
+]);
 const actionLabel = (action: ActivityAction): string =>
   action.replaceAll("-", " ");
+const isSupportedAction = (value: string): value is ActivityAction =>
+  supportedActions.has(value as ActivityAction);
 
 export function cycleActivityFilter(filter: ActivityFilter): ActivityFilter {
   return filters[(filters.indexOf(filter) + 1) % filters.length]!;
@@ -81,6 +221,43 @@ function detailLines(
 ): string[] {
   if (!item) return ["DETAIL", "No activity item selected."];
   const scoped = selectAdoptedScope(input.state, input.targetPaneId).state;
+  const typed = activityDetail(item);
+  if (
+    typed.kind === "signal-update" ||
+    typed.kind === "signal-decision" ||
+    typed.kind === "signal-history"
+  )
+    return [
+      "ACTIVITY DETAIL",
+      `Source: SIGNALS`,
+      `ID: ${typed.id}`,
+      `Title: ${typed.title}`,
+      `State: ${typed.state}`,
+      `Summary: ${typed.summary}`,
+      `Changed: ${typed.changedAt ?? "none"}`,
+      `Created: ${typed.createdAt ?? "none"}`,
+      `Updated: ${typed.updatedAt ?? "none"}`,
+      `Terminal: ${typed.terminalAt ?? "none"}`,
+      `Detail: ${typed.detail ?? "none"}`,
+      `Stage: ${typed.stage ?? "none"}`,
+      `Outcome: ${typed.outcome ?? "none"}`,
+      `Answer: ${typed.answer ?? "none"}`,
+      `Revision: ${typed.revision ?? "none"}`,
+      `Delivery: ${typed.deliveryState ?? "none"}`,
+      `Retryable: ${typed.retryableDelivery ? "yes" : "no"}`,
+      `Archivable: ${typed.archivable ? "yes" : "no"}`,
+    ];
+  if (typed.kind === "system-error" || typed.kind === "system-recovery")
+    return [
+      "ACTIVITY DETAIL",
+      `Source: SYSTEM`,
+      `ID: ${typed.id}`,
+      `Title: ${typed.title}`,
+      `State: ${typed.state}`,
+      `Summary: ${typed.summary}`,
+      `Notification: ${typed.notificationKind}`,
+      `Sequence: ${typed.sequence}`,
+    ];
   switch (item.kind) {
     case "result":
       return renderResultDetail(item.source, width);
@@ -161,8 +338,7 @@ function renderPane(
   if (selected) {
     detail.addLine("");
     detail.addButtons(
-      selected.actions.actions.map((action) => {
-        const typed = action as ActivityAction;
+      selected.actions.actions.filter(isSupportedAction).map((typed) => {
         return {
           id: `activity:action:${selected.uiId}:${typed}`,
           label: actionLabel(typed),

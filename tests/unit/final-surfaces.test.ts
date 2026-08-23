@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyActivityWheel } from "../../src/deck/activity.js";
+import { activityDetail, applyActivityWheel } from "../../src/deck/activity.js";
 import {
   activateAgentMore,
+  agentMoreFocusFromMouse,
   agentMoreGuard,
   agentPrimaryActions,
+  handleAgentMoreKey,
   isAgentMoreGuardCurrent,
   openAgentMore,
   renderAgents,
@@ -69,6 +71,19 @@ test("Agent primary actions come from authorization and More is generation guard
     authorize: (action) => (action === "focus" ? "no pane" : undefined),
     activate: () => undefined,
   });
+  assert.deepEqual(
+    actions.map((item) => item.label),
+    [
+      "Focus",
+      "Prompt",
+      "Ask",
+      "Steer",
+      "Follow-up",
+      "Interrupt",
+      "Stop",
+      "More",
+    ],
+  );
   assert.equal(actions.find((item) => item.action === "focus")?.disabled, true);
   assert.equal(
     actions.find((item) => item.action === "prompt")?.disabled,
@@ -77,6 +92,27 @@ test("Agent primary actions come from authorization and More is generation guard
   const guard = agentMoreGuard(selected)!;
   assert.equal(isAgentMoreGuardCurrent(value, guard), true);
   const more = openAgentMore(value, guard)!;
+  assert.deepEqual(
+    more.actions.map((item) => item.label),
+    [
+      "Compact",
+      "Restart",
+      "Close",
+      "Open worktree",
+      "Copy ID",
+      "Running model",
+      "Thinking level",
+      "Create child agent",
+    ],
+  );
+  assert.equal(agentMoreFocusFromMouse(more, 2).focusedIndex, 2);
+  assert.equal(
+    handleAgentMoreKey(more, "ArrowDown", value, {
+      authorize: () => undefined,
+      activate: () => undefined,
+    }).presentation?.focusedIndex,
+    1,
+  );
   let called = false;
   more.focusedIndex = more.actions.findIndex((item) => item.id === "copyId");
   assert.equal(
@@ -92,4 +128,53 @@ test("Agent primary actions come from authorization and More is generation guard
   value.agents.set("a-1", { ...selected, generation: 4 });
   assert.equal(isAgentMoreGuardCurrent(value, guard), false);
   assert.equal(openAgentMore(value, guard), undefined);
+});
+
+test("Activity detail preserves typed Signals and system fields", () => {
+  const signal = activityDetail({
+    uiId: "signals:updates:s-1",
+    id: "signals:updates:s-1",
+    entityId: "s-1",
+    kind: "signal-update",
+    title: "Update",
+    summary: "Detail",
+    state: "active",
+    status: "active",
+    sortTimestamp: "2026-01-01",
+    source: {
+      id: "s-1",
+      title: "Update",
+      detail: "Detail",
+      stage: "build",
+      changedAt: "2026-01-01",
+      revision: 4,
+      deliveryState: "delivered",
+      retryableDelivery: true,
+      archivable: true,
+    },
+    actions: { actions: ["archive", "retry-delivery"] },
+  });
+  assert.equal(signal.kind, "signal-update");
+  assert.equal(signal.revision, 4);
+  assert.equal(signal.retryableDelivery, true);
+  const system = activityDetail({
+    uiId: "system:e-1",
+    id: "system:e-1",
+    entityId: "e-1",
+    kind: "system-error",
+    title: "System failure",
+    summary: "failed",
+    state: "failure",
+    status: "failure",
+    sortTimestamp: "1",
+    source: {
+      id: "e-1",
+      title: "System failure",
+      state: "failure",
+      sequence: 8,
+    },
+    actions: { actions: ["copy-id"] },
+  });
+  assert.equal(system.kind, "system-error");
+  assert.equal(system.sequence, 8);
 });

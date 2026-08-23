@@ -31,29 +31,36 @@ export interface AgentMorePresentation {
   actions: readonly AgentMoreAction[];
   closeOnEscape: true;
 }
+export type AgentPrimaryAction = DeckAction | "more";
 export interface AgentMoreAction {
-  id: DeckAction | "copyId";
+  id: DeckAction | "copyId" | "create-child-agent";
   label: string;
   disabled: boolean;
   activate(): void;
 }
 
-const actionLabels: readonly [DeckAction, string][] = [
+const actionLabels: readonly [AgentPrimaryAction, string][] = [
   ["focus", "Focus"],
   ["prompt", "Prompt"],
   ["ask", "Ask"],
+  ["steer", "Steer"],
+  ["followUp", "Follow-up"],
   ["interrupt", "Interrupt"],
   ["stop", "Stop"],
-  ["close", "Close"],
+  ["more", "More"],
 ];
-const moreLabels: readonly [DeckAction | "copyId", string][] = [
+const moreLabels: readonly [
+  DeckAction | "copyId" | "create-child-agent",
+  string,
+][] = [
   ["compact", "Compact"],
   ["restart", "Restart"],
   ["close", "Close"],
   ["openWorktree", "Open worktree"],
   ["copyId", "Copy ID"],
   ["setModel", "Running model"],
-  ["setThinking", "Thinking"],
+  ["setThinking", "Thinking level"],
+  ["create-child-agent", "Create child agent"],
 ];
 const activeStates = new Set([
   "provisioning",
@@ -89,12 +96,13 @@ export function isAgentMoreGuardCurrent(
 export function agentPrimaryActions(
   agent: Agent,
   actions?: AgentActionContract,
-): Array<{ action: DeckAction; label: string; disabled: boolean }> {
+): Array<{ action: AgentPrimaryAction; label: string; disabled: boolean }> {
   const target = targetFor(agent);
   return actionLabels.map(([action, label]) => ({
     action,
     label,
-    disabled: Boolean(actions?.authorize(action, target)),
+    disabled:
+      action === "more" ? false : Boolean(actions?.authorize(action, target)),
   }));
 }
 
@@ -158,19 +166,14 @@ export function renderAgents(
           id: `agents:action:${selected.id}:${action}`,
           label,
           disabled,
-          activate: () => input.actions?.activate(action, targetFor(selected)),
+          activate: () => {
+            if (action === "more")
+              input.onOpenMore?.(agentMoreGuard(selected)!);
+            else input.actions?.activate(action, targetFor(selected));
+          },
         }),
       ),
     );
-    const more = agentMoreGuard(selected);
-    if (more)
-      detail.addButtons([
-        {
-          id: `agents:more:${selected.id}:${selected.generation}`,
-          label: "More…",
-          activate: () => input.onOpenMore?.(more),
-        },
-      ]);
   } else detail.addLine("No agent selected.");
   const left = list.finish();
   const right = detail.finish();
@@ -212,7 +215,10 @@ export function openAgentMore(
   const actions: AgentMoreAction[] = moreLabels.map(([id, label]) => ({
     id,
     label,
-    disabled: id !== "copyId" && Boolean(authorization?.authorize(id, target)),
+    disabled:
+      id === "create-child-agent"
+        ? Boolean(authorization?.authorize("prompt", target))
+        : id !== "copyId" && Boolean(authorization?.authorize(id, target)),
     activate: () => undefined,
   }));
   return {
@@ -285,10 +291,16 @@ export function activateAgentMore(
   const item = presentation.actions[presentation.focusedIndex];
   if (!item || item.disabled) return false;
   const agent = state.agents.get(presentation.guard.agentId)!;
-  const action = item.id === "copyId" ? "copyId" : item.id;
-  if (action !== "copyId" && input.authorize(action, targetFor(agent)))
-    return false;
-  input.activate(action, targetFor(agent));
+  const target = targetFor(agent);
+  if (item.id === "create-child-agent") {
+    if (input.authorize("prompt", target)) return false;
+    input.activate("prompt", target);
+  } else if (item.id === "copyId") {
+    input.activate("copyId", target);
+  } else {
+    if (input.authorize(item.id, target)) return false;
+    input.activate(item.id, target);
+  }
   return true;
 }
 
