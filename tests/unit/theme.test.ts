@@ -11,7 +11,7 @@ test("theme styles semantic lines without changing plain content", () => {
   const plain = "AGENT BOARD · healthy";
   const styled = styleLine(plain, true);
   assert.match(styled, /\u001b\[/);
-  assert.equal(toneForLine(plain), "heading");
+  assert.equal(toneForLine(plain), "title");
   assert.deepEqual(styleLines(["x", "y"], false), ["x", "y"]);
 });
 
@@ -23,9 +23,13 @@ test("theme gives selected rows and controls distinct semantic tones", () => {
 
 test("NO_COLOR path emits no ANSI escape sequences", () => {
   const lines = styleLines(
-    ["Pi Herd", "AGENT BOARD · healthy", "> selected"],
+    ["Agent Board", "AGENT BOARD · healthy", "> selected"],
     false,
   );
-  assert.deepEqual(lines, ["Pi Herd", "AGENT BOARD · healthy", "> selected"]);
+  assert.deepEqual(lines, [
+    "Agent Board",
+    "AGENT BOARD · healthy",
+    "> selected",
+  ]);
   assert.equal(styleLine("error: failed", false), "error: failed");
 });

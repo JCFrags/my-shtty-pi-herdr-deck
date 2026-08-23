@@ -34,6 +34,20 @@ function unwrapProviderEnvelope(value: unknown): Record<string, unknown> {
   return outer;
 }
 
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, canonical(entry)]),
+  );
+}
+
+function semanticSignature(projection: ProviderProjection): string {
+  return JSON.stringify(canonical(projection));
+}
+
 export interface PiEventBusLike {
   on(event: string, listener: (data: unknown) => void): unknown;
   off?(event: string, listener: (data: unknown) => void): void;
@@ -47,7 +61,10 @@ export class ProviderProjectionCollector {
   #bound = false;
   #started = false;
   #publishing = false;
+  #scheduled = false;
   #dirty = false;
+  #lifecycleGeneration = 0;
+  #lastPublishedSignature: string | undefined;
   #unsubscribers: Array<() => void> = [];
   #retryTimers: NodeJS.Timeout[] = [];
   #filesRequestId = "";
@@ -146,6 +163,8 @@ export class ProviderProjectionCollector {
   start(): void {
     if (this.#started) return;
     this.#started = true;
+    this.#lifecycleGeneration += 1;
+    this.#lastPublishedSignature = undefined;
     this.#projection = unavailableProviderProjection(
       this.#projection.ownerAgentId,
       this.#projection.piSessionId,
@@ -227,6 +246,9 @@ export class ProviderProjectionCollector {
   }
 
   stop(): void {
+    this.#lifecycleGeneration += 1;
+    this.#scheduled = false;
+    this.#dirty = false;
     if (!this.#started) return;
     this.#started = false;
     for (const timer of this.#retryTimers.splice(0)) clearTimeout(timer);
@@ -259,18 +281,39 @@ export class ProviderProjectionCollector {
   private queuePublish(): void {
     if (!this.#bound) return;
     this.#dirty = true;
-    if (this.#publishing) return;
+    if (this.#scheduled || this.#publishing) return;
+    this.#scheduled = true;
+    const generation = this.#lifecycleGeneration;
+    queueMicrotask(() => {
+      this.#scheduled = false;
+      if (generation !== this.#lifecycleGeneration || !this.#dirty) return;
+      void this.flush(generation);
+    });
+  }
+
+  private async flush(generation: number): Promise<void> {
+    if (this.#publishing || generation !== this.#lifecycleGeneration) return;
     this.#publishing = true;
-    void (async () => {
-      while (this.#dirty) {
+    try {
+      while (this.#dirty && generation === this.#lifecycleGeneration) {
         this.#dirty = false;
+        const projection = this.snapshot();
+        const signature = semanticSignature(projection);
+        if (signature === this.#lastPublishedSignature) continue;
         try {
-          await this.#publish(this.snapshot());
+          await this.#publish(projection);
+          if (generation === this.#lifecycleGeneration)
+            this.#lastPublishedSignature = signature;
         } catch {
-          // A reconnect or heartbeat republishes the latest provider-owned projection.
+          // Keep the successful signature unchanged. A later event or explicit
+          // publish retries the newest state without a timed debounce.
+          break;
         }
       }
+    } finally {
       this.#publishing = false;
-    })();
+      if (this.#dirty && generation === this.#lifecycleGeneration)
+        this.queuePublish();
+    }
   }
 }

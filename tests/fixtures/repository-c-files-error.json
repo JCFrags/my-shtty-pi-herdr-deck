@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "requestId": "repository-c-error-1",
+  "ok": false,
+  "error": "No active Files provider"
+}

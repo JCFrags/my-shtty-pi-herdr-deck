@@ -46,7 +46,37 @@ export const m6Snapshot: DeckSnapshot = {
       agentBoard: {
         available: true,
         openCount: 1,
-        items: [{ id: "board-1", title: "Review release?", state: "open" }],
+        items: [],
+        pendingQuestions: [
+          {
+            questionId: "board-1",
+            revision: 1,
+            question: "Review release?",
+            response: {
+              kind: "single",
+              options: [{ id: "yes", label: "Yes" }],
+            },
+            recommendedOptionIds: [],
+          },
+        ],
+        view: {
+          view: {
+            tabs: {
+              inbox: {
+                rows: [
+                  {
+                    id: "board-1",
+                    entityId: "board-1",
+                    title: "Review release?",
+                    statusLabel: "Open",
+                    revision: 1,
+                    userAnswerable: true,
+                  },
+                ],
+              },
+            },
+          },
+        },
       },
       todo: {
         available: true,

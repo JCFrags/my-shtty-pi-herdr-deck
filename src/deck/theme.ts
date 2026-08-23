@@ -47,7 +47,8 @@ export function paint(
 
 function semanticTone(line: string): ThemeTone {
   const trimmed = line.trimStart();
-  if (trimmed.startsWith("Pi Herd")) return "title";
+  if (trimmed.startsWith("Agent Board") || trimmed.startsWith("AGENT BOARD"))
+    return "title";
   if (
     /^(HOME|FILES|AGENTS|INBOX|MORE|WORK|SETTINGS|ORCHESTRATOR|AGENT BOARD|FILES PROVIDER|BOARD DETAIL|PREVIEW|NOTIFICATIONS|CURRENT|RESULTS|GROUPS|HISTORY|PI TODO)/.test(
       trimmed,

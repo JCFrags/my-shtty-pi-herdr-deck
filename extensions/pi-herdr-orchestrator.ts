@@ -1035,19 +1035,24 @@ export default async function piHerdrOrchestrator(
       }
     }
   };
+  const openAgentBoard = async (_args: string, raw: unknown): Promise<void> => {
+    const context = raw as PiContextLike;
+    try {
+      context.ui.notify?.(await openPiHerd(), "info");
+    } catch (error) {
+      context.ui.notify?.(
+        error instanceof Error ? error.message : String(error),
+        "warning",
+      );
+    }
+  };
+  api.registerCommand("agent-board", {
+    description: "Open and focus Agent Board beside this Pi pane",
+    handler: openAgentBoard,
+  });
   api.registerCommand("pi-herd", {
-    description: "Open and focus the Pi Herd deck beside this Pi pane",
-    handler: async (_args, raw) => {
-      const context = raw as PiContextLike;
-      try {
-        context.ui.notify?.(await openPiHerd(), "info");
-      } catch (error) {
-        context.ui.notify?.(
-          error instanceof Error ? error.message : String(error),
-          "warning",
-        );
-      }
-    },
+    description: "Open Agent Board (Pi Herd compatibility alias)",
+    handler: openAgentBoard,
   });
   api.registerCommand("orchestrator-status", {
     description: "Show Pi Herd Orchestrator status",

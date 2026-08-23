@@ -189,7 +189,7 @@ test("unified views expose current work, files, and separate question semantics"
   assert.match(home, /CURRENT SCOPE/);
   assert.match(home, /ACTIVE WORK/);
   assert.match(home, /orchestrator question/);
-  assert.match(home, /Providers · Agent Board 1 pending · Todo 1\/2 done/);
+  assert.match(home, /Providers · Signals 1 pending · Todo 1\/2 done/);
   assert.doesNotMatch(home, /Historical noise/);
   assert.match(home, /Scope totals · 1 active · 0 idle retained · 0 history/);
   assert.match(
@@ -356,7 +356,7 @@ test("views expose state and result meaning without color", () => {
   );
 });
 
-test("switching tabs cancels the active DEFAULT input", () => {
+test("text input owns numeric tab shortcuts until cancelled", () => {
   const client = new BrokerClient({
     socketPath: "/tmp/m6-input.sock",
     secret: "test",
@@ -366,11 +366,14 @@ test("switching tabs cancels the active DEFAULT input", () => {
     requestRender: () => undefined,
     getHeight: () => 40,
   });
-  app.handleInput("6");
+  app.handleInput(",");
   app.handleInput("d");
   assert.match(app.render(120).join("\\n"), /DEFAULT:/);
   app.handleInput("1");
+  assert.match(app.render(120).join("\\n"), /DEFAULT: 1/);
+  app.handleInput("\u001b");
   assert.doesNotMatch(app.render(120).join("\\n"), /DEFAULT:/);
+  assert.match(app.render(120).join("\\n"), /SETTINGS/);
   app.dispose();
   client.stop();
 });
@@ -477,7 +480,14 @@ test("every action has a keyboard-safe authorization result", () => {
   assert.equal(actions.authorize("refresh", {}), undefined);
   const worker = state.agents.get("agt_1");
   assert.ok(worker);
-  assert.equal(actions.authorize("compact", { agent: worker }), undefined);
+  assert.match(
+    actions.authorize("compact", { agent: worker }) ?? "",
+    /idle agent/,
+  );
+  assert.equal(
+    actions.authorize("compact", { agent: { ...worker, state: "idle" } }),
+    undefined,
+  );
   assert.match(
     actions.authorize("focus", { agent: worker }) ?? "",
     /Pane identity/,

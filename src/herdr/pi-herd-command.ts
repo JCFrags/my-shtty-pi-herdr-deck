@@ -89,16 +89,18 @@ export async function openPiHerd(
   const targetPaneId = env.HERDR_PANE_ID?.trim();
   if (!binary || !binary.startsWith("/"))
     throw new Error(
-      "Pi Herd is available only inside Herdr (missing absolute HERDR_BIN_PATH).",
+      "Agent Board is available only inside Herdr (missing absolute HERDR_BIN_PATH).",
     );
   if (!targetPaneId)
     throw new Error(
-      "Pi Herd is available only inside Herdr (missing HERDR_PANE_ID).",
+      "Agent Board is available only inside Herdr (missing HERDR_PANE_ID).",
     );
   try {
     await access(binary, constants.X_OK);
   } catch {
-    throw new Error("Pi Herd cannot open: HERDR_BIN_PATH is not executable.");
+    throw new Error(
+      "Agent Board cannot open: HERDR_BIN_PATH is not executable.",
+    );
   }
 
   const path = registryPath(env);
@@ -113,7 +115,7 @@ export async function openPiHerd(
     if (focused.code === 0) {
       registry[targetPaneId] = { ...entry, updatedAt: Date.now() };
       await saveRegistry(path, registry);
-      return "Pi Herd focused the existing deck.";
+      return "Agent Board focused the existing pane.";
     }
   }
 
@@ -127,11 +129,11 @@ export async function openPiHerd(
     env,
   );
   if (open.code !== 0)
-    throw new Error(`Pi Herd did not open (exit ${open.code}).`);
+    throw new Error(`Agent Board did not open (exit ${open.code}).`);
   // Herdr returns the new pane identity as JSON. Older versions can return plain text.
   const createdPaneId = openedPaneId(open.output);
   if (createdPaneId)
     registry[targetPaneId] = { paneId: createdPaneId, updatedAt: Date.now() };
   await saveRegistry(path, registry);
-  return "Pi Herd opened as a focused right split.";
+  return "Agent Board opened as a focused right split.";
 }

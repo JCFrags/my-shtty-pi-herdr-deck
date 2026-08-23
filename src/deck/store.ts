@@ -76,6 +76,7 @@ const cloneState = (state: DeckState): DeckState => ({
         ...value,
         ...(value.agentIds ? { agentIds: [...value.agentIds] } : {}),
         ...(value.taskIds ? { taskIds: [...value.taskIds] } : {}),
+        ...(value.runIds ? { runIds: [...value.runIds] } : {}),
         ...(value.questionIds ? { questionIds: [...value.questionIds] } : {}),
         ...(value.resultIds ? { resultIds: [...value.resultIds] } : {}),
       },
@@ -156,6 +157,7 @@ export class DeckStore {
             ? { agentIds: array<string>(value.agentIds) }
             : {}),
           ...(value.taskIds ? { taskIds: array<string>(value.taskIds) } : {}),
+          ...(value.runIds ? { runIds: array<string>(value.runIds) } : {}),
           ...(value.questionIds
             ? { questionIds: array<string>(value.questionIds) }
             : {}),

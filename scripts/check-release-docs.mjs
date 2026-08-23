@@ -91,7 +91,7 @@ export function validateReleaseDocs({
   );
   assert.equal(minimumHerdr, "0.8.2", "The minimum Herdr version is stale.");
   assert.equal(paneId, "deck", "The managed pane entrypoint is stale.");
-  assert.equal(paneTitle, "Pi Herd", "The managed pane title is stale.");
+  assert.equal(paneTitle, "Agent Board", "The managed pane title is stale.");
   assert.deepEqual(
     paneCommand,
     expectedCommand,

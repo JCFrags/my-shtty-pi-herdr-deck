@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { visibleWidth } from "@pi-herdr-deck/tui";
 import test from "node:test";
 import { BrokerClient } from "../../src/deck/broker-client.js";
 import { BrokerDeckApp } from "../../src/deck/broker-app.js";
@@ -32,18 +33,35 @@ test("production deck entry binds to an authenticated fake broker snapshot", asy
     getHeight: () => 40,
   });
   const output = app.render(120).join("\\n");
-  assert.match(output, /PI HERD/);
-  assert.match(output, /Alpha/);
+  assert.match(output, /AGENT BOARD/);
   assert.match(output, /Build deck/);
-  const narrowNavigation = app.render(30).slice(1, 4).join(" ");
-  for (const label of ["HOME", "Work", "Files", "Agents", "Board", "Settings"])
-    assert.match(narrowNavigation, new RegExp(label));
-  app.handleInput("2");
-  assert.match(
-    app.render(120).join("\n"),
-    /PI TODO · Provider-owned projection/,
+  const narrowHeader = app.render(30);
+  assert.ok(narrowHeader.every((line) => visibleWidth(line) <= 30));
+  const narrowNavigation = narrowHeader.slice(1, 5).join(" ");
+  for (const label of ["Board", "Files", "Agents", "Activity"])
+    assert.match(narrowNavigation, new RegExp(label, "i"));
+  assert.match(narrowHeader.join(" "), /Settings/);
+  assert.match(narrowHeader.join(" "), /Help/);
+  assert.doesNotMatch(narrowNavigation, /Home|Work/);
+  const activityY = narrowHeader.findIndex((line) =>
+    line.includes("Activity 4"),
   );
-  app.handleInput("5");
+  assert.ok(activityY >= 0);
+  const activityX = narrowHeader[activityY]!.indexOf("Activity 4") + 1;
+  for (const type of ["press", "release"] as const)
+    app.handleMouse({
+      type,
+      button: "left",
+      x: activityX,
+      y: activityY,
+      shift: false,
+      alt: false,
+      ctrl: false,
+    });
+  assert.match(app.render(120).join("\n"), /ACTIVITY/);
+  app.handleInput("2");
+  assert.match(app.render(120).join("\n"), /FILES/);
+  app.handleInput("1");
   assert.match(app.render(120).join("\n"), /Review release\?/);
   assert.equal(
     resolveBrokerSocketPath({
@@ -203,12 +221,12 @@ test("M6 deck actions preserve target identity and closure does not issue a work
   });
   assert.deepEqual(broker.requests[2]!.params as Record<string, unknown>, {
     agentId: "agt_alpha",
-    reason: "Stopped from Pi Herdr Deck.",
+    reason: "Stopped from Agent Board.",
     force: false,
   });
   assert.deepEqual(broker.requests[3]!.params as Record<string, unknown>, {
     taskId: "tsk_build",
-    reason: "Cancelled from Pi Herdr Deck.",
+    reason: "Cancelled from Agent Board.",
     cascade: false,
   });
   assert.deepEqual(broker.requests[4]!.params as Record<string, unknown>, {
@@ -264,7 +282,7 @@ test("deck actions use the managed broker control methods", async () => {
   });
   assert.deepEqual(broker.requests[6]!.params as Record<string, unknown>, {
     agentId: "agt_alpha",
-    reason: "Closed from Pi Herdr Deck.",
+    reason: "Closed from Agent Board.",
     confirm: true,
   });
   client.stop();
@@ -285,7 +303,7 @@ test("broker deck keyboard entry prompts and confirms close", async () => {
     getHeight: () => 60,
   });
 
-  app.handleInput("4");
+  app.handleInput("3");
   app.handleInput("p");
   assert.match(app.render(120).join("\n"), /PROMPT: /);
   app.handleInput("Build now.");
@@ -300,10 +318,11 @@ test("broker deck keyboard entry prompts and confirms close", async () => {
     ).message,
     "Build now.",
   );
+  await waitForM6(() => !app.render(120).join("\n").includes("PROMPT:"));
 
   app.handleInput("x");
-  assert.match(app.render(120).join("\n"), /Press x again to close Alpha/);
-  app.handleInput("x");
+  assert.match(app.render(120).join("\n"), /CONFIRMATION[\s\S]*Close Alpha\?/);
+  app.handleInput("y");
   await waitForM6(() =>
     broker.requests.some((request) => request.method === "agent.close"),
   );
@@ -325,13 +344,15 @@ test("broker deck mouse opens stable navigation and activates a button", async (
     requestRender: () => undefined,
     getHeight: () => 40,
   });
-  app.render(120);
+  const navigation = app.render(120);
+  const navigationY = navigation.findIndex((line) => line.includes("Files 2"));
+  const navigationX = navigation[navigationY]!.indexOf("Files 2");
   for (const type of ["press", "release"] as const)
     app.handleMouse({
       type,
       button: "left",
-      x: 19,
-      y: 1,
+      x: navigationX,
+      y: navigationY,
       shift: false,
       alt: false,
       ctrl: false,

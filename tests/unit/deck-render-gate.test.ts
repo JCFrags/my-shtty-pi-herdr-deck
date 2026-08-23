@@ -4,7 +4,10 @@ import type { TuiMouseEvent } from "@pi-herdr-deck/tui";
 import { BrokerDeckApp } from "../../src/deck/broker-app.js";
 import { renderButton } from "../../src/deck/components/controls.js";
 import { BrokerClient } from "../../src/deck/broker-client.js";
-import { visibleSurfaceSignature } from "../../src/deck/render-dependencies.js";
+import {
+  shellHeaderPresentation,
+  visibleSurfaceSignature,
+} from "../../src/deck/render-dependencies.js";
 import {
   currentProviderProjection,
   selectAdoptedRootAgent,
@@ -44,6 +47,44 @@ function projection(
       view: { rows: ["a.txt"] },
     },
     ...overrides,
+  };
+}
+
+function questionBoard(questionId: string) {
+  return {
+    available: true,
+    openCount: 1,
+    items: [],
+    pendingQuestions: [
+      {
+        questionId,
+        revision: 1,
+        question: "Question",
+        response: {
+          kind: "single" as const,
+          options: [{ id: "yes", label: "Yes" }],
+        },
+        recommendedOptionIds: [],
+      },
+    ],
+    view: {
+      view: {
+        tabs: {
+          inbox: {
+            rows: [
+              {
+                id: questionId,
+                entityId: questionId,
+                title: "Question",
+                statusLabel: "Open",
+                revision: 1,
+                userAnswerable: true,
+              },
+            ],
+          },
+        },
+      },
+    },
   };
 }
 
@@ -109,11 +150,6 @@ test("Files ignores heartbeat, same-owner state, provider peers, and broker chur
         completed: 0,
         items: [{ id: "todo-2", text: "Other" }],
       },
-      agentBoard: {
-        available: true,
-        openCount: 1,
-        items: [{ id: "q", title: "Question" }],
-      },
     }),
   );
   changed.agents.set("agent-1", {
@@ -143,6 +179,21 @@ test("Files ignores heartbeat, same-owner state, provider peers, and broker chur
     state: "open",
   });
   assert.equal(visibleSurfaceSignature(changed, filesContext), baseline);
+  const attentionChanged = state(
+    projection({
+      todo: {
+        available: true,
+        total: 2,
+        completed: 0,
+        items: [{ id: "todo-2", text: "Other" }],
+      },
+      agentBoard: questionBoard("q"),
+    }),
+  );
+  assert.notEqual(
+    visibleSurfaceSignature(attentionChanged, filesContext),
+    baseline,
+  );
 });
 
 test("Files reacts to semantic data, availability, root existence, and provider generation", () => {
@@ -325,306 +376,6 @@ test("terminal sole provider owners fail closed", () => {
   assert.equal(currentProviderProjection(state())?.ownerAgentId, "agent-1");
 });
 
-test("implicit Work selections include displayed detail but ignore unselected detail", () => {
-  const value = state();
-  value.tasks.set("a", {
-    id: "a",
-    state: "running",
-    title: "A",
-    assignedAgentId: "agent-1",
-    objective: "first",
-  } as never);
-  value.tasks.set("b", {
-    id: "b",
-    state: "running",
-    title: "B",
-    assignedAgentId: "agent-1",
-    objective: "other",
-  } as never);
-  const context = {
-    tab: "work",
-    workView: "tasks",
-    targetPaneId: "pane-1",
-  } as const;
-  const baseline = visibleSurfaceSignature(value, context);
-  const selectedChange = structuredClone(value.tasks.get("a")) as any;
-  selectedChange.objective = "changed";
-  value.tasks.set("a", selectedChange);
-  assert.notEqual(visibleSurfaceSignature(value, context), baseline);
-  const afterSelected = visibleSurfaceSignature(value, context);
-  const unrelated = structuredClone(value.tasks.get("b")) as any;
-  unrelated.objective = "hidden change";
-  value.tasks.set("b", unrelated);
-  assert.equal(visibleSurfaceSignature(value, context), afterSelected);
-});
-
-test("implicit result, group, and agent details are selected deterministically", () => {
-  const value = state();
-  value.results.set("a-result", {
-    id: "a-result",
-    status: "accepted",
-    summary: "first",
-    taskId: "task",
-  });
-  value.results.set("b-result", {
-    id: "b-result",
-    status: "accepted",
-    summary: "second",
-    taskId: "task",
-  });
-  value.groups.set("a-group", {
-    id: "a-group",
-    state: "open",
-    agentIds: ["agent-1"],
-    objective: "first",
-  });
-  value.groups.set("b-group", {
-    id: "b-group",
-    state: "open",
-    agentIds: ["agent-1"],
-    objective: "second",
-  });
-  value.runs.set("run", {
-    id: "run",
-    agentId: "agent-1",
-    taskId: "task",
-    state: "running",
-  } as never);
-  value.tasks.set("task", {
-    id: "task",
-    title: "Task",
-    state: "running",
-    currentRunId: "run",
-    objective: "agent detail",
-  } as never);
-  value.agents.set("agent-1", { ...agent(), currentRunId: "run" } as Agent);
-  value.questions.set("question", {
-    id: "question",
-    taskId: "task",
-    prompt: "First question",
-  });
-  const resultContext = {
-    tab: "work",
-    workView: "results",
-    targetPaneId: "pane-1",
-  } as const;
-  const groupContext = {
-    tab: "work",
-    workView: "groups",
-    targetPaneId: "pane-1",
-  } as const;
-  const agentContext = {
-    tab: "agents",
-    workView: "todo",
-    targetPaneId: "pane-1",
-    agentFilter: "active",
-  } as const;
-  const resultBase = visibleSurfaceSignature(value, resultContext);
-  value.results.set("a-result", {
-    ...value.results.get("a-result")!,
-    evidence: ["changed"],
-  });
-  assert.notEqual(visibleSurfaceSignature(value, resultContext), resultBase);
-  const groupBase = visibleSurfaceSignature(value, groupContext);
-  value.groups.set("a-group", {
-    ...value.groups.get("a-group")!,
-    objective: "changed",
-  });
-  assert.notEqual(visibleSurfaceSignature(value, groupContext), groupBase);
-  const agentBase = visibleSurfaceSignature(value, agentContext);
-  value.questions.set("question", {
-    ...value.questions.get("question")!,
-    prompt: "Changed question",
-  });
-  assert.notEqual(visibleSurfaceSignature(value, agentContext), agentBase);
-});
-
-test("task detail tracks exact resultId and deterministic displayed question only", () => {
-  const value = state();
-  value.tasks.set("task", {
-    id: "task",
-    title: "Task",
-    state: "running",
-    assignedAgentId: "agent-1",
-    resultId: "z-result",
-  } as never);
-  value.results.set("a-result", {
-    id: "a-result",
-    taskId: "task",
-    status: "accepted",
-    summary: "not displayed",
-  });
-  value.results.set("z-result", {
-    id: "z-result",
-    taskId: "task",
-    status: "accepted",
-    summary: "displayed",
-  });
-  value.questions.set("a-question", {
-    id: "a-question",
-    taskId: "task",
-    prompt: "displayed",
-  });
-  value.questions.set("z-question", {
-    id: "z-question",
-    taskId: "task",
-    prompt: "not displayed",
-  });
-  const context = {
-    tab: "work",
-    workView: "tasks",
-    targetPaneId: "pane-1",
-  } as const;
-  const baseline = visibleSurfaceSignature(value, context);
-  value.results.set("a-result", {
-    ...value.results.get("a-result")!,
-    summary: "hidden changed",
-  });
-  value.questions.set("z-question", {
-    ...value.questions.get("z-question")!,
-    prompt: "hidden changed",
-  });
-  assert.equal(visibleSurfaceSignature(value, context), baseline);
-  value.results.set("z-result", {
-    ...value.results.get("z-result")!,
-    summary: "shown changed",
-  });
-  assert.notEqual(visibleSurfaceSignature(value, context), baseline);
-  const resultChanged = visibleSurfaceSignature(value, context);
-  value.questions.set("a-question", {
-    ...value.questions.get("a-question")!,
-    prompt: "shown changed",
-  });
-  assert.notEqual(visibleSurfaceSignature(value, context), resultChanged);
-});
-
-test("History dependencies match visible task and result rows", () => {
-  const value = state();
-  value.tasks.set("running", {
-    id: "running",
-    title: "Visible",
-    state: "running",
-    assignedAgentId: "agent-1",
-    objective: "hidden",
-  } as never);
-  value.results.set("result", {
-    id: "result",
-    taskId: "running",
-    status: "accepted",
-    summary: "visible",
-  });
-  const context = {
-    tab: "work",
-    workView: "history",
-    targetPaneId: "pane-1",
-  } as const;
-  const baseline = visibleSurfaceSignature(value, context);
-  value.tasks.set("running", {
-    ...value.tasks.get("running")!,
-    objective: "hidden changed",
-  });
-  assert.equal(visibleSurfaceSignature(value, context), baseline);
-  value.tasks.set("running", {
-    ...value.tasks.get("running")!,
-    title: "Visible changed",
-  });
-  assert.notEqual(visibleSurfaceSignature(value, context), baseline);
-  const taskChanged = visibleSurfaceSignature(value, context);
-  value.results.set("result", {
-    ...value.results.get("result")!,
-    summary: "result changed",
-  });
-  assert.notEqual(visibleSurfaceSignature(value, context), taskChanged);
-});
-
-test("removing an explicit selection falls back to the first scoped item", () => {
-  const value = state();
-  value.tasks.set("a", {
-    id: "a",
-    title: "A",
-    state: "running",
-    assignedAgentId: "agent-1",
-  } as never);
-  value.tasks.set("b", {
-    id: "b",
-    title: "B",
-    state: "running",
-    assignedAgentId: "agent-1",
-  } as never);
-  const context = {
-    tab: "work",
-    workView: "tasks",
-    targetPaneId: "pane-1",
-    selectedTaskId: "b",
-  } as const;
-  const baseline = visibleSurfaceSignature(value, context);
-  value.tasks.delete("b");
-  assert.notEqual(visibleSurfaceSignature(value, context), baseline);
-});
-
-test("Work surfaces isolate data exclusive to another subview", () => {
-  const base = state();
-  const changed = state();
-  changed.results.set("result-1", {
-    id: "result-1",
-    status: "accepted",
-    summary: "done",
-  });
-  const todo = {
-    tab: "work",
-    workView: "todo",
-    targetPaneId: "pane-1",
-  } as const;
-  assert.equal(
-    visibleSurfaceSignature(changed, todo),
-    visibleSurfaceSignature(base, todo),
-  );
-  const groups = { ...todo, workView: "groups" } as const;
-  assert.equal(
-    visibleSurfaceSignature(changed, groups),
-    visibleSurfaceSignature(base, groups),
-  );
-});
-
-test("Home signature includes only the visible notification slice", () => {
-  const context = {
-    tab: "home",
-    workView: "todo",
-    targetPaneId: "pane-1",
-  } as const;
-  const first = [{ id: "n1", kind: "result" as const, text: "One", seq: 1 }];
-  const baseline = visibleSurfaceSignature(state(), {
-    ...context,
-    notifications: first,
-  });
-  assert.notEqual(
-    visibleSurfaceSignature(state(), { ...context, notifications: [] }),
-    baseline,
-  );
-  const four = [1, 2, 3, 4].map((seq) => ({
-    id: `n${seq}`,
-    kind: "result" as const,
-    text: String(seq),
-    seq,
-  }));
-  assert.equal(
-    visibleSurfaceSignature(state(), {
-      ...context,
-      notifications: [
-        ...four,
-        { id: "n5", kind: "result", text: "five", seq: 5 },
-      ],
-    }),
-    visibleSurfaceSignature(state(), {
-      ...context,
-      notifications: [
-        ...four,
-        { id: "other", kind: "result", text: "other", seq: 99 },
-      ],
-    }),
-  );
-});
-
 test("wrapped and unwrapped Board payloads normalize identically", () => {
   const model = {
     tabCounts: { inbox: 1, updates: 2 },
@@ -640,113 +391,6 @@ test("wrapped and unwrapped Board payloads normalize identically", () => {
   assert.deepEqual(
     selectBoardPresentation(base, "inbox"),
     selectBoardPresentation(wrapped, "inbox"),
-  );
-});
-
-test("Inbox ignores broker questions and unselected provider-tab detail", () => {
-  const provider = projection({
-    agentBoard: {
-      available: true,
-      openCount: 1,
-      items: [],
-      view: {
-        view: {
-          tabCounts: { inbox: 1, updates: 1 },
-          tabs: {
-            inbox: {
-              rows: [{ id: "q1" }],
-              detailsById: { q1: { text: "Visible" } },
-            },
-            updates: {
-              rows: [{ id: "u1" }],
-              detailsById: { u1: { text: "Old" } },
-            },
-          },
-        },
-      },
-    },
-  });
-  const base = state(provider);
-  const context = {
-    tab: "inbox",
-    workView: "todo",
-    targetPaneId: "pane-1",
-    boardTab: "inbox",
-    boardSelectionId: "q1",
-  } as const;
-  const baseline = visibleSurfaceSignature(base, context);
-  base.questions.set("broker", { id: "broker", prompt: "Broker only" });
-  const view = structuredClone(provider.agentBoard.view) as any;
-  view.view.tabs.updates.detailsById.u1.text = "New";
-  provider.agentBoard.view = view;
-  assert.equal(visibleSurfaceSignature(base, context), baseline);
-});
-
-test("Board visible counts, selected detail, flags, and pending response are dependencies", () => {
-  const board = {
-    available: true,
-    openCount: 1,
-    items: [],
-    pendingQuestions: [
-      {
-        questionId: "q1",
-        revision: 1,
-        question: "Choose",
-        response: {
-          kind: "single" as const,
-          options: [{ id: "yes", label: "Yes" }],
-        },
-        recommendedOptionIds: ["yes"],
-      },
-    ],
-    view: {
-      view: {
-        tabCounts: { inbox: 1, updates: 0 },
-        tabs: {
-          inbox: {
-            rows: [{ id: "q1", revision: 1, userAnswerable: true }],
-            detailsById: { q1: { text: "Detail" } },
-          },
-        },
-      },
-    },
-  };
-  const context = {
-    tab: "inbox",
-    workView: "todo",
-    targetPaneId: "pane-1",
-    boardTab: "inbox",
-  } as const;
-  const baseline = visibleSurfaceSignature(
-    state(projection({ agentBoard: board })),
-    context,
-  );
-  const count = structuredClone(board);
-  count.view.view.tabCounts.updates = 1;
-  assert.notEqual(
-    visibleSurfaceSignature(state(projection({ agentBoard: count })), context),
-    baseline,
-  );
-  const detail = structuredClone(board);
-  detail.view.view.tabs.inbox.detailsById.q1.text = "Changed";
-  assert.notEqual(
-    visibleSurfaceSignature(state(projection({ agentBoard: detail })), context),
-    baseline,
-  );
-  const flag = structuredClone(board);
-  flag.view.view.tabs.inbox.rows[0]!.userAnswerable = false;
-  assert.notEqual(
-    visibleSurfaceSignature(state(projection({ agentBoard: flag })), context),
-    baseline,
-  );
-  const response = structuredClone(board);
-  response.pendingQuestions[0]!.recommendedOptionIds = [];
-  assert.notEqual(
-    visibleSurfaceSignature(
-      state(projection({ agentBoard: response })),
-      context,
-    ),
-    baseline,
   );
 });
 
@@ -788,11 +432,6 @@ test("Board answer keyboard action follows the visible provider tab", () => {
     requestRender: () => undefined,
     getHeight: () => 40,
   });
-  app.handleInput("5");
-  clickLabel(app, "Updates");
-  app.handleInput("a");
-  assert.doesNotMatch(app.render(120).join("\n"), /BOARD-ANSWER:/);
-  clickLabel(app, "Inbox");
   app.handleInput("a");
   assert.match(app.render(120).join("\n"), /BOARD-ANSWER:/);
   app.dispose();
@@ -816,7 +455,7 @@ test("BrokerDeckApp tracks fallback Files standalone availability only", () => {
     requestRender: () => renders++,
     getHeight: () => 40,
   });
-  app.handleInput("3");
+  app.handleInput("2");
   assert.ok(
     app
       .render(120)
@@ -897,15 +536,11 @@ test("BrokerDeckApp tracks fallback Files standalone availability only", () => {
           completed: 0,
           items: [{ id: "todo-2", text: "Other" }],
         },
-        agentBoard: {
-          available: true,
-          openCount: 1,
-          items: [{ id: "question", title: "Question" }],
-        },
+        agentBoard: questionBoard("question"),
       }),
     ],
   });
-  assert.equal(renders, baseline);
+  assert.equal(renders, baseline + 1);
   app.dispose();
 });
 
@@ -933,7 +568,7 @@ test("BrokerDeckApp leaves Files unbound when no-target authority is ambiguous",
     requestRender: () => undefined,
     getHeight: () => 40,
   });
-  app.handleInput("3");
+  app.handleInput("2");
   const output = app.render(120).join("\n");
   assert.match(output, /○ CONNECTING/);
   assert.ok(
@@ -972,7 +607,7 @@ test("BrokerDeckApp uses the first displayed agent for inspector and dependencie
     requestRender: () => renders++,
     getHeight: () => 40,
   });
-  app.handleInput("4");
+  app.handleInput("3");
   const output = app.render(120).join("\n");
   assert.match(output, />.*Zulu/);
   assert.match(output, /Identity: z-agent/);
@@ -1022,7 +657,7 @@ test("BrokerDeckApp clamps an invalid agent page after scope shrink", () => {
     requestRender: () => renders++,
     getHeight: () => 50,
   });
-  app.handleInput("4");
+  app.handleInput("3");
   for (let index = 0; index < 12; index++) app.handleInput("j");
   const baseline = renders;
   client.store.replace({
@@ -1042,7 +677,7 @@ test("BrokerDeckApp action targets match scoped displayed entities", () => {
   const provider = projection({ ownerAgentId: "z-agent" });
   const scopedTask = {
     id: "z-task",
-    title: "Scoped",
+    title: "Scoped task",
     state: "running",
     assignedAgentId: "z-agent",
   } as never;
@@ -1054,7 +689,7 @@ test("BrokerDeckApp action targets match scoped displayed entities", () => {
   } as never;
   const scopedGroup = {
     id: "z-group",
-    name: "Scoped",
+    name: "Scoped group",
     state: "open",
     agentIds: ["z-agent"],
   };
@@ -1082,132 +717,25 @@ test("BrokerDeckApp action targets match scoped displayed entities", () => {
     getHeight: () => 40,
     onActionTarget: (action, target) => captured.push({ action, target }),
   });
-  app.handleInput("2");
-  clickLabel(app, "Tasks");
+  clickLabel(app, "Scoped task");
   clickLabel(app, "Cancel task");
-  clickLabel(app, "Cancel task");
+  clickLabel(app, "Confirm");
   assert.equal(
     captured.find((item) => item.action === "cancelTask")?.target.task.id,
     "z-task",
   );
-  clickLabel(app, "Groups");
-  clickLabel(app, "Wait");
+  clickLabel(app, "Scoped group");
+  clickLabel(app, "Wait group");
   assert.equal(
     captured.find((item) => item.action === "groupWait")?.target.group.id,
     "z-group",
   );
-  app.handleInput("4");
+  app.handleInput("3");
   clickLabel(app, "Focus");
   assert.equal(
     captured.find((item) => item.action === "focus")?.target.agent.id,
     "z-agent",
   );
-  app.dispose();
-});
-
-test("BrokerDeckApp tracks the implicitly selected scoped task detail", () => {
-  const client = new BrokerClient({
-    socketPath: "/tmp/render-task-gate.sock",
-    secret: "test",
-  });
-  const tasks = [
-    {
-      id: "a",
-      title: "A",
-      state: "running",
-      assignedAgentId: "agent-1",
-      objective: "first",
-    },
-    {
-      id: "b",
-      title: "B",
-      state: "running",
-      assignedAgentId: "agent-1",
-      objective: "second",
-    },
-  ] as any[];
-  client.store.replace({ ...snapshot(), tasks });
-  let renders = 0;
-  const app = new BrokerDeckApp({
-    client,
-    targetPaneId: "pane-1",
-    requestRender: () => renders++,
-    getHeight: () => 40,
-  });
-  app.handleInput("2");
-  clickLabel(app, "Tasks");
-  const baseline = renders;
-  client.store.replace({
-    ...snapshot(),
-    tasks: [{ ...tasks[0], objective: "changed" }, tasks[1]] as never[],
-  });
-  assert.equal(renders, baseline + 1);
-  const changed = renders;
-  client.store.replace({
-    ...snapshot(),
-    tasks: [
-      { ...tasks[0], objective: "changed" },
-      { ...tasks[1], objective: "hidden" },
-    ] as never[],
-  });
-  assert.equal(renders, changed);
-  app.dispose();
-});
-
-test("BrokerDeckApp wheel movement synchronizes the selected-task baseline", () => {
-  const client = new BrokerClient({
-    socketPath: "/tmp/render-wheel-gate.sock",
-    secret: "test",
-  });
-  const tasks = [
-    {
-      id: "a",
-      title: "A",
-      state: "running",
-      assignedAgentId: "agent-1",
-      objective: "first",
-    },
-    {
-      id: "b",
-      title: "B",
-      state: "running",
-      assignedAgentId: "agent-1",
-      objective: "second",
-    },
-  ] as any[];
-  client.store.replace({ ...snapshot(), tasks });
-  let renders = 0;
-  const app = new BrokerDeckApp({
-    client,
-    targetPaneId: "pane-1",
-    requestRender: () => renders++,
-    getHeight: () => 40,
-  });
-  app.handleInput("2");
-  clickLabel(app, "Tasks");
-  app.handleMouse({
-    type: "wheel",
-    direction: "down",
-    x: 1,
-    y: 1,
-    shift: false,
-    alt: false,
-    ctrl: false,
-  });
-  const baseline = renders;
-  client.store.replace({
-    ...snapshot(),
-    tasks: [{ ...tasks[0], objective: "old changed" }, tasks[1]] as never[],
-  });
-  assert.equal(renders, baseline);
-  client.store.replace({
-    ...snapshot(),
-    tasks: [
-      { ...tasks[0], objective: "old changed" },
-      { ...tasks[1], objective: "selected changed" },
-    ] as never[],
-  });
-  assert.equal(renders, baseline + 1);
   app.dispose();
 });
 
@@ -1224,43 +752,287 @@ test("BrokerDeckApp render counter gates Files changes and tab switching", () =>
     requestRender: () => renders++,
     getHeight: () => 30,
   });
-  app.handleInput("3");
+  app.handleInput("2");
   const baseline = renders;
   client.store.replace(
     snapshot(
       projection({
-        todo: { available: true, total: 2, completed: 0, items: [] },
-      }),
-    ),
-  );
-  client.store.replace(
-    snapshot(
-      projection({
-        agentBoard: {
+        todo: {
           available: true,
-          openCount: 1,
-          items: [{ id: "q", title: "Q" }],
+          total: 2,
+          completed: 0,
+          items: [{ id: "todo-2", text: "Other" }],
         },
       }),
     ),
-  );
-  client.store.replace(
-    snapshot(projection(), {
-      ...agent(),
-      state: "idle",
-      heartbeatAt: "later",
-    } as Agent),
   );
   assert.equal(renders, baseline);
   client.store.replace(
     snapshot(
       projection({
-        files: { available: true, view: { rows: ["changed.txt"] } },
+        todo: {
+          available: true,
+          total: 2,
+          completed: 0,
+          items: [{ id: "todo-2", text: "Other" }],
+        },
+        agentBoard: questionBoard("q"),
       }),
     ),
   );
   assert.equal(renders, baseline + 1);
+  const afterAttention = renders;
+  client.store.replace(
+    snapshot(
+      projection({
+        todo: {
+          available: true,
+          total: 2,
+          completed: 0,
+          items: [{ id: "todo-2", text: "Other" }],
+        },
+        agentBoard: questionBoard("q"),
+      }),
+    ),
+  );
+  assert.equal(renders, afterAttention);
+  client.store.replace(
+    snapshot(
+      projection({
+        todo: {
+          available: true,
+          total: 2,
+          completed: 0,
+          items: [{ id: "todo-2", text: "Other" }],
+        },
+        files: { available: true, view: { rows: ["changed.txt"] } },
+        agentBoard: questionBoard("q"),
+      }),
+    ),
+  );
+  assert.equal(renders, afterAttention + 1);
+  const beforeTab = renders;
+  app.handleInput("1");
+  assert.equal(renders, beforeTab + 1);
+  app.dispose();
+});
+
+test("Files mouse regions keep preview, selection, and expansion distinct", async () => {
+  const files = {
+    available: true,
+    summary: { cwd: "/repo", selectedCount: 0 },
+    view: {
+      currentPath: ".",
+      rows: [
+        {
+          path: "src",
+          name: "src",
+          kind: "directory",
+          depth: 0,
+          expanded: false,
+        },
+        {
+          path: "src/app.ts",
+          name: "app.ts",
+          kind: "file",
+          depth: 1,
+          selected: false,
+        },
+      ],
+      preview: {
+        lines: Array.from({ length: 12 }, (_, index) => `line ${index + 1}`),
+      },
+    },
+  };
+  const client = new BrokerClient({
+    socketPath: "/tmp/files-mouse-regions.sock",
+    secret: "test",
+  });
+  client.store.replace(snapshot(projection({ files })));
+  const requests: Array<{ method: string; params: any }> = [];
+  (client as any).request = async (method: string, params: unknown) => {
+    requests.push({ method, params });
+    return {};
+  };
+  const app = new BrokerDeckApp({
+    client,
+    targetPaneId: "pane-1",
+    requestRender: () => undefined,
+    getHeight: () => 30,
+  });
   app.handleInput("2");
-  assert.ok(renders > baseline + 1);
+  const click = (x: number, y: number) => {
+    for (const type of ["press", "release"] as const)
+      app.handleMouse({
+        type,
+        button: "left",
+        x,
+        y,
+        shift: false,
+        alt: false,
+        ctrl: false,
+      });
+  };
+
+  let lines = app.render(120);
+  const fileY = lines.findIndex((line) => line.includes("app.ts"));
+  assert.ok(fileY >= 0);
+  click(lines[fileY]!.indexOf("app.ts"), fileY);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.at(-1)?.params.action, "preview");
+  assert.equal(requests.at(-1)?.params.path, "src/app.ts");
+
+  lines = app.render(120);
+  const selectedFileY = lines.findIndex((line) => line.includes("app.ts"));
+  click(lines[selectedFileY]!.indexOf("[ ") + 1, selectedFileY);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.at(-1)?.params.action, "toggle-selection");
+  assert.equal(requests.at(-1)?.params.path, "src/app.ts");
+
+  lines = app.render(120);
+  const folderY = lines.findIndex(
+    (line) => line.includes("src") && line.includes("▸"),
+  );
+  click(lines[folderY]!.indexOf("▸"), folderY);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.at(-1)?.params.action, "expand");
+  assert.equal(requests.at(-1)?.params.path, "src");
+
+  lines = app.render(120);
+  const previewY = lines.findIndex((line) => line.includes("line 1"));
+  app.handleMouse({
+    type: "wheel",
+    direction: "down",
+    x: 2,
+    y: previewY,
+    shift: false,
+    alt: false,
+    ctrl: false,
+  });
+  const scrolled = app.render(120).join("\n");
+  assert.match(scrolled, /line 2/);
+  assert.doesNotMatch(scrolled, /\nline 1\n/);
+  assert.match(scrolled, /app\.ts/);
+  app.dispose();
+});
+
+test("visible signatures derive guarded overlay state and exact action availability", () => {
+  const guarded = state();
+  guarded.tasks.set("task-1", {
+    id: "task-1",
+    state: "running",
+    title: "Task",
+    assignedAgentId: "agent-1",
+  } as never);
+  const overlay = {
+    tab: "board" as const,
+    targetPaneId: "pane-1",
+    overlay: "confirm" as const,
+    overlayGuard: {
+      kind: "confirm",
+      action: "cancelTask",
+      target: { task: guarded.tasks.get("task-1") },
+      guard: { targetId: "task-1" },
+      summary: "Cancel Task?",
+    },
+  };
+  const baseline = visibleSurfaceSignature(guarded, overlay);
+  guarded.tasks.set("task-1", {
+    ...guarded.tasks.get("task-1")!,
+    state: "succeeded",
+  } as never);
+  assert.notEqual(visibleSurfaceSignature(guarded, overlay), baseline);
+
+  const unrelated = state();
+  const unchanged = visibleSurfaceSignature(unrelated, {
+    tab: "board",
+    targetPaneId: "pane-1",
+    overlay: "agent-more",
+    overlayGuard: {
+      kind: "agent-more",
+      guard: { agentId: "agent-1", generation: 1 },
+    },
+  });
+  unrelated.tasks.set("other", { id: "other", state: "running" } as never);
+  assert.equal(
+    visibleSurfaceSignature(unrelated, {
+      tab: "board",
+      targetPaneId: "pane-1",
+      overlay: "agent-more",
+      overlayGuard: {
+        kind: "agent-more",
+        guard: { agentId: "agent-1", generation: 1 },
+      },
+    }),
+    unchanged,
+  );
+});
+
+test("shell attention is the canonical Board count, including synthetic waits, and scope is safe", () => {
+  const value = state();
+  const provider = value.providerProjections.get("agent-1")!;
+  provider.todo.items = [];
+  provider.todo.waitReason = "provider wait";
+  const shell = shellHeaderPresentation(value, {
+    tab: "board",
+    targetPaneId: "pane-1",
+    online: true,
+  });
+  assert.equal(shell.attentionCount, 1);
+  value.agents.set("agent-1", {
+    ...agent(),
+    displayName: "bad\u001b[31m\u202e",
+  } as Agent);
+  assert.doesNotMatch(
+    shellHeaderPresentation(value, {
+      tab: "board",
+      targetPaneId: "pane-1",
+    }).scopeLabel,
+    /\u001b|\u202e/u,
+  );
+});
+
+test("duplicate provider projection events coalesce before render gating", () => {
+  let renders = 0;
+  const client = new BrokerClient({
+    socketPath: "/tmp/provider-coalescing.sock",
+    secret: "test",
+  });
+  client.store.replace(snapshot());
+  const app = new BrokerDeckApp({
+    client,
+    targetPaneId: "pane-1",
+    requestRender: () => renders++,
+    getHeight: () => 30,
+  });
+  app.handleInput("2");
+  const baseline = renders;
+  assert.equal(
+    client.store.apply({
+      seq: 2,
+      id: "projection-duplicate",
+      event: "presentation.projection.changed",
+      refs: { agentId: "agent-1" },
+      data: { ownerAgentId: "agent-1", projection: projection() },
+    }),
+    true,
+  );
+  assert.equal(renders, baseline);
+  assert.equal(
+    client.store.apply({
+      seq: 3,
+      id: "projection-visible",
+      event: "presentation.projection.changed",
+      refs: { agentId: "agent-1" },
+      data: {
+        ownerAgentId: "agent-1",
+        projection: projection({
+          files: { available: true, view: { rows: ["b"] } },
+        }),
+      },
+    }),
+    true,
+  );
+  assert.equal(renders, baseline + 1);
   app.dispose();
 });

@@ -1,0 +1,115 @@
+{
+  "version": 1,
+  "requestId": "repository-c-snapshot-1",
+  "ok": true,
+  "summary": {
+    "version": 1,
+    "cwd": "/repo",
+    "currentPath": "",
+    "selectedPaths": ["src/main.ts"],
+    "selectedCount": 1,
+    "showHidden": false,
+    "selectedKnownBytes": 24,
+    "selectedApproximateTokens": 6,
+    "limits": {
+      "directoryEntryLimit": 256,
+      "filterMaxEntries": 4096,
+      "filterMaxResults": 256,
+      "previewMaxBytes": 65536,
+      "previewMaxLines": 5000,
+      "insertPerFileMaxBytes": 262144,
+      "insertTotalMaxBytes": 1048576,
+      "maxRowsPerEvent": 256,
+      "maxErrorCharacters": 240
+    }
+  },
+  "view": {
+    "version": 1,
+    "cwd": "/repo",
+    "currentPath": "",
+    "rows": [
+      {
+        "path": "src",
+        "name": "src",
+        "kind": "directory",
+        "depth": 0,
+        "selected": false,
+        "partiallySelected": true,
+        "expanded": true,
+        "loaded": true,
+        "truncated": false,
+        "hidden": false,
+        "ignored": false,
+        "supplemental": false
+      },
+      {
+        "path": "src/main.ts",
+        "name": "main.ts",
+        "kind": "file",
+        "depth": 1,
+        "selected": true,
+        "partiallySelected": false,
+        "expanded": false,
+        "loaded": false,
+        "truncated": false,
+        "hidden": false,
+        "ignored": false,
+        "supplemental": false
+      },
+      {
+        "path": "",
+        "name": "",
+        "kind": "other",
+        "depth": 0,
+        "selected": false,
+        "partiallySelected": false,
+        "expanded": false,
+        "loaded": false,
+        "truncated": false,
+        "hidden": false,
+        "ignored": false,
+        "supplemental": true,
+        "rowType": "section",
+        "message": "Selected (collapsed, hidden, or filtered)"
+      },
+      {
+        "path": "",
+        "name": "",
+        "kind": "other",
+        "depth": 0,
+        "selected": false,
+        "partiallySelected": false,
+        "expanded": false,
+        "loaded": false,
+        "truncated": false,
+        "hidden": false,
+        "ignored": false,
+        "supplemental": true,
+        "rowType": "warning",
+        "message": "Directory listing truncated"
+      }
+    ],
+    "filter": "",
+    "searchTruncated": false,
+    "showHidden": false,
+    "previewPath": "src/main.ts",
+    "preview": {
+      "metadata": {
+        "relativePath": "src/main.ts",
+        "absolutePath": "/repo/src/main.ts",
+        "size": 24,
+        "mtimeMs": 0,
+        "mode": 33188,
+        "encoding": "utf-8",
+        "invalidUtf8": false,
+        "changed": false,
+        "binary": false,
+        "truncated": false,
+        "bytesRead": 24,
+        "displayedLines": 2,
+        "totalLines": 2
+      },
+      "lines": ["export const value = 1;", ""]
+    }
+  }
+}

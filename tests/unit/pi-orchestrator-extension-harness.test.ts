@@ -13,6 +13,10 @@ function apiFor(harness: ReturnType<typeof createFakePiHarness>) {
     Array<(event: unknown, context: unknown) => void | Promise<void>>
   >();
   const tools: unknown[] = [];
+  const commands: Array<{
+    name: string;
+    command: { handler: (...args: any[]) => unknown };
+  }> = [];
   const toolWaiters = new Map<
     number,
     {
@@ -28,7 +32,12 @@ function apiFor(harness: ReturnType<typeof createFakePiHarness>) {
     ) => {
       handlers.set(name, [...(handlers.get(name) ?? []), handler]);
     },
-    registerCommand: () => undefined,
+    registerCommand: (
+      name: string,
+      command: { handler: (...args: any[]) => unknown },
+    ) => {
+      commands.push({ name, command });
+    },
     registerTool: (tool: unknown) => {
       tools.push(tool);
       const waiter = toolWaiters.get(tools.length);
@@ -53,7 +62,7 @@ function apiFor(harness: ReturnType<typeof createFakePiHarness>) {
       toolWaiters.set(expected, { resolve, timer });
     });
   };
-  return { api, handlers, tools, waitForToolRegistration };
+  return { api, handlers, tools, commands, waitForToolRegistration };
 }
 async function emit(
   h: ReturnType<typeof apiFor>,
@@ -92,6 +101,7 @@ test("orchestrator extension reload transfers runtime credential and registers t
     generation: "PI_HERDR_ORCH_GENERATION",
   } as const;
   const connections: Socket[] = [];
+  const closedSockets = new WeakSet<Socket>();
   const pendingRegistrationWrites = new Set<Socket>();
   const activeHarnesses: Array<{
     api: ReturnType<typeof apiFor>;
@@ -155,22 +165,38 @@ test("orchestrator extension reload transfers runtime credential and registers t
     clearTimeout(waiter.timer);
     waiter.resolve(count);
   };
+  const isClosedStream = (socket: Socket, error?: unknown): boolean => {
+    const code =
+      error && typeof error === "object" && "code" in error
+        ? (error as { code?: unknown }).code
+        : undefined;
+    return (
+      closedSockets.has(socket) ||
+      socket.destroyed ||
+      socket.writable === false ||
+      code === "EPIPE" ||
+      code === "ERR_STREAM_DESTROYED"
+    );
+  };
   const writeResponse = (
     socket: Socket,
     frame: unknown,
     onWritten?: () => void,
   ): void => {
+    if (isClosedStream(socket)) return;
     try {
       socket.write(encodeFrame(frame), (error) => {
-        if (error) failServer(error);
-        else onWritten?.();
+        if (error) {
+          if (!isClosedStream(socket, error)) failServer(error);
+        } else onWritten?.();
       });
     } catch (error) {
-      failServer(
-        error instanceof Error
-          ? error
-          : new Error("Test server response write failed."),
-      );
+      if (!isClosedStream(socket, error))
+        failServer(
+          error instanceof Error
+            ? error
+            : new Error("Test server response write failed."),
+        );
     }
   };
   const shutdown = async (
@@ -245,7 +271,12 @@ test("orchestrator extension reload transfers runtime credential and registers t
   server.on("error", failServer);
   server.on("connection", (socket) => {
     connections.push(socket);
+    socket.on("close", () => {
+      closedSockets.add(socket);
+      pendingRegistrationWrites.delete(socket);
+    });
     socket.on("error", (error) => {
+      if (isClosedStream(socket, error)) return;
       if (pendingRegistrationWrites.has(socket)) failServer(error);
       else if (!("code" in error) || error.code !== "ECONNRESET")
         failServer(error);
@@ -355,6 +386,14 @@ test("orchestrator extension reload transfers runtime credential and registers t
     (first.tools as Array<{ name: string }>).map((tool) => tool.name).sort(),
     ["orchestrator_ask", "orchestrator_result"],
   );
+  assert.deepEqual(
+    first.commands.map((item) => item.name),
+    ["agent-board", "pi-herd", "orchestrator-status"],
+  );
+  assert.equal(
+    first.commands[0]?.command.handler,
+    first.commands[1]?.command.handler,
+  );
   await emit(first, "session_start", firstHarness.context);
   assert.deepEqual(firstHarness.activeTools.sort(), [
     "orchestrator_ask",
@@ -393,6 +432,15 @@ test("orchestrator extension reload transfers runtime credential and registers t
   assert.equal(registrationCount, 2);
   assert.equal(first.tools.length, 2);
   assert.equal(second.tools.length, 2);
+  assert.deepEqual(
+    second.commands.map((item) => item.name),
+    ["agent-board", "pi-herd", "orchestrator-status"],
+  );
+  assert.equal(
+    second.commands[0]?.command.handler,
+    second.commands[1]?.command.handler,
+  );
+  assert.equal(new Set(second.commands.map((item) => item.name)).size, 3);
   assert.equal(
     new Set((second.tools as Array<{ name: string }>).map((tool) => tool.name))
       .size,
