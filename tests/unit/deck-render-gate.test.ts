@@ -109,11 +109,6 @@ test("Files ignores heartbeat, same-owner state, provider peers, and broker chur
         completed: 0,
         items: [{ id: "todo-2", text: "Other" }],
       },
-      agentBoard: {
-        available: true,
-        openCount: 1,
-        items: [{ id: "q", title: "Question" }],
-      },
     }),
   );
   changed.agents.set("agent-1", {
@@ -143,6 +138,25 @@ test("Files ignores heartbeat, same-owner state, provider peers, and broker chur
     state: "open",
   });
   assert.equal(visibleSurfaceSignature(changed, filesContext), baseline);
+  const attentionChanged = state(
+    projection({
+      todo: {
+        available: true,
+        total: 2,
+        completed: 0,
+        items: [{ id: "todo-2", text: "Other" }],
+      },
+      agentBoard: {
+        available: true,
+        openCount: 1,
+        items: [{ id: "q", title: "Question" }],
+      },
+    }),
+  );
+  assert.notEqual(
+    visibleSurfaceSignature(attentionChanged, filesContext),
+    baseline,
+  );
 });
 
 test("Files reacts to semantic data, availability, root existence, and provider generation", () => {
@@ -493,7 +507,7 @@ test("BrokerDeckApp tracks fallback Files standalone availability only", () => {
       }),
     ],
   });
-  assert.equal(renders, baseline);
+  assert.equal(renders, baseline + 1);
   app.dispose();
 });
 
@@ -710,13 +724,25 @@ test("BrokerDeckApp render counter gates Files changes and tab switching", () =>
   client.store.replace(
     snapshot(
       projection({
-        todo: { available: true, total: 2, completed: 0, items: [] },
+        todo: {
+          available: true,
+          total: 2,
+          completed: 0,
+          items: [{ id: "todo-2", text: "Other" }],
+        },
       }),
     ),
   );
+  assert.equal(renders, baseline);
   client.store.replace(
     snapshot(
       projection({
+        todo: {
+          available: true,
+          total: 2,
+          completed: 0,
+          items: [{ id: "todo-2", text: "Other" }],
+        },
         agentBoard: {
           available: true,
           openCount: 1,
@@ -725,24 +751,48 @@ test("BrokerDeckApp render counter gates Files changes and tab switching", () =>
       }),
     ),
   );
-  client.store.replace(
-    snapshot(projection(), {
-      ...agent(),
-      state: "idle",
-      heartbeatAt: "later",
-    } as Agent),
-  );
-  assert.equal(renders, baseline);
+  assert.equal(renders, baseline + 1);
+  const afterAttention = renders;
   client.store.replace(
     snapshot(
       projection({
-        files: { available: true, view: { rows: ["changed.txt"] } },
+        todo: {
+          available: true,
+          total: 2,
+          completed: 0,
+          items: [{ id: "todo-2", text: "Other" }],
+        },
+        agentBoard: {
+          available: true,
+          openCount: 1,
+          items: [{ id: "q", title: "Q changed" }],
+        },
       }),
     ),
   );
-  assert.equal(renders, baseline + 1);
+  assert.equal(renders, afterAttention);
+  client.store.replace(
+    snapshot(
+      projection({
+        todo: {
+          available: true,
+          total: 2,
+          completed: 0,
+          items: [{ id: "todo-2", text: "Other" }],
+        },
+        files: { available: true, view: { rows: ["changed.txt"] } },
+        agentBoard: {
+          available: true,
+          openCount: 1,
+          items: [{ id: "q", title: "Q changed" }],
+        },
+      }),
+    ),
+  );
+  assert.equal(renders, afterAttention + 1);
+  const beforeTab = renders;
   app.handleInput("1");
-  assert.ok(renders > baseline + 1);
+  assert.equal(renders, beforeTab + 1);
   app.dispose();
 });
 

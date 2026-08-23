@@ -445,7 +445,6 @@ export class BrokerDeckApp implements Component {
     this.closeOverlay();
     this.#tracker.reset();
     this.syncVisibleSignature();
-    this.#requestRender();
   }
 
   private toggleSettings(): void {

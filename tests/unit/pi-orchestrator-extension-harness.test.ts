@@ -101,6 +101,7 @@ test("orchestrator extension reload transfers runtime credential and registers t
     generation: "PI_HERDR_ORCH_GENERATION",
   } as const;
   const connections: Socket[] = [];
+  const closedSockets = new WeakSet<Socket>();
   const pendingRegistrationWrites = new Set<Socket>();
   const activeHarnesses: Array<{
     api: ReturnType<typeof apiFor>;
@@ -164,22 +165,38 @@ test("orchestrator extension reload transfers runtime credential and registers t
     clearTimeout(waiter.timer);
     waiter.resolve(count);
   };
+  const isClosedStream = (socket: Socket, error?: unknown): boolean => {
+    const code =
+      error && typeof error === "object" && "code" in error
+        ? (error as { code?: unknown }).code
+        : undefined;
+    return (
+      closedSockets.has(socket) ||
+      socket.destroyed ||
+      socket.writable === false ||
+      code === "EPIPE" ||
+      code === "ERR_STREAM_DESTROYED"
+    );
+  };
   const writeResponse = (
     socket: Socket,
     frame: unknown,
     onWritten?: () => void,
   ): void => {
+    if (isClosedStream(socket)) return;
     try {
       socket.write(encodeFrame(frame), (error) => {
-        if (error) failServer(error);
-        else onWritten?.();
+        if (error) {
+          if (!isClosedStream(socket, error)) failServer(error);
+        } else onWritten?.();
       });
     } catch (error) {
-      failServer(
-        error instanceof Error
-          ? error
-          : new Error("Test server response write failed."),
-      );
+      if (!isClosedStream(socket, error))
+        failServer(
+          error instanceof Error
+            ? error
+            : new Error("Test server response write failed."),
+        );
     }
   };
   const shutdown = async (
@@ -254,7 +271,12 @@ test("orchestrator extension reload transfers runtime credential and registers t
   server.on("error", failServer);
   server.on("connection", (socket) => {
     connections.push(socket);
+    socket.on("close", () => {
+      closedSockets.add(socket);
+      pendingRegistrationWrites.delete(socket);
+    });
     socket.on("error", (error) => {
+      if (isClosedStream(socket, error)) return;
       if (pendingRegistrationWrites.has(socket)) failServer(error);
       else if (!("code" in error) || error.code !== "ECONNRESET")
         failServer(error);
