@@ -8,9 +8,11 @@ import type {
   NormalizedQuestion,
 } from "./product-presentation.js";
 import { normalizeSignalsQuestion } from "./product-presentation.js";
-import { boardRecord, selectBoardPresentation } from "./board-presentation.js";
 import type { AgentBoardProjection } from "../shared/provider-projections.js";
-import { normalizeSignalsPresentation } from "./signals-presentation.js";
+import {
+  selectSignalsQuestion,
+  selectSignalsUpdate,
+} from "./signals-presentation.js";
 
 export interface ProductActionRequest {
   action: string;
@@ -77,9 +79,10 @@ export function actionTargetForBoardItem(
         questionId: item.source.id,
       };
     case "signal-question": {
-      const boardQuestion =
-        item.pendingQuestion ??
-        signalsQuestionForBoardItem(item, context.agentBoard);
+      const boardQuestion = signalsQuestionForBoardItem(
+        item,
+        context.agentBoard,
+      );
       return {
         ...base,
         ...(boardQuestion
@@ -125,92 +128,17 @@ export function signalsQuestionForBoardItem(
   agentBoard: AgentBoardProjection | undefined,
 ): AgentBoardPendingQuestion | undefined {
   if (item.kind !== "signal-question") return undefined;
-  if (item.pendingQuestion) return item.pendingQuestion;
-  const presentation = selectBoardPresentation(
-    agentBoard,
-    "inbox",
-    item.entityId,
-  );
-  const detail = boardRecord(presentation.detail);
-  const projection = boardRecord(detail.projection);
-  const detailItem = boardRecord(
-    projection.item ?? detail.item ?? detail.question ?? detail,
-  );
-  const response = boardRecord(
-    detailItem.response ?? projection.response ?? detail.response,
-  );
-  const questionId = stringValue(
-    detailItem.id ?? detailItem.questionId ?? item.entityId,
-  );
-  const question = stringValue(
-    detailItem.question ??
-      detailItem.prompt ??
-      detailItem.title ??
-      detail.question ??
-      "",
-  );
-  const revision = numberValue(
-    detailItem.revision ??
-      projection.revision ??
-      detail.revision ??
-      item.revision ??
-      0,
-  );
-  const kind = response.kind;
-  if (
-    !questionId ||
-    !question ||
-    !Number.isSafeInteger(revision) ||
-    ![
-      "single",
-      "multiple",
-      "text",
-      "single_or_text",
-      "multiple_or_text",
-    ].includes(String(kind))
-  )
-    return undefined;
-  const options = Array.isArray(response.options)
-    ? response.options.flatMap((value) => {
-        const option = boardRecord(value);
-        const id = stringValue(option.id);
-        const label = stringValue(option.label);
-        return id && label
-          ? [
-              {
-                id,
-                label,
-                ...(stringValue(option.description)
-                  ? { description: stringValue(option.description) }
-                  : {}),
-              },
-            ]
-          : [];
-      })
-    : [];
-  const recommendedOptionIds =
-    detailItem.recommendedOptionIds ??
-    projection.recommendedOptionIds ??
-    detail.recommendedOptionIds;
-  const recommendedText = stringValue(
-    detailItem.recommendedText ??
-      projection.recommendedText ??
-      detail.recommendedText,
-  );
+  const question = selectSignalsQuestion(agentBoard, item.entityId);
+  if (!question) return undefined;
   return {
-    questionId,
-    revision,
-    question,
-    response: {
-      kind: kind as AgentBoardPendingQuestion["response"]["kind"],
-      options,
-    },
-    recommendedOptionIds: Array.isArray(recommendedOptionIds)
-      ? recommendedOptionIds.filter(
-          (value): value is string => typeof value === "string",
-        )
-      : [],
-    ...(recommendedText ? { recommendedText } : {}),
+    questionId: question.entityId,
+    revision: question.revision,
+    question: question.prompt,
+    response: { kind: question.responseKind, options: [...question.options] },
+    recommendedOptionIds: [...question.recommendedOptionIds],
+    ...(question.recommendedText
+      ? { recommendedText: question.recommendedText }
+      : {}),
   };
 }
 
@@ -219,18 +147,8 @@ export function normalizedSignalsQuestionForBoardItem(
   agentBoard: AgentBoardProjection | undefined,
 ): NormalizedQuestion | undefined {
   if (item.kind !== "signal-question") return undefined;
-  const presentation = selectBoardPresentation(
-    agentBoard,
-    "inbox",
-    item.entityId,
-  );
-  const normalized = normalizeSignalsPresentation({
-    projection: agentBoard,
-    tab: "inbox",
-    row: item.source,
-    detail: boardRecord(presentation.detail),
-  });
-  if (!normalized || normalized.entityType !== "question") {
+  const normalized = selectSignalsQuestion(agentBoard, item.entityId);
+  if (!normalized) {
     const fallback = signalsQuestionForBoardItem(item, agentBoard);
     return fallback
       ? normalizeSignalsQuestion(fallback, item.source)
@@ -263,36 +181,15 @@ export function signalsActionRequest(
   agentBoard: AgentBoardProjection | undefined,
 ): ProductActionRequest | undefined {
   if (!item.kind.startsWith("signal-")) return undefined;
-  const presentation = selectBoardPresentation(
-    agentBoard,
-    item.kind === "signal-question" ? "inbox" : "updates",
-    item.entityId,
-  );
-  const detail = boardRecord(presentation.detail);
-  const projection = boardRecord(detail.projection);
-  const detailItem = boardRecord(
-    projection.item ??
-      detail.item ??
-      detail.decision ??
-      detail.question ??
-      detail,
-  );
-  const answer = boardRecord(
-    projection.answer ?? detail.answer ?? detail.response ?? detailItem.answer,
-  );
-  const revision = numberValue(
-    item.revision ??
-      detailItem.revision ??
-      projection.revision ??
-      detail.revision ??
-      0,
-  );
-  const questionId = stringValue(
-    detailItem.questionId ?? detailItem.id ?? item.entityId,
-  );
-  const answerId = stringValue(
-    answer.id ?? answer.answerId ?? detail.answerId ?? "",
-  );
+  const normalized =
+    item.kind === "signal-question"
+      ? selectSignalsQuestion(agentBoard, item.entityId)
+      : selectSignalsUpdate(agentBoard, item.entityId);
+  if (!normalized) return undefined;
+  const revision = normalized.revision;
+  const questionId = normalized.entityId;
+  const answerId =
+    normalized.entityType === "question" ? (normalized.answerId ?? "") : "";
   switch (action) {
     case "archive-update":
       return {

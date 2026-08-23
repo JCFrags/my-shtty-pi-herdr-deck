@@ -78,34 +78,77 @@ function projection(): ProviderProjection {
               rows: [
                 {
                   id: "U-1",
+                  entityId: "U-1",
                   title: "Progress",
-                  state: "active",
-                  archivable: true,
-                  retryableDelivery: true,
-                  answerId: "A-1",
+                  statusLabel: "Working",
+                  kind: "working",
+                  recentTerminal: false,
+                  revision: 1,
                   changedAt: "2026-08-23T02:00:00Z",
                 },
               ],
+              detailsById: {
+                "U-1": {
+                  entityType: "update",
+                  item: {
+                    id: "U-1",
+                    kind: "working",
+                    revision: 1,
+                    archived: false,
+                    detail: "Progress",
+                  },
+                },
+              },
             },
             decisions: {
               rows: [
                 {
                   id: "D-1",
+                  entityId: "D-1",
                   title: "Applied decision",
-                  state: "applied",
+                  statusLabel: "Applied",
+                  revision: 2,
                   changedAt: "2026-08-23T03:00:00Z",
                 },
               ],
+              detailsById: {
+                "D-1": {
+                  entityType: "decision",
+                  decision: {
+                    id: "D-1",
+                    outcome: "applied",
+                    revision: 2,
+                    questionId: "SQ-1",
+                    answerId: "A-1",
+                  },
+                },
+              },
             },
             history: {
               rows: [
                 {
-                  id: "U-1",
+                  id: "update:U-1",
+                  entityId: "U-1",
                   title: "Progress complete",
-                  state: "completed",
-                  terminalAt: "2026-08-23T04:00:00Z",
+                  statusLabel: "Completed",
+                  revision: 3,
+                  changedAt: "2026-08-23T04:00:00Z",
                 },
               ],
+              detailsById: {
+                "update:U-1": {
+                  entityType: "update",
+                  terminalAt: "2026-08-23T04:00:00Z",
+                  terminalKind: "completed",
+                  item: {
+                    id: "U-1",
+                    kind: "completed",
+                    revision: 3,
+                    archived: false,
+                    detail: "Complete",
+                  },
+                },
+              },
             },
           },
         },
@@ -242,10 +285,7 @@ test("Board partitions canonical current work, attention, and recent Signals", (
   const update = board.recentSignals.find(
     (item) => item.uiId === "signals:update:U-1",
   );
-  assert.deepEqual(update?.actions.actions, [
-    "archive-update",
-    "retry-delivery",
-  ]);
+  assert.deepEqual(update?.actions.actions, []);
   assert.equal(
     ids.some((id) => id.includes("D-1")),
     false,

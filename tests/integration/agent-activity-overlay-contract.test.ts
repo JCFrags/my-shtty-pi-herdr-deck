@@ -141,11 +141,36 @@ test("BrokerDeckApp Activity excludes active Signals updates and renders typed t
           tabs: {
             updates: {
               rows: [
-                { id: "active", title: "Live", state: "active" },
-                { id: "done", title: "Done", state: "completed" },
+                {
+                  id: "active",
+                  entityId: "active",
+                  title: "Live",
+                  statusLabel: "Working",
+                  kind: "working",
+                  recentTerminal: false,
+                  revision: 1,
+                },
+                {
+                  id: "done",
+                  entityId: "done",
+                  title: "Done",
+                  statusLabel: "Completed",
+                  kind: "completed",
+                  recentTerminal: true,
+                  revision: 4,
+                },
               ],
               detailsById: {
-                done: { detail: "typed terminal detail", revision: 4 },
+                done: {
+                  entityType: "update",
+                  item: {
+                    id: "done",
+                    kind: "completed",
+                    revision: 4,
+                    archived: false,
+                    detail: "typed terminal detail",
+                  },
+                },
               },
             },
             decisions: { rows: [] },

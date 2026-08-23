@@ -131,59 +131,43 @@ export function activityDetail(item: ActivityItem): ActivityDetail {
     }
     default: {
       const source = item.source as BoardRecord;
-      const projection = activityRecord(source.projection);
-      const nested = activityRecord(
-        source.item ?? source.decision ?? projection.item ?? source,
-      );
-      const answer = activityRecord(projection.answer ?? source.answer);
-      const acknowledgement = activityRecord(
-        projection.acknowledgement ?? source.acknowledgement,
-      );
       return {
         kind: item.kind,
         ...base,
-        ...(typeof (nested.changedAt ?? source.changedAt) === "string"
-          ? { changedAt: String(nested.changedAt ?? source.changedAt) }
+        ...(typeof source.changedAt === "string"
+          ? { changedAt: source.changedAt }
           : {}),
-        ...(typeof (nested.createdAt ?? source.createdAt) === "string"
-          ? { createdAt: String(nested.createdAt ?? source.createdAt) }
+        ...(typeof source.createdAt === "string"
+          ? { createdAt: source.createdAt }
           : {}),
-        ...(typeof (nested.updatedAt ?? source.updatedAt) === "string"
-          ? { updatedAt: String(nested.updatedAt ?? source.updatedAt) }
+        ...(typeof source.updatedAt === "string"
+          ? { updatedAt: source.updatedAt }
           : {}),
-        ...(typeof (source.terminalAt ?? projection.terminalAt) === "string"
-          ? { terminalAt: String(source.terminalAt ?? projection.terminalAt) }
+        ...(typeof source.terminalAt === "string"
+          ? { terminalAt: source.terminalAt }
           : {}),
-        ...(activityText(nested.detail ?? projection.detail)
-          ? { detail: activityText(nested.detail ?? projection.detail) }
+        ...(activityText(source.detail)
+          ? { detail: activityText(source.detail) }
           : {}),
-        ...(typeof nested.stage === "string" ? { stage: nested.stage } : {}),
-        ...(typeof (nested.outcome ?? source.outcome) === "string"
-          ? { outcome: String(nested.outcome ?? source.outcome) }
+        ...(typeof source.stage === "string" ? { stage: source.stage } : {}),
+        ...(typeof source.outcome === "string"
+          ? { outcome: source.outcome }
           : {}),
-        ...(activityText(answer.value ?? answer.text ?? acknowledgement.outcome)
+        ...(activityText(source.answerSummary ?? source.acknowledgementOutcome)
           ? {
               answer: activityText(
-                answer.value ?? answer.text ?? acknowledgement.outcome,
+                source.answerSummary ?? source.acknowledgementOutcome,
               ),
             }
           : {}),
-        ...(typeof (nested.revision ?? source.revision) === "number"
-          ? { revision: Number(nested.revision ?? source.revision) }
+        ...(typeof source.revision === "number"
+          ? { revision: source.revision }
           : {}),
-        ...(typeof (projection.deliveryState ?? source.deliveryState) ===
-        "string"
-          ? {
-              deliveryState: String(
-                projection.deliveryState ?? source.deliveryState,
-              ),
-            }
+        ...(typeof source.deliveryState === "string"
+          ? { deliveryState: source.deliveryState }
           : {}),
-        retryableDelivery:
-          (projection.retryableDelivery ?? source.retryableDelivery) === true,
-        archivable:
-          (nested.archivable ?? source.archivable) === true ||
-          nested.archived === false,
+        retryableDelivery: source.retryableDelivery === true,
+        archivable: source.terminal === true && source.archived !== true,
       } as ActivityDetail;
     }
   }

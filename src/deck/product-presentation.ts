@@ -12,12 +12,12 @@ import type {
   DeckResult,
   DeckState,
 } from "./types.js";
-import {
-  boardRecord,
-  selectBoardPresentation,
-  type BoardRecord,
-} from "./board-presentation.js";
+import { boardRecord, type BoardRecord } from "./board-presentation.js";
 import { selectAdoptedScope, currentProviderProjection } from "./scope.js";
+import {
+  selectSignalsActivityItems,
+  selectSignalsTabPresentation,
+} from "./signals-presentation.js";
 
 export type AgentBoardTab = "board" | "files" | "agents" | "activity";
 export type BoardSection = "attention" | "work" | "recent-signals";
@@ -190,44 +190,6 @@ function text(value: unknown, fallback: string): string {
     .slice(0, 4_000);
   return sanitized.length > 0 ? sanitized : fallback;
 }
-function rowId(row: BoardRecord, index: number): string {
-  return text(row.id ?? row.entityId, `row-${index + 1}`);
-}
-function rowTitle(row: BoardRecord, id: string): string {
-  return text(row.title ?? row.question ?? row.detail, id);
-}
-function rowTimestamp(row: BoardRecord): string {
-  return text(
-    row.changedAt ?? row.terminalAt ?? row.updatedAt ?? row.createdAt,
-    "",
-  );
-}
-function hasAnswerId(row: BoardRecord): boolean {
-  const answer =
-    row.answer && typeof row.answer === "object" && !Array.isArray(row.answer)
-      ? (row.answer as BoardRecord)
-      : {};
-  return (
-    typeof (row.answerId ?? answer.id ?? answer.answerId) === "string" &&
-    String(row.answerId ?? answer.id ?? answer.answerId).length > 0
-  );
-}
-function isTerminalSignalRow(row: BoardRecord): boolean {
-  return new Set([
-    "completed",
-    "failed",
-    "cancelled",
-    "canceled",
-    "archived",
-    "dismissed",
-    "applied",
-    "rejected",
-  ]).has(
-    text(row.state ?? row.status ?? row.statusLabel, "")
-      .trim()
-      .toLowerCase(),
-  );
-}
 function normalizedStatus(value: string | undefined): string {
   return (value ?? "open")
     .trim()
@@ -290,13 +252,6 @@ function activityItem<K extends ActivityItem["kind"], S>(
 ): ActivityItemBase<K, S> {
   return { ...input, id: input.uiId, status: input.state };
 }
-function signals(
-  projection: AgentBoardProjection | undefined,
-  tab: "inbox" | "updates" | "decisions" | "history",
-): BoardRecord[] {
-  return selectBoardPresentation(projection, tab).rows;
-}
-
 export function normalizeBrokerQuestion(
   question: DeckQuestion,
 ): NormalizedQuestion {
@@ -511,38 +466,41 @@ export function selectUnifiedBoardPresentation(
       }),
     );
   }
-  const signalInbox = selectBoardPresentation(provider?.agentBoard, "inbox");
-  for (const [index, row] of signalInbox.rows.entries()) {
-    const id = rowId(row, index);
+  const signalInbox = selectSignalsTabPresentation(
+    provider?.agentBoard,
+    "inbox",
+  );
+  for (const question of signalInbox) {
+    if (question.entityType !== "question") continue;
+    const id = question.entityId;
     const pending = provider?.agentBoard.pendingQuestions?.find(
-      (q) => q.questionId === id,
+      (candidate) => candidate.questionId === id,
     );
-    if (row.userAnswerable === false && row.retryableDelivery !== true)
-      continue;
+    if (!question.userAnswerable && !question.retryableDelivery) continue;
     items.push(
       boardItem({
         uiId: `signals:question:${id}`,
         entityId: id,
         kind: "signal-question",
-        source: row,
+        source: question as unknown as BoardRecord,
         sourceLabel: "SIGNALS",
-        title: rowTitle(row, id),
-        summary: text(row.detail ?? row.statusLabel, "Answer required"),
-        state: text(row.state ?? row.deliveryState, "pending"),
+        title: question.title,
+        summary: question.prompt,
+        state: question.statusLabel,
         section: "attention",
-        priority: row.retryableDelivery === true ? 5 : 1,
-        sortTimestamp: rowTimestamp(row),
-        revision: Number(row.revision ?? pending?.revision ?? 0),
+        priority: question.retryableDelivery ? 5 : 1,
+        sortTimestamp: question.changedAt,
+        revision: question.revision,
         ...(pending ? { pendingQuestion: pending } : {}),
         actions: {
           primary: "answer",
           actions: [
             "answer",
-            ...(pending?.recommendedOptionIds.length || pending?.recommendedText
+            ...(question.recommendedOptionIds.length || question.recommendedText
               ? ["use-recommendation"]
               : []),
-            ...(row.dismissible === true ? ["dismiss-question"] : []),
-            ...(row.retryableDelivery === true && hasAnswerId(row)
+            ...(question.dismissible ? ["dismiss-question"] : []),
+            ...(question.retryableDelivery && question.answerId
               ? ["retry-delivery"]
               : []),
           ] as BoardAction[],
@@ -553,35 +511,28 @@ export function selectUnifiedBoardPresentation(
   const signalIds = new Set(
     items.filter((i) => i.kind === "signal-question").map((i) => i.entityId),
   );
-  for (const [index, row] of signals(
+  for (const update of selectSignalsTabPresentation(
     provider?.agentBoard,
     "updates",
-  ).entries()) {
-    const id = rowId(row, index);
-    if (signalIds.has(id)) continue;
-    if (isTerminalSignalRow(row) && row.retryableDelivery !== true) continue;
+  )) {
+    if (update.entityType !== "update") continue;
+    const id = update.entityId;
+    if (signalIds.has(id) || update.terminal) continue;
     items.push(
       boardItem({
         uiId: `signals:update:${id}`,
         entityId: id,
         kind: "signal-update",
-        source: row,
+        source: update as unknown as BoardRecord,
         sourceLabel: "SIGNALS",
-        title: rowTitle(row, id),
-        summary: text(row.detail ?? row.stage, "Recent update"),
-        state: text(row.state ?? row.kind, "active"),
+        title: update.title,
+        summary: update.detail ?? update.stage ?? "Recent update",
+        state: update.kind || update.statusLabel,
         section: "recent-signals",
         priority: 70,
-        sortTimestamp: rowTimestamp(row),
-        revision: Number(row.revision ?? 0),
-        actions: {
-          actions: [
-            ...(row.archivable === true ? ["archive-update"] : []),
-            ...(row.retryableDelivery === true && hasAnswerId(row)
-              ? ["retry-delivery"]
-              : []),
-          ] as BoardAction[],
-        },
+        sortTimestamp: update.changedAt,
+        revision: update.revision,
+        actions: { actions: [] },
       }),
     );
   }
@@ -678,86 +629,47 @@ export function selectUnifiedBoardPresentation(
   };
 }
 
-const TERMINAL_SIGNAL_STATES = new Set([
-  "applied",
-  "answered",
-  "cancelled",
-  "closed",
-  "complete",
-  "completed",
-  "done",
-  "failed",
-  "rejected",
-  "resolved",
-  "succeeded",
-  "timed_out",
-  "timed out",
-]);
-
-function isTerminalSignalRecord(row: BoardRecord): boolean {
-  if (typeof row.terminalAt === "string" && row.terminalAt.length > 0)
-    return true;
-  const state = String(row.status ?? row.statusLabel ?? row.state ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/[ _-]+/g, " ");
-  return TERMINAL_SIGNAL_STATES.has(state);
-}
-
-function signalDetailsById(
-  projection: AgentBoardProjection | undefined,
-  tab: "updates" | "decisions" | "history",
-): Record<string, BoardRecord> {
-  const outer = boardRecord(projection?.view);
-  const model = boardRecord(outer.view ?? outer);
-  const currentTab = boardRecord(boardRecord(model.tabs)[tab]);
-  const details = boardRecord(currentTab.detailsById);
-  return Object.fromEntries(
-    Object.entries(details).map(([id, value]) => [id, boardRecord(value)]),
-  );
-}
-
 function signalActivity(
   projection: AgentBoardProjection | undefined,
-  tab: "updates" | "decisions" | "history",
 ): ActivityItem[] {
-  const kind =
-    tab === "updates"
-      ? "signal-update"
-      : tab === "decisions"
-        ? "signal-decision"
-        : "signal-history";
-  const detailsById = signalDetailsById(projection, tab);
-  return signals(projection, tab).flatMap((row, index) => {
-    const id = rowId(row, index);
-    // Updates are live provider state, not history. Decisions and history are
-    // also admitted only when their provider record is terminal.
-    const detail = detailsById[id] ?? {};
-    const source = { ...row, ...detail };
-    if (!isTerminalSignalRecord(source)) return [];
-    return [
-      activityItem({
-        uiId: `signals:${tab}:${id}`,
-        entityId: id,
-        kind,
-        title: rowTitle(source, id),
-        summary: text(source.detail ?? source.outcome ?? source.answer, id),
-        state: text(source.statusLabel ?? source.state ?? source.kind, tab),
-        sortTimestamp: rowTimestamp(source),
-        source,
-        ...(Number.isSafeInteger(source.revision)
-          ? { revision: Number(source.revision) }
-          : {}),
-        actions: {
-          actions: [
-            ...(source.archivable === true ? ["archive-update"] : []),
-            ...(source.retryableDelivery === true && hasAnswerId(source)
-              ? ["retry-delivery"]
-              : []),
-          ] as BoardAction[],
-        },
-      }),
-    ];
+  return selectSignalsActivityItems(projection).map((source) => {
+    const kind =
+      source.entityType === "update"
+        ? "signal-update"
+        : source.entityType === "decision"
+          ? "signal-decision"
+          : "signal-history";
+    const summary =
+      source.entityType === "update"
+        ? (source.detail ?? source.stage ?? source.statusLabel)
+        : source.entityType === "decision"
+          ? source.outcome
+          : source.statusLabel;
+    return activityItem({
+      uiId: `signals:${source.entityType}:${source.rowId}`,
+      entityId: source.entityId,
+      kind,
+      title: source.title,
+      summary,
+      state: source.statusLabel,
+      sortTimestamp: source.changedAt,
+      source: source as unknown as BoardRecord,
+      revision: source.revision,
+      actions: {
+        actions: [
+          ...(source.entityType === "update" &&
+          source.terminal &&
+          !source.archived
+            ? ["archive-update" as const]
+            : []),
+          ...(source.entityType === "question" &&
+          source.retryableDelivery &&
+          source.answerId
+            ? ["retry-delivery" as const]
+            : []),
+        ],
+      },
+    });
   });
 }
 
@@ -848,23 +760,7 @@ export function selectActivityPresentation(
           },
         }),
       );
-  const signalByEntity = new Map<string, ActivityItem>();
-  for (const item of [
-    ...signalActivity(provider?.agentBoard, "updates"),
-    ...signalActivity(provider?.agentBoard, "decisions"),
-    ...signalActivity(provider?.agentBoard, "history"),
-  ]) {
-    const existing = signalByEntity.get(item.entityId);
-    const rank = (value: ActivityItem) =>
-      value.kind === "signal-history"
-        ? 3
-        : value.kind === "signal-decision"
-          ? 2
-          : 1;
-    if (!existing || rank(item) > rank(existing))
-      signalByEntity.set(item.entityId, item);
-  }
-  items.push(...signalByEntity.values());
+  items.push(...signalActivity(provider?.agentBoard));
   for (const notification of notifications.slice(-100)) {
     if (
       !["failure", "timeout", "budget", "recovery"].includes(notification.kind)

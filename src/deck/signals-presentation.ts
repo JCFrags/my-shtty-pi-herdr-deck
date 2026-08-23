@@ -1,5 +1,8 @@
 import type { AgentBoardProjection } from "../shared/provider-projections.js";
-import type { BoardRecord } from "./board-presentation.js";
+import {
+  selectBoardPresentation,
+  type BoardRecord,
+} from "./board-presentation.js";
 
 export type SignalsEntityType = "question" | "update" | "decision";
 export type SignalsResponseKind =
@@ -38,6 +41,9 @@ export interface SignalsQuestionPresentation {
   terminal: boolean;
   terminalAt?: string;
   terminalKind?: string;
+  answerSummary?: string;
+  acknowledgementOutcome?: string;
+  deliveryState: string;
 }
 
 export interface SignalsUpdatePresentation {
@@ -59,6 +65,8 @@ export interface SignalsUpdatePresentation {
   detail?: string;
   progress?: BoardRecord;
   attachments: readonly BoardRecord[];
+  createdAt?: string;
+  updatedAt?: string;
   item: BoardRecord;
 }
 
@@ -72,6 +80,13 @@ export interface SignalsDecisionPresentation {
   changedAt: string;
   revision: number;
   outcome: "applied" | "superseded";
+  questionId?: string;
+  answerId?: string;
+  question?: string;
+  answerSummary?: string;
+  acknowledgementOutcome?: string;
+  decidedAt?: string;
+  resolvedAt?: string;
   decision: BoardRecord;
 }
 
@@ -129,9 +144,10 @@ export function normalizeSignalsPresentation(
 ): SignalsPresentation | undefined {
   const detail = record(source.detail);
   const projection = record(detail.projection);
-  const nested = record(
-    projection.item ?? detail.item ?? detail.decision ?? detail,
-  );
+  const nested = {
+    ...source.row,
+    ...record(projection.item ?? detail.item ?? detail.decision ?? detail),
+  };
   const entityType =
     raw(detail.entityType) ||
     (source.tab === "inbox"
@@ -214,6 +230,18 @@ export function normalizeSignalsPresentation(
         : {}),
       stale: projection.stale === true,
       terminal: !userAnswerable && !retryableDelivery,
+      ...(display(answer.value ?? answer.text)
+        ? { answerSummary: display(answer.value ?? answer.text) }
+        : {}),
+      ...(display(record(projection.acknowledgement).outcome)
+        ? {
+            acknowledgementOutcome: display(
+              record(projection.acknowledgement).outcome,
+            ),
+          }
+        : {}),
+      deliveryState:
+        projection.deliveryPending === true ? "pending" : "settled",
       ...(raw(detail.terminalAt) ? { terminalAt: raw(detail.terminalAt) } : {}),
       ...(raw(detail.terminalKind)
         ? { terminalKind: raw(detail.terminalKind) }
@@ -223,7 +251,31 @@ export function normalizeSignalsPresentation(
   if (entityType === "decision") {
     const outcome = raw(nested.outcome);
     if (outcome !== "applied" && outcome !== "superseded") return undefined;
-    return { entityType: "decision", ...common, outcome, decision: nested };
+    const decisionAnswer = record(nested.answer);
+    const decisionAcknowledgement = record(nested.acknowledgement);
+    return {
+      entityType: "decision",
+      ...common,
+      outcome,
+      ...(raw(nested.questionId) ? { questionId: raw(nested.questionId) } : {}),
+      ...(raw(nested.answerId) ? { answerId: raw(nested.answerId) } : {}),
+      ...(display(nested.question)
+        ? { question: display(nested.question) }
+        : {}),
+      ...(display(decisionAnswer.value ?? decisionAnswer.text)
+        ? {
+            answerSummary: display(decisionAnswer.value ?? decisionAnswer.text),
+          }
+        : {}),
+      ...(display(decisionAcknowledgement.outcome)
+        ? {
+            acknowledgementOutcome: display(decisionAcknowledgement.outcome),
+          }
+        : {}),
+      ...(raw(nested.decidedAt) ? { decidedAt: raw(nested.decidedAt) } : {}),
+      ...(raw(nested.resolvedAt) ? { resolvedAt: raw(nested.resolvedAt) } : {}),
+      decision: nested,
+    };
   }
   const kind = raw(source.row.kind ?? nested.kind);
   const terminalAt = raw(detail.terminalAt ?? nested.terminalAt);
@@ -250,6 +302,8 @@ export function normalizeSignalsPresentation(
     attachments: Array.isArray(nested.attachments)
       ? nested.attachments.map(record).slice(0, 64)
       : [],
+    ...(raw(nested.createdAt) ? { createdAt: raw(nested.createdAt) } : {}),
+    ...(raw(nested.updatedAt) ? { updatedAt: raw(nested.updatedAt) } : {}),
     item: nested,
   };
 }
@@ -257,3 +311,125 @@ export function normalizeSignalsPresentation(
 export const signalsPresentationNormalizer: SignalsPresentationNormalizer = {
   normalize: normalizeSignalsPresentation,
 };
+
+export type SignalsTab = "inbox" | "updates" | "decisions" | "history";
+
+/** Select and normalize one complete Signals tab. This is the only active row/detail parser. */
+export function selectSignalsTabPresentation(
+  projection: AgentBoardProjection | undefined,
+  tab: SignalsTab,
+): SignalsPresentation[] {
+  const tabPresentation = selectBoardPresentation(projection, tab);
+  return tabPresentation.rows.flatMap((row) => {
+    const rowId = raw(row.id) || raw(row.entityId);
+    if (!rowId) return [];
+    const detail = selectBoardPresentation(projection, tab, rowId).detail;
+    const normalized = normalizeSignalsPresentation({
+      projection,
+      tab,
+      row,
+      detail: record(detail),
+    });
+    if (normalized) return [normalized];
+    if (tab !== "inbox") return [];
+    const pending = projection?.pendingQuestions?.find(
+      (question) => question.questionId === raw(row.entityId ?? row.id),
+    );
+    if (!pending) return [];
+    const fallback = normalizeSignalsPresentation({
+      projection,
+      tab,
+      row,
+      detail: {
+        entityType: "question",
+        projection: {
+          item: {
+            id: pending.questionId,
+            question: pending.question,
+            revision: pending.revision,
+            response: pending.response,
+            recommendedOptionIds: pending.recommendedOptionIds,
+            recommendedText: pending.recommendedText,
+          },
+          userAnswerable: row.userAnswerable !== false,
+          dismissible: row.dismissible === true,
+          retryableDelivery: row.retryableDelivery === true,
+          deliveryPending: row.deliveryPending === true,
+          awaitingAcknowledgement: row.awaitingAcknowledgement === true,
+        },
+      },
+    });
+    return fallback ? [fallback] : [];
+  });
+}
+
+export function selectSignalsQuestion(
+  projection: AgentBoardProjection | undefined,
+  questionId: string,
+): SignalsQuestionPresentation | undefined {
+  return selectSignalsTabPresentation(projection, "inbox").find(
+    (item): item is SignalsQuestionPresentation =>
+      item.entityType === "question" &&
+      (item.entityId === questionId || item.rowId === questionId),
+  );
+}
+
+export function selectSignalsUpdate(
+  projection: AgentBoardProjection | undefined,
+  entityId: string,
+): SignalsUpdatePresentation | undefined {
+  const candidates = [
+    ...selectSignalsTabPresentation(projection, "updates"),
+    ...selectSignalsTabPresentation(projection, "history"),
+  ];
+  return candidates.find(
+    (item): item is SignalsUpdatePresentation =>
+      item.entityType === "update" &&
+      (item.entityId === entityId || item.rowId === entityId),
+  );
+}
+
+export function selectSignalsDecision(
+  projection: AgentBoardProjection | undefined,
+  entityId: string,
+): SignalsDecisionPresentation | undefined {
+  return selectSignalsTabPresentation(projection, "decisions").find(
+    (item): item is SignalsDecisionPresentation =>
+      item.entityType === "decision" &&
+      (item.entityId === entityId || item.rowId === entityId),
+  );
+}
+
+export function selectSignalsHistoryItem(
+  projection: AgentBoardProjection | undefined,
+  rowIdOrEntityId: string,
+): SignalsPresentation | undefined {
+  return selectSignalsTabPresentation(projection, "history").find(
+    (item) =>
+      item.rowId === rowIdOrEntityId || item.entityId === rowIdOrEntityId,
+  );
+}
+
+/** Select Activity records with History taking precedence for terminal entities. */
+export function selectSignalsActivityItems(
+  projection: AgentBoardProjection | undefined,
+): SignalsPresentation[] {
+  const history = selectSignalsTabPresentation(projection, "history");
+  const historyKeys = new Set(
+    history.map((item) => `${item.entityType}:${item.entityId}`),
+  );
+  const terminalUpdates = selectSignalsTabPresentation(
+    projection,
+    "updates",
+  ).filter(
+    (item): item is SignalsUpdatePresentation =>
+      item.entityType === "update" &&
+      item.terminal &&
+      !historyKeys.has(`update:${item.entityId}`),
+  );
+  return [
+    ...history,
+    ...terminalUpdates,
+    ...selectSignalsTabPresentation(projection, "decisions"),
+  ];
+}

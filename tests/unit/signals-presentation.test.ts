@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { normalizeSignalsPresentation } from "../../src/deck/signals-presentation.js";
 
@@ -94,4 +95,29 @@ test("shared Signals normalizer handles terminal update and superseded decision"
   if (!decision || decision.entityType !== "decision")
     throw new Error("decision");
   assert.equal(decision.outcome, "superseded");
+});
+
+test("active deck consumers do not parse nested Signals payloads outside the shared boundary", () => {
+  const files = [
+    "src/deck/product-presentation.ts",
+    "src/deck/product-actions.ts",
+    "src/deck/activity.ts",
+    "src/deck/render-dependencies.ts",
+    "src/deck/broker-app.ts",
+  ];
+  const forbidden = [
+    /detailsById/u,
+    /detail\.projection/u,
+    /detail\.item/u,
+    /detail\.decision/u,
+    /detail\.answer/u,
+    /source\.projection/u,
+    /source\.item/u,
+    /source\.decision/u,
+  ];
+  for (const file of files) {
+    const source = readFileSync(file, "utf8");
+    for (const pattern of forbidden)
+      assert.doesNotMatch(source, pattern, `${file} bypasses the normalizer`);
+  }
 });

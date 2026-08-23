@@ -50,6 +50,44 @@ function projection(
   };
 }
 
+function questionBoard(questionId: string) {
+  return {
+    available: true,
+    openCount: 1,
+    items: [],
+    pendingQuestions: [
+      {
+        questionId,
+        revision: 1,
+        question: "Question",
+        response: {
+          kind: "single" as const,
+          options: [{ id: "yes", label: "Yes" }],
+        },
+        recommendedOptionIds: [],
+      },
+    ],
+    view: {
+      view: {
+        tabs: {
+          inbox: {
+            rows: [
+              {
+                id: questionId,
+                entityId: questionId,
+                title: "Question",
+                statusLabel: "Open",
+                revision: 1,
+                userAnswerable: true,
+              },
+            ],
+          },
+        },
+      },
+    },
+  };
+}
+
 function state(provider = projection()): DeckState {
   return {
     seq: 1,
@@ -149,11 +187,7 @@ test("Files ignores heartbeat, same-owner state, provider peers, and broker chur
         completed: 0,
         items: [{ id: "todo-2", text: "Other" }],
       },
-      agentBoard: {
-        available: true,
-        openCount: 1,
-        items: [{ id: "q", title: "Question" }],
-      },
+      agentBoard: questionBoard("q"),
     }),
   );
   assert.notEqual(
@@ -502,11 +536,7 @@ test("BrokerDeckApp tracks fallback Files standalone availability only", () => {
           completed: 0,
           items: [{ id: "todo-2", text: "Other" }],
         },
-        agentBoard: {
-          available: true,
-          openCount: 1,
-          items: [{ id: "question", title: "Question" }],
-        },
+        agentBoard: questionBoard("question"),
       }),
     ],
   });
@@ -746,11 +776,7 @@ test("BrokerDeckApp render counter gates Files changes and tab switching", () =>
           completed: 0,
           items: [{ id: "todo-2", text: "Other" }],
         },
-        agentBoard: {
-          available: true,
-          openCount: 1,
-          items: [{ id: "q", title: "Q" }],
-        },
+        agentBoard: questionBoard("q"),
       }),
     ),
   );
@@ -765,11 +791,7 @@ test("BrokerDeckApp render counter gates Files changes and tab switching", () =>
           completed: 0,
           items: [{ id: "todo-2", text: "Other" }],
         },
-        agentBoard: {
-          available: true,
-          openCount: 1,
-          items: [{ id: "q", title: "Q changed" }],
-        },
+        agentBoard: questionBoard("q"),
       }),
     ),
   );
@@ -784,11 +806,7 @@ test("BrokerDeckApp render counter gates Files changes and tab switching", () =>
           items: [{ id: "todo-2", text: "Other" }],
         },
         files: { available: true, view: { rows: ["changed.txt"] } },
-        agentBoard: {
-          available: true,
-          openCount: 1,
-          items: [{ id: "q", title: "Q changed" }],
-        },
+        agentBoard: questionBoard("q"),
       }),
     ),
   );
