@@ -53,7 +53,14 @@ test("Files normalization exposes additive state and sanitizes terminal and bidi
         },
       ],
       preview: {
-        metadata: { encoding: "utf-8" },
+        metadata: {
+          relativePath: "src/main.ts",
+          encoding: "utf-8",
+          bytes: 40,
+          absolutePath: "/private/repository/src/main.ts",
+          mtimeMs: 123,
+          arbitrary: "hidden",
+        },
         lines: ["safe\u001b[2Jline"],
       },
     },
@@ -62,6 +69,11 @@ test("Files normalization exposes additive state and sanitizes terminal and bidi
   assert.equal(model.selectedApproximateTokens, 10);
   assert.equal(model.filter, "main");
   assert.equal(model.preview?.path, "src/main.ts");
+  assert.deepEqual(model.preview?.metadata, {
+    path: "src/main.ts",
+    encoding: "utf-8",
+    size: 40,
+  });
   assert.doesNotMatch(
     model.cwd + model.rows[0]?.name + model.preview?.lines[0],
     /\u001b|\u202e/u,
@@ -178,9 +190,12 @@ test("Files keyboard skips inert rows and supports tree, preview, and action foc
   handleFilesKey(options, "Tab");
   assert.equal(options.state.focusTarget, "preview");
   handleFilesKey(options, "PageDown");
-  assert.equal(options.state.previewScroll, 10);
+  assert.equal(options.state.previewScroll, 0);
   handleFilesKey(options, "Shift+Tab");
   assert.equal(options.state.focusTarget, "tree");
+  const focusedBeforePage = options.state.focusedPath;
+  handleFilesKey(options, "PageDown");
+  assert.equal(options.state.focusedPath, focusedBeforePage);
   handleFilesKey(options, "ArrowUp");
   assert.equal(options.state.focusedPath, "src");
   handleFilesKey(options, "ArrowRight");
@@ -272,6 +287,7 @@ test("Files renders translated pane hitboxes, narrow tabs, and one action bar", 
     presentation,
     state,
     onAction: (action: unknown) => actions.push(action),
+    onStateChange: (next: FilesScreenState) => Object.assign(state, next),
   };
   const wide = renderFilesScreen(options, 80, 20);
   assert.equal(wide.layout.narrow, false);
@@ -297,15 +313,19 @@ test("Files renders translated pane hitboxes, narrow tabs, and one action bar", 
   assert.deepEqual(actions[0], { action: "preview", actionPath: "a.txt" });
   const narrow = renderFilesScreen(options, 77, 20);
   assert.equal(narrow.layout.narrow, true);
-  assert.ok(narrow.hitBoxes.some((box) => box.id === "files:tab-preview"));
+  const previewTab = narrow.hitBoxes.find(
+    (box) => box.id === "files:tab-preview",
+  );
+  assert.ok(previewTab);
   const mouse = {
     button: "left" as const,
-    x: 10,
-    y: 2,
+    x: previewTab?.x ?? 0,
+    y: previewTab?.y ?? 0,
     shift: false,
     alt: false,
     ctrl: false,
   };
   assert.ok(handleFilesMouse(options, narrow, { ...mouse, type: "press" }));
   assert.ok(handleFilesMouse(options, narrow, { ...mouse, type: "release" }));
+  assert.equal(options.state.activePane, "preview");
 });

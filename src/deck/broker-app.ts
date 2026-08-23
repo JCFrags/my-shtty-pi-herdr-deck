@@ -291,6 +291,21 @@ export class BrokerDeckApp implements Component {
       this.#requestRender();
       return;
     }
+    if (
+      data === "\u001b" &&
+      this.#tab === "files" &&
+      this.#filesSurface?.layout.narrow &&
+      this.#filesScreen.activePane === "preview"
+    ) {
+      this.#filesScreen = {
+        ...this.#filesScreen,
+        activePane: "tree",
+        focusTarget: "tree",
+      };
+      this.syncVisibleSignature();
+      this.#requestRender();
+      return;
+    }
     if (data === "q" || data === "\u0003" || data === "\u001b") {
       this.#onClose();
       return;
@@ -313,17 +328,21 @@ export class BrokerDeckApp implements Component {
           ? "ArrowUp"
           : data === "\u001b[B"
             ? "ArrowDown"
-            : data === "\r" || data === "\n"
-              ? "Enter"
-              : data === "\t"
-                ? "Tab"
-                : data === "\u001b[Z"
-                  ? "Shift+Tab"
-                  : data === "\u001b[5~"
-                    ? "PageUp"
-                    : data === "\u001b[6~"
-                      ? "PageDown"
-                      : data;
+            : data === "\u001b[C"
+              ? "ArrowRight"
+              : data === "\u001b[D"
+                ? "ArrowLeft"
+                : data === "\r" || data === "\n"
+                  ? "Enter"
+                  : data === "\t"
+                    ? "Tab"
+                    : data === "\u001b[Z"
+                      ? "Shift+Tab"
+                      : data === "\u001b[5~"
+                        ? "PageUp"
+                        : data === "\u001b[6~"
+                          ? "PageDown"
+                          : data;
       if (!handleFilesKey(this.filesScreenOptions(), key) && data === "/")
         this.beginInput("files-filter");
     } else if (data === "f" && this.#tab === "agents") void this.run("focus");

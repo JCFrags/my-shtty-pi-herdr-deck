@@ -148,35 +148,33 @@ function integer(value: unknown): number | undefined {
 
 function boundedMetadata(value: unknown): Record<string, unknown> {
   const source = record(value);
-  const preferred = [
-    "relativePath",
-    "kind",
-    "bytes",
-    "size",
-    "lineCount",
-    "encoding",
-    "language",
-    "mimeType",
-    "truncated",
-    "approximateTokens",
+  const aliases: readonly [string, readonly string[]][] = [
+    ["path", ["path", "relativePath"]],
+    ["encoding", ["encoding"]],
+    ["size", ["size", "bytes"]],
+    ["bytes read", ["bytesRead"]],
+    ["displayed lines", ["displayedLines", "lineCount"]],
+    ["total lines", ["totalLines"]],
+    ["binary", ["binary"]],
+    ["binary kind", ["binaryKind"]],
+    ["invalid UTF-8", ["invalidUtf8"]],
+    ["truncated", ["truncated"]],
+    ["truncation reason", ["truncationReason"]],
+    ["changed", ["changed"]],
+    ["error", ["error"]],
   ];
-  const keys = [
-    ...preferred.filter((key) => key in source),
-    ...Object.keys(source)
-      .filter((key) => !preferred.includes(key))
-      .sort(),
-  ].slice(0, 32);
+  const keys = aliases.flatMap(([label, candidates]) => {
+    const sourceKey = candidates.find((candidate) => candidate in source);
+    return sourceKey ? [{ label, sourceKey }] : [];
+  });
   const entries: Array<[string, unknown]> = [];
-  for (const key of keys) {
-    const raw = source[key];
+  for (const { label, sourceKey } of keys) {
+    const raw = source[sourceKey];
     if (typeof raw === "string")
-      entries.push([key.slice(0, 80), safeFilesDisplay(raw, 240)]);
-    else if (typeof raw === "boolean") entries.push([key.slice(0, 80), raw]);
+      entries.push([label, safeFilesDisplay(raw, 240)]);
+    else if (typeof raw === "boolean") entries.push([label, raw]);
     else if (Number.isFinite(raw) && Number.isSafeInteger(raw))
-      entries.push([
-        key.slice(0, 80),
-        Math.max(0, Math.min(Number(raw), 1_000_000_000)),
-      ]);
+      entries.push([label, Math.max(0, Math.min(Number(raw), 1_000_000_000))]);
   }
   return Object.fromEntries(entries);
 }
@@ -298,9 +296,9 @@ export function normalizeFilesPresentation(
           ),
         }
       : {}),
-    cwd: safeFilesDisplay(text(summary.cwd ?? view.cwd, 4096)),
+    cwd: safeFilesDisplay(text(summary.cwd ?? view.cwd, 240)),
     currentPath: safeFilesDisplay(
-      text(view.currentPath ?? summary.currentPath, 4096),
+      text(view.currentPath ?? summary.currentPath, 240),
     ),
     // These are provider-owned values. Do not filter rows or toggle hidden locally.
     filter: safeFilesDisplay(text(view.filter, 256)),
@@ -383,7 +381,10 @@ export function renderFilesScreen(
       : `~tokens: ${presentation.selectedApproximateTokens}`,
   ].filter(Boolean);
   root.addLine(
-    `${presentation.cwd || "Provider working directory unavailable"}  ${presentation.selectedCount} selected${estimates.length ? `  ${estimates.join("  ")}` : ""}  filter: ${presentation.filter || "none"}  hidden: ${presentation.showHidden ? "on" : "off"}`,
+    `Root: ${presentation.cwd || "unavailable"}  Current: ${presentation.currentPath || "."}`,
+  );
+  root.addLine(
+    `${presentation.selectedCount} selected${estimates.length ? `  ${estimates.join("  ")}` : ""}  filter: ${presentation.filter || "none"}  hidden: ${presentation.showHidden ? "on" : "off"}`,
   );
   if (presentation.error) root.addLine(`! ${presentation.error}`);
   const contentY = root.lines.length;
@@ -721,8 +722,17 @@ export function handleFilesKey(
       );
   }
   if (options.state.focusTarget === "preview") {
+    const previewMaxScroll = Math.max(
+      0,
+      (options.presentation.preview?.lines.length ?? 0) - pageSize,
+    );
     if (key === "ArrowDown" || key === "j") {
-      withState(options, { previewScroll: options.state.previewScroll + 1 });
+      withState(options, {
+        previewScroll: Math.min(
+          previewMaxScroll,
+          options.state.previewScroll + 1,
+        ),
+      });
       return true;
     }
     if (key === "ArrowUp" || key === "k") {
@@ -733,7 +743,10 @@ export function handleFilesKey(
     }
     if (key === "PageDown") {
       withState(options, {
-        previewScroll: options.state.previewScroll + pageSize,
+        previewScroll: Math.min(
+          previewMaxScroll,
+          options.state.previewScroll + pageSize,
+        ),
       });
       return true;
     }
@@ -763,12 +776,21 @@ export function handleFilesKey(
   }
   if (key === "PageDown") {
     focus("tree");
-    move(pageSize);
+    withState(options, {
+      treeScroll: Math.min(
+        Math.max(0, rows.length - pageSize),
+        options.state.treeScroll + pageSize,
+      ),
+      wheelDetached: true,
+    });
     return true;
   }
   if (key === "PageUp") {
     focus("tree");
-    move(-pageSize);
+    withState(options, {
+      treeScroll: Math.max(0, options.state.treeScroll - pageSize),
+      wheelDetached: true,
+    });
     return true;
   }
   if ((key === "ArrowRight" || key === "l") && row?.actionPath) {
@@ -780,10 +802,12 @@ export function handleFilesKey(
       });
       return true;
     }
+    const childPrefix = `${row.actionPath}/`;
     const child = actionable.find(
       (entry) =>
         entry.index > (actionable[current]?.index ?? -1) &&
-        entry.row.depth > row.depth,
+        entry.row.depth === row.depth + 1 &&
+        entry.row.actionPath?.startsWith(childPrefix),
     )?.row;
     if (child?.actionPath) {
       withState(options, {
@@ -802,13 +826,11 @@ export function handleFilesKey(
       });
       return true;
     }
-    const parent = [...actionable]
-      .reverse()
-      .find(
-        (entry) =>
-          entry.index < (actionable[current]?.index ?? 0) &&
-          entry.row.depth < row.depth,
-      )?.row;
+    const separator = row.actionPath.lastIndexOf("/");
+    const parentPath = separator < 0 ? "" : row.actionPath.slice(0, separator);
+    const parent = actionable.find(
+      (entry) => entry.row.actionPath === parentPath,
+    )?.row;
     if (parent?.actionPath) {
       withState(options, {
         focusedPath: parent.actionPath,
