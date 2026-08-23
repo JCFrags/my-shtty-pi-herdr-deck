@@ -36,7 +36,9 @@ import {
   type VisibleDeckTab,
   type VisibleWorkView,
 } from "./render-dependencies.js";
-import { selectAdoptedScope } from "./scope.js";
+import { selectAdoptedRootAgent, selectAdoptedScope } from "./scope.js";
+import { effectiveSelection } from "./selections.js";
+import { selectBoardPresentation } from "./board-presentation.js";
 
 export interface BrokerDeckAppOptions {
   client: BrokerClient;
@@ -114,7 +116,6 @@ export class BrokerDeckApp implements Component {
   #filesPreviewPath: string | undefined;
   #boardTab: "inbox" | "updates" | "decisions" | "history" = "inbox";
   #boardSelection: string | undefined;
-  #boardRevision = 0;
   #renderSignature = "";
 
   constructor(options: BrokerDeckAppOptions) {
@@ -299,7 +300,7 @@ export class BrokerDeckApp implements Component {
             this.#selectedTask = id;
           },
         );
-        lines.push(...renderTaskDetail(task, state, safeWidth));
+        lines.push(...renderTaskDetail(task, scoped, safeWidth));
         this.addControlRow(
           lines,
           [
@@ -318,17 +319,18 @@ export class BrokerDeckApp implements Component {
           a.id.localeCompare(b.id),
         );
         lines.push("ORCHESTRATOR RESULTS · Broker-owned", "RESULTS");
-        for (const result of results) {
+        const result = this.selectedResult(scoped);
+        for (const item of results) {
           const y = lines.length;
           lines.push(
-            `${this.selectedResult()?.id === result.id ? ">" : " "} ${result.id} · ${result.status} · ${result.summary ?? "No summary"}`,
+            `${result?.id === item.id ? ">" : " "} ${item.id} · ${item.status} · ${item.summary ?? "No summary"}`,
           );
-          this.addHitBox(`result:${result.id}`, y, safeWidth, () => {
-            this.#selectedResult = result.id;
+          this.addHitBox(`result:${item.id}`, y, safeWidth, () => {
+            this.#selectedResult = item.id;
           });
         }
         if (results.length === 0) lines.push("No results are visible.");
-        lines.push("", ...renderResultDetail(this.selectedResult(), safeWidth));
+        lines.push("", ...renderResultDetail(result, safeWidth));
       } else if (this.#workView === "groups") {
         const scoped = this.scopedWorkState(state);
         const group = this.selectedGroup(scoped);
@@ -706,6 +708,7 @@ export class BrokerDeckApp implements Component {
   handleMouse(event: TuiMouseEvent): boolean {
     if (event.type === "wheel") {
       this.move(event.direction === "down" ? 1 : -1);
+      this.syncVisibleSignature();
       this.#requestRender();
       return true;
     }
@@ -837,11 +840,7 @@ export class BrokerDeckApp implements Component {
   }
 
   private adoptedRootAgent(): Agent | undefined {
-    const owner = currentProviderProjection(
-      this.#client.store.state,
-      this.#targetPaneId,
-    )?.ownerAgentId;
-    return owner ? this.#client.store.state.agents.get(owner) : undefined;
+    return selectAdoptedRootAgent(this.#client.store.state, this.#targetPaneId);
   }
 
   private providerRecord(value: unknown): Record<string, unknown> {
@@ -1046,10 +1045,12 @@ export class BrokerDeckApp implements Component {
       state,
       this.#targetPaneId,
     )?.agentBoard;
-    const board = this.providerRecord(boardProjection?.view);
-    const model = this.providerRecord(board.view ?? board);
-    const tabs = this.providerRecord(model.tabs);
-    const counts = this.providerRecord(model.tabCounts);
+    const presentation = selectBoardPresentation(
+      boardProjection,
+      this.#boardTab,
+      this.#boardSelection,
+    );
+    const counts = presentation.tabCounts;
     lines.push(
       "AGENT BOARD",
       boardProjection?.available
@@ -1065,20 +1066,14 @@ export class BrokerDeckApp implements Component {
           activate: () => {
             this.#boardTab = tabName;
             this.#boardSelection = undefined;
-            this.#boardRevision = 0;
           },
         }),
       ),
       width,
     );
 
-    const tab = this.providerRecord(tabs[this.#boardTab]);
-    const rows = this.boardRows(tab, boardProjection?.items ?? []);
-    if (!this.#boardSelection && rows.length > 0) {
-      this.#boardSelection = String(rows[0]?.id ?? rows[0]?.entityId ?? "");
-      this.#boardRevision = Number(rows[0]?.revision ?? 0);
-    }
-    const empty = this.providerRecord(tab.empty);
+    const rows = presentation.rows;
+    const empty = presentation.empty;
     if (rows.length === 0) {
       lines.push(
         boardProjection?.available
@@ -1089,24 +1084,18 @@ export class BrokerDeckApp implements Component {
     }
     for (const row of rows) {
       const id = String(row.id ?? row.entityId ?? "");
-      const selected = id === this.#boardSelection;
+      const selected = id === presentation.selectedId;
       const y = lines.length;
       lines.push(
         `${selected ? ">" : " "} [${String(row.statusLabel ?? row.state ?? "OPEN")}] ${String(row.displayId ?? id)}  ${String(row.title ?? row.question ?? "").slice(0, Math.max(20, width - 28))}`,
       );
       this.addHitBox(`board:row:${id}`, y, width, () => {
         this.#boardSelection = id;
-        this.#boardRevision = Number(row.revision ?? 0);
       });
     }
 
-    const selectedRow = rows.find(
-      (row) => String(row.id ?? row.entityId ?? "") === this.#boardSelection,
-    );
-    const details = this.providerRecord(tab.detailsById);
-    const detail = this.providerRecord(
-      details[this.#boardSelection ?? ""] ?? tab.detail,
-    );
+    const selectedRow = presentation.selectedRow;
+    const detail = presentation.detail;
     if (Object.keys(detail).length > 0)
       lines.push("", ...this.renderBoardDetail(detail, width));
 
@@ -1132,10 +1121,10 @@ export class BrokerDeckApp implements Component {
       }
     }
 
-    const userAnswerable = selectedRow?.userAnswerable === true;
-    const dismissible = selectedRow?.dismissible === true;
-    const retryable = selectedRow?.retryableDelivery === true;
-    const updateKind = String(selectedRow?.kind ?? "");
+    const userAnswerable = presentation.userAnswerable;
+    const dismissible = presentation.dismissible;
+    const retryable = presentation.retryableDelivery;
+    const updateKind = presentation.updateKind;
     if (selectedRow)
       this.addControlRow(
         lines,
@@ -1187,18 +1176,6 @@ export class BrokerDeckApp implements Component {
         width,
       );
   }
-  private boardRows(
-    tab: Record<string, unknown>,
-    fallbackItems: readonly unknown[],
-  ): Record<string, unknown>[] {
-    if (Array.isArray(tab.rows))
-      return tab.rows.map((item) => this.providerRecord(item));
-    return fallbackItems.map((item) => {
-      const row = this.providerRecord(item);
-      return { ...row, statusLabel: row.statusLabel ?? row.state ?? "OPEN" };
-    });
-  }
-
   private renderBoardDetail(
     detail: Record<string, unknown>,
     width: number,
@@ -1284,18 +1261,18 @@ export class BrokerDeckApp implements Component {
   }
   private async runBoard(action: string): Promise<void> {
     const agent = this.adoptedRootAgent();
-    if (!agent || !this.#boardSelection) return;
-    const id = this.#boardSelection;
     const projection = currentProviderProjection(
       this.#client.store.state,
       this.#targetPaneId,
     )?.agentBoard;
-    const view = this.providerRecord(projection?.view);
-    const model = this.providerRecord(view.view ?? view);
-    const tabs = this.providerRecord(model.tabs);
-    const tab = this.providerRecord(tabs[this.#boardTab]);
-    const details = this.providerRecord(tab.detailsById);
-    const detail = this.providerRecord(details[id] ?? tab.detail);
+    const presentation = selectBoardPresentation(
+      projection,
+      this.#boardTab,
+      this.#boardSelection,
+    );
+    if (!agent || !presentation.selectedId) return;
+    const id = presentation.selectedId;
+    const detail = presentation.detail;
     const detailProjection = this.providerRecord(detail.projection ?? detail);
     const item = this.providerRecord(
       detailProjection.item ?? detailProjection.decision ?? detailProjection,
@@ -1310,7 +1287,7 @@ export class BrokerDeckApp implements Component {
     );
     const fields =
       action === "archive-update"
-        ? { updateId: id, expectedRevision: this.#boardRevision }
+        ? { updateId: id, expectedRevision: presentation.selectedRevision }
         : action === "acknowledge-answer"
           ? {
               answerId,
@@ -1318,8 +1295,15 @@ export class BrokerDeckApp implements Component {
               summary: "Acknowledged from Pi Herd Deck.",
             }
           : action === "retry-delivery"
-            ? { questionId, answerId, expectedRevision: this.#boardRevision }
-            : { questionId, expectedRevision: this.#boardRevision };
+            ? {
+                questionId,
+                answerId,
+                expectedRevision: presentation.selectedRevision,
+              }
+            : {
+                questionId,
+                expectedRevision: presentation.selectedRevision,
+              };
     try {
       await this.#actions.run("boardAction", {
         agent,
@@ -1399,14 +1383,13 @@ export class BrokerDeckApp implements Component {
       this.#targetPaneId,
     )?.agentBoard;
     const questions = projection?.pendingQuestions ?? [];
-    const view = this.providerRecord(projection?.view);
-    const model = this.providerRecord(view.view ?? view);
-    const tabs = this.providerRecord(model.tabs);
-    const inbox = this.providerRecord(tabs.inbox);
-    const details = this.providerRecord(inbox.detailsById);
-    const detail = this.providerRecord(
-      details[this.#boardSelection ?? ""] ?? inbox.detail,
+    const presentation = selectBoardPresentation(
+      projection,
+      "inbox",
+      this.#boardSelection,
     );
+    if (presentation.pendingQuestion) return presentation.pendingQuestion;
+    const detail = presentation.detail;
     const detailProjection = this.providerRecord(detail.projection);
     const item = this.providerRecord(
       detailProjection.item ?? detailProjection.question ?? detailProjection,
@@ -1437,8 +1420,10 @@ export class BrokerDeckApp implements Component {
       ].includes(String(kind))
     ) {
       return (
-        (this.#boardSelection
-          ? questions.find((entry) => entry.questionId === this.#boardSelection)
+        (presentation.selectedId
+          ? questions.find(
+              (entry) => entry.questionId === presentation.selectedId,
+            )
           : undefined) ?? questions[0]
       );
     }
@@ -1525,10 +1510,7 @@ export class BrokerDeckApp implements Component {
     items: T[],
     id: string | undefined,
   ): T | undefined {
-    const sorted = items.sort((a, b) => a.id.localeCompare(b.id));
-    return (
-      (id ? sorted.find((item) => item.id === id) : undefined) ?? sorted[0]
-    );
+    return effectiveSelection(items, id);
   }
 
   private move(delta: number): void {
@@ -1544,13 +1526,14 @@ export class BrokerDeckApp implements Component {
         this.#agentPage++;
       if (delta < 0 && items.length && this.#selectedAgent === items[0]?.id)
         this.#agentPage = Math.max(0, this.#agentPage - 1);
-    } else if (this.#tab === "work" && this.#workView === "groups")
+    } else if (this.#tab === "work" && this.#workView === "groups") {
+      const scoped = this.scopedWorkState(state);
       this.#selectedGroup = this.nextId(
-        [...state.groups.values()],
-        this.selectedGroup()?.id,
+        [...scoped.groups.values()],
+        this.selectedGroup(scoped)?.id,
         delta,
       );
-    else if (this.#tab === "work" && this.#workView === "todo") {
+    } else if (this.#tab === "work" && this.#workView === "todo") {
       const items =
         currentProviderProjection(state, this.#targetPaneId)?.todo.items ?? [];
       this.#selectedProviderTodo = this.nextId(
@@ -1564,13 +1547,14 @@ export class BrokerDeckApp implements Component {
         this.selectedTask(this.scopedWorkState(state))?.id,
         delta,
       );
-    else if (this.#tab === "work" && this.#workView === "results")
+    else if (this.#tab === "work" && this.#workView === "results") {
+      const scoped = this.scopedWorkState(state);
       this.#selectedResult = this.nextId(
-        [...state.results.values()],
-        this.selectedResult()?.id,
+        [...scoped.results.values()],
+        this.selectedResult(scoped)?.id,
         delta,
       );
-    else if (this.#tab === "files") {
+    } else if (this.#tab === "files") {
       const items = this.visibleFileRows(state);
       if (items.length > 0) {
         const index = items.findIndex(
@@ -1587,20 +1571,20 @@ export class BrokerDeckApp implements Component {
         state,
         this.#targetPaneId,
       )?.agentBoard;
-      const board = this.providerRecord(projection?.view);
-      const model = this.providerRecord(board.view ?? board);
-      const tabs = this.providerRecord(model.tabs);
-      const tab = this.providerRecord(tabs[this.#boardTab]);
-      const rows = this.boardRows(tab, projection?.items ?? []);
+      const presentation = selectBoardPresentation(
+        projection,
+        this.#boardTab,
+        this.#boardSelection,
+      );
+      const rows = presentation.rows;
       if (rows.length > 0) {
         const index = rows.findIndex(
           (row) =>
-            String(row.id ?? row.entityId ?? "") === this.#boardSelection,
+            String(row.id ?? row.entityId ?? "") === presentation.selectedId,
         );
         const next =
           rows[index < 0 ? 0 : (index + delta + rows.length) % rows.length];
         this.#boardSelection = String(next?.id ?? next?.entityId ?? "");
-        this.#boardRevision = Number(next?.revision ?? 0);
       }
     } else if (this.#tab === "more")
       this.#settingsScroll = Math.max(
@@ -1630,9 +1614,12 @@ export class BrokerDeckApp implements Component {
       this.#tab === "work" || this.#tab === "files"
         ? this.adoptedRootAgent()
         : (this.selectedAgent() ?? this.adoptedRootAgent());
-    const task = this.selectedTask();
+    const scoped = this.scopedWorkState(this.#client.store.state);
+    const task =
+      this.#tab === "work" ? this.selectedTask(scoped) : this.selectedTask();
     const question = this.selectedQuestion();
-    const group = this.selectedGroup();
+    const group =
+      this.#tab === "work" ? this.selectedGroup(scoped) : this.selectedGroup();
     return {
       ...(agent
         ? {

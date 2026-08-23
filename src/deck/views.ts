@@ -7,6 +7,7 @@ import type {
   DeckState,
 } from "./types.js";
 import { currentProviderProjection, selectAdoptedScope } from "./scope.js";
+import { selectAgentInspectorRelation } from "./selections.js";
 
 const clip = (s: string, width: number): string => {
   const safeWidth = Math.max(0, width);
@@ -92,18 +93,6 @@ export function getAgentThinkingChoices(agent: Agent | undefined): string[] {
           typeof value === "string" && value.length > 0,
       )
     : [];
-}
-
-function questionForAgent(
-  agent: Agent,
-  state: DeckState,
-): DeckQuestion | undefined {
-  return [...state.questions.values()].find(
-    (question) =>
-      question.agentId === agent.id &&
-      !question.answered &&
-      question.state !== "answered",
-  );
 }
 
 export { currentProviderProjection } from "./scope.js";
@@ -518,14 +507,8 @@ export function renderAgentInspector(
   width: number,
 ): string[] {
   if (!agent) return fitLines(["AGENT DETAIL", "No agent selected."], width);
-  const run = agent.currentRunId
-    ? state.runs.get(agent.currentRunId)
-    : undefined;
-  const task = run
-    ? state.tasks.get(run.taskId)
-    : [...state.tasks.values()].find(
-        (item) => item.assignedAgentId === agent.id,
-      );
+  const relation = selectAgentInspectorRelation(agent, state);
+  const { run, task } = relation;
   const meta = record(agent);
   const requested = record(meta.requestedModel);
   const effective = record(meta.effectiveModel);
@@ -546,7 +529,7 @@ export function renderAgentInspector(
     "unavailable";
   const blocked =
     text(meta.blockedReason) ??
-    questionForAgent(agent, state)?.prompt ??
+    relation.question?.prompt ??
     (agent.state === "blocked" ? "unavailable" : "none");
   return fitLines(
     [

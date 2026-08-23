@@ -27,9 +27,43 @@ export function currentProviderProjection(
       (agent && agent.state !== "idle" ? 1 : 0);
     const connectionOrder =
       (agentB?.connectionGeneration ?? 0) - (agentA?.connectionGeneration ?? 0);
-    return connectionOrder || score(b, agentB) - score(a, agentA);
+    return (
+      connectionOrder ||
+      score(b, agentB) - score(a, agentA) ||
+      a.ownerAgentId.localeCompare(b.ownerAgentId)
+    );
   });
-  return ranked[0] ?? (targetPaneId ? undefined : projections[0]);
+  if (ranked[0]) return ranked[0];
+  if (targetPaneId) return undefined;
+  return projections.length === 1 &&
+    state.agents.has(projections[0]!.ownerAgentId)
+    ? projections[0]
+    : undefined;
+}
+
+export function selectAdoptedRootAgent(
+  state: DeckState,
+  targetPaneId?: string,
+): Agent | undefined {
+  const authoritative = currentProviderProjection(state, targetPaneId);
+  const owner = authoritative
+    ? state.agents.get(authoritative.ownerAgentId)
+    : undefined;
+  if (owner && !["closed", "stopped"].includes(owner.state)) return owner;
+  if (!targetPaneId) return undefined;
+  return [...state.agents.values()]
+    .filter(
+      (agent) =>
+        agent.paneId === targetPaneId &&
+        !["closed", "stopped"].includes(agent.state),
+    )
+    .sort(
+      (a, b) =>
+        (b.connectionGeneration ?? 0) - (a.connectionGeneration ?? 0) ||
+        Number(Boolean(b.piSessionId)) - Number(Boolean(a.piSessionId)) ||
+        Number(Boolean(a.parentAgentId)) - Number(Boolean(b.parentAgentId)) ||
+        a.id.localeCompare(b.id),
+    )[0];
 }
 
 export interface AdoptedScope {
@@ -42,12 +76,7 @@ export function selectAdoptedScope(
   state: DeckState,
   targetPaneId?: string,
 ): AdoptedScope {
-  const targetedRoot = targetPaneId
-    ? [...state.agents.values()].find((agent) => agent.paneId === targetPaneId)
-    : undefined;
-  const rootAgentId =
-    targetedRoot?.id ??
-    currentProviderProjection(state, targetPaneId)?.ownerAgentId;
+  const rootAgentId = selectAdoptedRootAgent(state, targetPaneId)?.id;
   const rootExists = Boolean(rootAgentId && state.agents.has(rootAgentId));
   const agentIds = new Set<string>();
   if (rootExists && rootAgentId) agentIds.add(rootAgentId);

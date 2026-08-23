@@ -1,5 +1,11 @@
 import type { DeckNotification, DeckState } from "./types.js";
 import { currentProviderProjection, selectAdoptedScope } from "./scope.js";
+import {
+  effectiveOrderedSelection,
+  effectiveSelection,
+  selectAgentInspectorRelation,
+} from "./selections.js";
+import { selectBoardPresentation } from "./board-presentation.js";
 
 export type VisibleDeckTab =
   "home" | "work" | "files" | "agents" | "inbox" | "more";
@@ -57,12 +63,6 @@ function sortedValues<T extends { id: string }>(values: Iterable<T>): T[] {
   return [...values].sort((a, b) => a.id.localeCompare(b.id));
 }
 
-function record(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
-}
-
 function providerAuthority(state: DeckState, targetPaneId?: string) {
   const provider = currentProviderProjection(state, targetPaneId);
   const owner = provider ? state.agents.get(provider.ownerAgentId) : undefined;
@@ -108,16 +108,28 @@ function workModel(state: DeckState, context: VisibleSurfaceContext): unknown {
   );
   const scoped = selectAdoptedScope(state, context.targetPaneId).state;
   if (context.workView === "todo") return { authority, todo: provider?.todo };
-  if (context.workView === "tasks")
+  if (context.workView === "tasks") {
+    const tasks = sortedValues(scoped.tasks.values());
+    const selected = effectiveSelection(tasks, context.selectedTaskId);
     return {
-      rows: sortedValues(scoped.tasks.values()).map(brokerEntity),
-      runs: sortedValues(scoped.runs.values()).map(brokerEntity),
-      selected: selectedRelated(scoped, context.selectedTaskId),
+      rows: tasks.map((task) => ({
+        id: task.id,
+        state: task.state,
+        title: task.title,
+        assignedAgentId: task.assignedAgentId,
+        resultId: task.resultId,
+        runAgentId: task.currentRunId
+          ? scoped.runs.get(task.currentRunId)?.agentId
+          : undefined,
+      })),
+      selected: selectedRelated(scoped, selected?.id),
     };
+  }
   if (context.workView === "results") {
-    const selected = context.selectedResultId
-      ? scoped.results.get(context.selectedResultId)
-      : undefined;
+    const selected = effectiveSelection(
+      scoped.results.values(),
+      context.selectedResultId,
+    );
     return {
       rows: sortedValues(scoped.results.values()).map((item) => ({
         id: item.id,
@@ -130,15 +142,21 @@ function workModel(state: DeckState, context: VisibleSurfaceContext): unknown {
       ),
     };
   }
-  if (context.workView === "groups")
+  if (context.workView === "groups") {
+    const groups = sortedValues(scoped.groups.values());
+    const selected = effectiveSelection(groups, context.selectedGroupId);
     return {
-      rows: sortedValues(scoped.groups.values()).map(brokerEntity),
-      selected: brokerEntity(
-        context.selectedGroupId
-          ? scoped.groups.get(context.selectedGroupId)
-          : undefined,
-      ),
+      rows: groups.map((group) => ({
+        id: group.id,
+        state: group.state,
+        name: group.name,
+        title: group.title,
+        agentCount: group.agentIds?.length ?? 0,
+        taskCount: group.taskIds?.length ?? 0,
+      })),
+      selected: brokerEntity(selected),
     };
+  }
   const terminalTasks = sortedValues(scoped.tasks.values()).filter((task) =>
     ["succeeded", "failed", "cancelled", "timed_out"].includes(task.state),
   );
@@ -177,20 +195,29 @@ function agentsModel(
     .sort((a, b) => b.id.localeCompare(a.id));
   const page = Math.max(0, context.agentPage ?? 0);
   const visible = matching.slice(page * 12, page * 12 + 12);
-  const selected = context.selectedAgentId
-    ? scoped.agents.get(context.selectedAgentId)
-    : undefined;
-  const task = selected
-    ? sortedValues(scoped.tasks.values()).find(
-        (item) => item.assignedAgentId === selected.id,
-      )
-    : undefined;
+  const selected = effectiveOrderedSelection(visible, context.selectedAgentId);
+  const relation = selectAgentInspectorRelation(selected, scoped);
   return {
     matchingCount: matching.length,
     order: matching.map((agent) => agent.id),
-    rows: visible.map(brokerEntity),
+    rows: visible.map((agent) => ({
+      id: agent.id,
+      state: agent.state,
+      displayName: agent.displayName,
+      herdrName: agent.herdrName,
+      currentRunId: agent.currentRunId,
+      lifecycleClass: agent.lifecycleClass,
+      keepForReuse: agent.keepForReuse,
+      actualModel: agent.actualModel,
+      effectiveModel: agent.effectiveModel,
+    })),
     selected: brokerEntity(selected),
-    related: selectedRelated(scoped, task?.id),
+    related: {
+      run: brokerEntity(relation.run),
+      task: brokerEntity(relation.task),
+      result: brokerEntity(relation.result),
+      question: brokerEntity(relation.question),
+    },
   };
 }
 
@@ -200,31 +227,27 @@ function boardModel(state: DeckState, context: VisibleSurfaceContext): unknown {
     context.targetPaneId,
   );
   const board = provider?.agentBoard;
-  const view = record(board?.view);
-  const counts = record(view.counts);
-  const tabs = record(view.tabs);
-  const tabName = context.boardTab ?? "inbox";
-  const tab = record(tabs[tabName]);
-  const rows = Array.isArray(tab.rows) ? tab.rows.map(record) : [];
-  const selected = rows.find(
-    (row) => String(row.id ?? row.entityId ?? "") === context.boardSelectionId,
-  );
-  const details = record(tab.details);
-  const selectedId = context.boardSelectionId ?? "";
-  const pending = board?.pendingQuestions?.find(
-    (item) => item.questionId === selectedId,
+  const presentation = selectBoardPresentation(
+    board,
+    context.boardTab ?? "inbox",
+    context.boardSelectionId,
   );
   return {
     authority,
-    available: board?.available,
-    openCount: board?.openCount,
-    health: board?.health,
-    preferredCommand: board?.preferredCommand,
-    counts,
-    rows,
-    selected,
-    detail: details[selectedId] ?? tab.detail,
-    pending,
+    available: presentation.available,
+    openCount: presentation.openCount,
+    tabCounts: presentation.tabCounts,
+    tab: presentation.tab,
+    rows: presentation.rows,
+    empty: presentation.empty,
+    selectedRow: presentation.selectedRow,
+    selectedRevision: presentation.selectedRevision,
+    detail: presentation.detail,
+    pendingQuestion: presentation.pendingQuestion,
+    userAnswerable: presentation.userAnswerable,
+    dismissible: presentation.dismissible,
+    retryableDelivery: presentation.retryableDelivery,
+    updateKind: presentation.updateKind,
   };
 }
 
