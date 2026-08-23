@@ -141,6 +141,7 @@ export class BrokerDeckApp implements Component {
   #unifiedBoardSelection: string | undefined;
   #boardFilter: BoardFilter = "all-current";
   #boardScroll = 0;
+  #boardWheelDetached = false;
   #activitySelection: string | undefined;
   #activityFilter: ActivityFilter = "all";
   #activityScroll = 0;
@@ -412,9 +413,10 @@ export class BrokerDeckApp implements Component {
         this.#filesWheelDetached = true;
         this.#filesScroll = Math.max(0, this.#filesScroll + delta);
       } else if (this.#tab === "files") return false;
-      else if (this.#tab === "board")
+      else if (this.#tab === "board") {
+        this.#boardWheelDetached = true;
         this.#boardScroll = Math.max(0, this.#boardScroll + delta);
-      else if (this.#tab === "activity")
+      } else if (this.#tab === "activity")
         this.#activityScroll = Math.max(0, this.#activityScroll + delta);
       else this.move(delta);
       this.syncVisibleSignature();
@@ -719,6 +721,7 @@ export class BrokerDeckApp implements Component {
     else if (item.kind === "group") this.#selectedGroup = item.source.id;
     else if (item.kind === "broker-question")
       this.#selectedQuestion = item.source.id;
+    else if (item.kind === "agent-alert") this.#selectedAgent = item.source.id;
     else {
       const separator = item.id.indexOf(":");
       this.#boardSelection = item.id.slice(separator + 1);
@@ -772,7 +775,7 @@ export class BrokerDeckApp implements Component {
           : {}),
         listScroll: this.#boardScroll,
         detailScroll: 0,
-        wheelDetached: false,
+        wheelDetached: this.#boardWheelDetached,
       },
       model,
       actions: {
@@ -798,6 +801,16 @@ export class BrokerDeckApp implements Component {
             this.confirmGroup("groupStop");
           else if (item.kind === "group" && action === "close")
             this.confirmGroup("groupClose");
+          else if (item.kind === "task" && action === "focus-agent")
+            void this.run("focus");
+          else if (item.kind === "task" && action === "open-agents")
+            this.selectTab("agents");
+          else if (item.kind === "agent-alert" && action === "focus")
+            void this.run("focus");
+          else if (item.kind === "agent-alert" && action === "prompt")
+            this.beginInput("prompt");
+          else if (item.kind === "agent-alert" && action === "open-agents")
+            this.selectTab("agents");
           else if (item.kind.startsWith("signal-")) void this.runBoard(action);
         },
       },
@@ -1589,13 +1602,29 @@ export class BrokerDeckApp implements Component {
   }
 
   private target() {
-    const agent =
-      this.#tab === "board" || this.#tab === "files"
-        ? this.adoptedRootAgent()
-        : (this.selectedAgent() ?? this.adoptedRootAgent());
     const scoped = this.scopedWorkState(this.#client.store.state);
     const task =
       this.#tab === "board" ? this.selectedTask(scoped) : this.selectedTask();
+    const boardSelected =
+      this.#tab === "board"
+        ? selectUnifiedBoardPresentation(
+            this.#client.store.state,
+            this.#targetPaneId,
+            this.#unifiedBoardSelection,
+            this.#boardFilter,
+          ).selected
+        : undefined;
+    const boardOwner =
+      boardSelected?.kind === "task" && boardSelected.source.assignedAgentId
+        ? scoped.agents.get(boardSelected.source.assignedAgentId)
+        : boardSelected?.kind === "agent-alert"
+          ? boardSelected.source
+          : undefined;
+    const agent =
+      boardOwner ??
+      (this.#tab === "board" || this.#tab === "files"
+        ? this.adoptedRootAgent()
+        : (this.selectedAgent() ?? this.adoptedRootAgent()));
     const question = this.selectedQuestion();
     const group =
       this.#tab === "board" ? this.selectedGroup(scoped) : this.selectedGroup();

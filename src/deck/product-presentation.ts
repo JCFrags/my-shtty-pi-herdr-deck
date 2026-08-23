@@ -24,10 +24,30 @@ export type BoardFilter = "attention" | "active" | "all-current";
 export type ActivityFilter =
   "all" | "results" | "signals" | "agents" | "errors";
 export type SourceLabel = "TODO" | "ORCHESTRATOR" | "SIGNALS";
+export type BoardAction =
+  | "start"
+  | "mark-done"
+  | "clear-wait"
+  | "cancel-task"
+  | "focus-agent"
+  | "open-agents"
+  | "wait"
+  | "stop"
+  | "close"
+  | "answer"
+  | "use-recommendation"
+  | "dismiss-question"
+  | "retry-delivery"
+  | "archive-update"
+  | "focus"
+  | "prompt"
+  | "copy-id"
+  | "archive"
+  | "retry";
 
 export interface ItemActionAvailability {
-  primary?: string;
-  actions: readonly string[];
+  primary?: BoardAction;
+  actions: readonly BoardAction[];
   disabledReason?: string;
 }
 
@@ -289,7 +309,7 @@ export function selectUnifiedBoardPresentation(
   const items: BoardItem[] = [];
   for (const todo of provider?.todo.items ?? []) {
     if (isTerminalTodoStatus(todo.status)) continue;
-    const waiting = isWaitingTodo(todo);
+    const waiting = Boolean(todo.waitReason);
     const status = normalizedStatus(todo.status);
     items.push(
       boardItem({
@@ -348,6 +368,11 @@ export function selectUnifiedBoardPresentation(
     if (isTerminalTaskState(task.state) || representedTasks.has(task.id))
       continue;
     const attention = task.state === "blocked";
+    const assigned = task.assignedAgentId
+      ? scoped.agents.get(task.assignedAgentId)
+      : undefined;
+    const assignedAgentLive =
+      assigned !== undefined && !isTerminalAgentState(assigned.state);
     items.push(
       boardItem({
         uiId: `orchestrator:task:${task.id}`,
@@ -366,7 +391,11 @@ export function selectUnifiedBoardPresentation(
         ...(task.currentRunId ? { relatedRunId: task.currentRunId } : {}),
         actions: {
           primary: "cancel-task",
-          actions: ["cancel-task", "focus-agent", "open-agents"],
+          actions: [
+            "cancel-task",
+            ...(assignedAgentLive ? ["focus-agent" as const] : []),
+            "open-agents",
+          ],
         },
       }),
     );
@@ -420,9 +449,9 @@ export function selectUnifiedBoardPresentation(
             ...(pending?.recommendedOptionIds.length || pending?.recommendedText
               ? ["use-recommendation"]
               : []),
-            ...(row.dismissible === true ? ["dismiss"] : []),
+            ...(row.dismissible === true ? ["dismiss-question"] : []),
             ...(row.retryableDelivery === true ? ["retry-delivery"] : []),
-          ],
+          ] as BoardAction[],
         },
       }),
     );
@@ -452,9 +481,9 @@ export function selectUnifiedBoardPresentation(
         revision: Number(row.revision ?? 0),
         actions: {
           actions: [
-            ...(row.archivable === true ? ["archive"] : []),
+            ...(row.archivable === true ? ["archive-update"] : []),
             ...(row.retryableDelivery === true ? ["retry-delivery"] : []),
-          ],
+          ] as BoardAction[],
         },
       }),
     );
@@ -562,9 +591,9 @@ function signalActivity(
       source: row,
       actions: {
         actions: [
-          ...(row.archivable === true ? ["archive"] : []),
+          ...(row.archivable === true ? ["archive-update"] : []),
           ...(row.retryableDelivery === true ? ["retry-delivery"] : []),
-        ],
+        ] as BoardAction[],
       },
     });
   });
@@ -649,7 +678,12 @@ export function selectActivityPresentation(
           state: agent.state,
           sortTimestamp: "",
           source: agent,
-          actions: { actions: ["copy-id", ...(agent.paneId ? ["focus"] : [])] },
+          actions: {
+            actions: [
+              "copy-id",
+              ...(agent.paneId ? ["focus"] : []),
+            ] as BoardAction[],
+          },
         }),
       );
   const signalByEntity = new Map<string, ActivityItem>();

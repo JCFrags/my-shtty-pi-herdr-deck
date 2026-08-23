@@ -76,6 +76,17 @@ export interface QuestionAnswer {
   text: string | null;
 }
 
+export function buildBoardActionRequest(
+  ownerAgentId: string,
+  boardAction: { action: string; fields?: Record<string, unknown> },
+): Record<string, unknown> {
+  return {
+    ownerAgentId,
+    ...(boardAction.fields ?? {}),
+    action: boardAction.action,
+  };
+}
+
 type Guard = (target: ActionTarget) => string | undefined;
 const requireAgent = (target: ActionTarget): string | undefined =>
   target.agent ? undefined : "Select an agent first.";
@@ -207,11 +218,10 @@ export class DeckActions {
             : {}),
         });
       case "boardAction":
-        return this.client.request("provider.agent_board_action", {
-          ownerAgentId: target.agent!.id,
-          ...(target.boardAction?.fields ?? {}),
-          action: target.boardAction!.action,
-        });
+        return this.client.request(
+          "provider.agent_board_action",
+          buildBoardActionRequest(target.agent!.id, target.boardAction!),
+        );
       case "todoStart":
       case "todoDone":
       case "todoClearWait":

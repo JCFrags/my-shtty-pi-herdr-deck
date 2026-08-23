@@ -8,6 +8,8 @@ import {
   boardIsNarrow,
   renderBoardScreen,
 } from "../../src/deck/board-screen.js";
+import type { BoardAction } from "../../src/deck/product-presentation.js";
+import { buildBoardActionRequest } from "../../src/deck/actions.js";
 import type { NormalizedQuestion } from "../../src/deck/product-presentation.js";
 
 const question = (
@@ -74,6 +76,58 @@ test("question payload builders cover broker and all Signals response kinds", ()
   );
 });
 
+test("Board request router emits exact Signals action payloads", () => {
+  assert.deepEqual(
+    buildBoardActionRequest("agent-1", {
+      action: "accept-recommendation",
+      fields: { questionId: "q-1", expectedRevision: 4 },
+    }),
+    {
+      ownerAgentId: "agent-1",
+      questionId: "q-1",
+      expectedRevision: 4,
+      action: "accept-recommendation",
+    },
+  );
+  assert.deepEqual(
+    buildBoardActionRequest("agent-1", {
+      action: "dismiss-question",
+      fields: { questionId: "q-1", expectedRevision: 4 },
+    }),
+    {
+      ownerAgentId: "agent-1",
+      questionId: "q-1",
+      expectedRevision: 4,
+      action: "dismiss-question",
+    },
+  );
+  assert.deepEqual(
+    buildBoardActionRequest("agent-1", {
+      action: "retry-delivery",
+      fields: { questionId: "q-1", answerId: "a-1", expectedRevision: 4 },
+    }),
+    {
+      ownerAgentId: "agent-1",
+      questionId: "q-1",
+      answerId: "a-1",
+      expectedRevision: 4,
+      action: "retry-delivery",
+    },
+  );
+  assert.deepEqual(
+    buildBoardActionRequest("agent-1", {
+      action: "archive-update",
+      fields: { updateId: "u-1", expectedRevision: 7 },
+    }),
+    {
+      ownerAgentId: "agent-1",
+      updateId: "u-1",
+      expectedRevision: 7,
+      action: "archive-update",
+    },
+  );
+});
+
 test("Board emits source badges and uses stacked narrow / column wide layouts", () => {
   const item = {
     uiId: "signals:question:q",
@@ -89,7 +143,7 @@ test("Board emits source badges and uses stacked narrow / column wide layouts", 
     section: "attention" as const,
     priority: 1,
     sortTimestamp: "",
-    actions: { actions: ["answer"] },
+    actions: { actions: ["answer"] as BoardAction[] },
   };
   const model = {
     attention: [item],
@@ -125,6 +179,17 @@ test("Board emits source badges and uses stacked narrow / column wide layouts", 
   assert.equal(boardIsNarrow(120), false);
   assert.ok(narrow.lines.some((line) => line.includes("[SIGNALS]")));
   assert.ok(wide.lines.some((line) => line.includes("[SIGNALS]")));
+  for (const height of [18, 24]) {
+    assert.ok(
+      renderBoardScreen({
+        width: 70,
+        height,
+        state,
+        model,
+        actions: { select() {}, filter() {}, answer() {}, run() {} },
+      }).hitBoxes.some((box) => box.id === "board:answer"),
+    );
+  }
   assert.ok(
     wide.regions.length === 0 ||
       wide.regions.every((region) => region.width > 0),

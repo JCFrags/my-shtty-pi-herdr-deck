@@ -79,7 +79,9 @@ function projection(): ProviderProjection {
                 {
                   id: "U-1",
                   title: "Progress",
-                  state: "working",
+                  state: "completed",
+                  archivable: true,
+                  retryableDelivery: true,
                   changedAt: "2026-08-23T02:00:00Z",
                 },
               ],
@@ -236,6 +238,13 @@ test("Board partitions canonical current work, attention, and recent Signals", (
   assert.ok(
     board.recentSignals.some((item) => item.uiId === "signals:update:U-1"),
   );
+  const update = board.recentSignals.find(
+    (item) => item.uiId === "signals:update:U-1",
+  );
+  assert.deepEqual(update?.actions.actions, [
+    "archive-update",
+    "retry-delivery",
+  ]);
   assert.equal(
     ids.some((id) => id.includes("D-1")),
     false,
@@ -245,7 +254,34 @@ test("Board partitions canonical current work, attention, and recent Signals", (
     (item) => item.uiId === "signals:question:SQ-1",
   );
   assert.ok(signal?.actions.actions.includes("use-recommendation"));
+  assert.ok(signal?.actions.actions.includes("dismiss-question"));
+  assert.equal(signal?.actions.actions.includes("dismiss" as never), false);
+  assert.ok(
+    board.attention
+      .find((item) => item.uiId === "orchestrator:task:blocked")
+      ?.actions.actions.includes("focus-agent"),
+  );
+  assert.ok(
+    board.attention
+      .find((item) => item.uiId === "orchestrator:task:blocked")
+      ?.actions.actions.includes("open-agents"),
+  );
   assert.ok(board.attention.some((item) => item.kind === "agent-alert"));
+});
+
+test("synthetic provider wait has no task actions and only waitReason clears Todo wait", () => {
+  const value = state();
+  const provider = value.providerProjections.get(root.id)!;
+  provider.todo.items = provider.todo.items.filter(
+    (item) => item.id !== "wait",
+  );
+  const board = selectUnifiedBoardPresentation(value, "pane-1");
+  const synthetic = board.attention.find(
+    (item) => item.uiId === "todo:provider-wait",
+  );
+  assert.deepEqual(synthetic?.actions.actions, []);
+  const todo = board.work.find((item) => item.uiId === "todo:active");
+  assert.equal(todo?.actions.actions.includes("clear-wait"), false);
 });
 
 test("Board filters visibility only and selection falls back deterministically", () => {

@@ -3,6 +3,7 @@ import { SurfaceBuilder, composeColumns } from "./geometry.js";
 import type { BoardScreenState, RenderedSurface } from "./screen-types.js";
 import type {
   BoardFilter,
+  BoardAction,
   BoardItem,
   UnifiedBoardPresentation,
 } from "./product-presentation.js";
@@ -11,7 +12,7 @@ export interface BoardScreenActions {
   select(item: BoardItem): void;
   filter(value: BoardFilter): void;
   answer(item: BoardItem): void;
-  run(item: BoardItem, action: string): void;
+  run(item: BoardItem, action: BoardAction): void;
 }
 
 export interface BoardScreenOptions {
@@ -68,7 +69,7 @@ export function renderBoardScreen(
     options.actions,
   );
   const body = narrow
-    ? stack(listSurface, detailSurface)
+    ? stack(detailSurface, listSurface)
     : composeColumns(
         listSurface,
         detailSurface,
@@ -165,10 +166,13 @@ function actionLabel(action: string): string {
   const labels: Record<string, string> = {
     "cancel-task": "Cancel task",
     "focus-agent": "Focus",
-    "open-agents": "Open agents",
+    "open-agents": "Open Agents",
     "mark-done": "Mark done",
     "clear-wait": "Clear wait",
     "use-recommendation": "Use recommendation",
+    "dismiss-question": "Dismiss",
+    "retry-delivery": "Retry delivery",
+    "archive-update": "Archive",
     wait: "Wait group",
     stop: "Stop group",
     close: "Close group",
