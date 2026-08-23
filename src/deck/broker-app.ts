@@ -659,10 +659,12 @@ export class BrokerDeckApp implements Component {
           onToggle: (id) => {
             this.#overlay = toggleQuestionOption(overlay, id);
           },
-          onRecommendation: () => this.handleQuestionRecommendation(overlay),
+          onRecommendation: () =>
+            void this.handleQuestionRecommendation(overlay),
           onSubmit: () => void this.submitQuestionResponse(),
           onCancel: () => this.closeOverlay(),
-          onDismiss: () => this.dismissQuestion(overlay),
+          onDismiss: () => void this.dismissQuestion(overlay),
+          onRetry: () => void this.retryQuestionDelivery(overlay),
         });
     }
   }
@@ -1064,36 +1066,88 @@ export class BrokerDeckApp implements Component {
     this.#requestRender();
   }
 
-  private handleQuestionRecommendation(
+  private async handleQuestionRecommendation(
     overlay: Extract<OverlayState, { kind: "question-response" }>,
-  ): void {
+  ): Promise<void> {
     if (overlay.question.source !== "signals") {
       this.#overlay = applyQuestionRecommendation(overlay);
       return;
     }
+    await this.runQuestionMutation(overlay, "accept-recommendation");
+  }
+
+  private async dismissQuestion(
+    overlay: Extract<OverlayState, { kind: "question-response" }>,
+  ): Promise<void> {
+    if (overlay.question.source !== "signals") return;
+    await this.runQuestionMutation(overlay, "dismiss-question");
+  }
+
+  private async retryQuestionDelivery(
+    overlay: Extract<OverlayState, { kind: "question-response" }>,
+  ): Promise<void> {
+    if (
+      overlay.question.source !== "signals" ||
+      !overlay.question.retryableDelivery ||
+      !overlay.question.answerId
+    )
+      return;
+    await this.runQuestionMutation(overlay, "retry-delivery");
+  }
+
+  private async runQuestionMutation(
+    overlay: Extract<OverlayState, { kind: "question-response" }>,
+    action: "accept-recommendation" | "dismiss-question" | "retry-delivery",
+  ): Promise<void> {
+    if (this.#overlay.kind !== "question-response" || this.#overlay.pending)
+      return;
     const item = this.currentBoardQuestionItem(overlay.guard?.questionId);
-    if (!item) {
+    const current = item
+      ? normalizedSignalsQuestionForBoardItem(
+          item,
+          this.productTargetContext().agentBoard,
+        )
+      : undefined;
+    if (
+      !item ||
+      !current ||
+      current.terminal ||
+      current.revision !== overlay.guard?.revision ||
+      (action === "dismiss-question" && !current.dismissible) ||
+      (action === "retry-delivery" &&
+        (!current.retryableDelivery || !current.answerId))
+    ) {
       this.#overlay = {
         ...overlay,
         error: "The question changed. Close and select it again.",
       };
       return;
     }
-    this.closeOverlay();
-    this.runSignalsAction(item, "accept-recommendation");
-  }
-
-  private dismissQuestion(
-    overlay: Extract<OverlayState, { kind: "question-response" }>,
-  ): void {
-    if (overlay.question.source !== "signals") {
-      this.closeOverlay();
+    const request = signalsActionRequest(
+      item,
+      action,
+      this.productTargetContext().agentBoard,
+    );
+    if (!request) {
+      this.#overlay = { ...overlay, error: "The action is unavailable." };
       return;
     }
-    const item = this.currentBoardQuestionItem(overlay.guard?.questionId);
-    this.closeOverlay();
-    if (item) this.runSignalsAction(item, "dismiss-question");
-    else this.#message = "The question changed. Close and select it again.";
+    const { error: _previousError, ...pendingOverlay } = overlay;
+    this.#overlay = { ...pendingOverlay, pending: true };
+    this.#requestRender();
+    const target = actionTargetForBoardItem(item, this.productTargetContext());
+    const ok = await this.run("boardAction", undefined, {
+      ...target,
+      boardAction: request,
+    });
+    if (ok) this.closeOverlay();
+    else
+      this.#overlay = {
+        ...overlay,
+        pending: false,
+        error: this.#message.slice(0, 4_000),
+      };
+    this.#requestRender();
   }
 
   private currentBoardQuestionItem(questionId?: string): BoardItem | undefined {

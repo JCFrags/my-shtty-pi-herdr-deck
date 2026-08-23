@@ -14,6 +14,7 @@ export interface QuestionResponseScreenOptions {
   onSubmit(): void;
   onCancel(): void;
   onDismiss(): void;
+  onRetry(): void;
 }
 
 export function renderQuestionResponseScreen(
@@ -45,30 +46,45 @@ export function renderQuestionResponseScreen(
       {
         id: "question:recommendation",
         label: "Recommendation",
+        disabled: state.pending === true,
         activate: options.onRecommendation,
       },
     ]);
+  if (state.pending) surface.addLine("Request pending…");
   if (state.error) surface.addLine(`! ${state.error}`);
   surface.addButtons([
+    {
+      id: "question:cancel",
+      label: "Cancel",
+      activate: options.onCancel,
+    },
     ...(state.question.dismissible
       ? [
           {
             id: "question:dismiss",
             label: "Dismiss",
+            disabled: state.pending === true,
             activate: options.onDismiss,
           },
         ]
-      : [
+      : []),
+    ...(state.question.retryableDelivery && state.question.answerId
+      ? [
           {
-            id: "question:cancel",
-            label: "Cancel",
-            activate: options.onCancel,
+            id: "question:retry",
+            label: "Retry delivery",
+            disabled: state.pending === true,
+            activate: options.onRetry,
           },
-        ]),
+        ]
+      : []),
     {
       id: "question:submit",
-      label: "Submit",
-      disabled: state.pending === true || !questionResponseValid(state),
+      label: "Submit Answer",
+      disabled:
+        state.pending === true ||
+        state.question.terminal ||
+        !questionResponseValid(state),
       activate: options.onSubmit,
     },
   ]);

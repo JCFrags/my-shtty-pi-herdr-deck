@@ -131,8 +131,13 @@ export function signalsQuestionForBoardItem(
     item.entityId,
   );
   const detail = boardRecord(presentation.detail);
-  const detailItem = boardRecord(detail.item ?? detail.question ?? detail);
-  const response = boardRecord(detail.response ?? detailItem.response);
+  const projection = boardRecord(detail.projection);
+  const detailItem = boardRecord(
+    projection.item ?? detail.item ?? detail.question ?? detail,
+  );
+  const response = boardRecord(
+    detailItem.response ?? projection.response ?? detail.response,
+  );
   const questionId = stringValue(
     detailItem.id ?? detailItem.questionId ?? item.entityId,
   );
@@ -144,7 +149,11 @@ export function signalsQuestionForBoardItem(
       "",
   );
   const revision = numberValue(
-    detailItem.revision ?? detail.revision ?? item.revision ?? 0,
+    detailItem.revision ??
+      projection.revision ??
+      detail.revision ??
+      item.revision ??
+      0,
   );
   const kind = response.kind;
   if (
@@ -179,9 +188,13 @@ export function signalsQuestionForBoardItem(
       })
     : [];
   const recommendedOptionIds =
-    detailItem.recommendedOptionIds ?? detail.recommendedOptionIds;
+    detailItem.recommendedOptionIds ??
+    projection.recommendedOptionIds ??
+    detail.recommendedOptionIds;
   const recommendedText = stringValue(
-    detailItem.recommendedText ?? detail.recommendedText,
+    detailItem.recommendedText ??
+      projection.recommendedText ??
+      detail.recommendedText,
   );
   return {
     questionId,
@@ -206,7 +219,18 @@ export function normalizedSignalsQuestionForBoardItem(
 ): NormalizedQuestion | undefined {
   if (item.kind !== "signal-question") return undefined;
   const question = signalsQuestionForBoardItem(item, agentBoard);
-  return question ? normalizeSignalsQuestion(question, item.source) : undefined;
+  if (!question) return undefined;
+  const presentation = selectBoardPresentation(
+    agentBoard,
+    "inbox",
+    item.entityId,
+  );
+  const detail = boardRecord(presentation.detail);
+  return normalizeSignalsQuestion(question, {
+    ...item.source,
+    ...detail,
+    projection: boardRecord(detail.projection),
+  });
 }
 
 export function signalsActionRequest(
@@ -221,14 +245,23 @@ export function signalsActionRequest(
     item.entityId,
   );
   const detail = boardRecord(presentation.detail);
+  const projection = boardRecord(detail.projection);
   const detailItem = boardRecord(
-    detail.item ?? detail.decision ?? detail.question ?? detail,
+    projection.item ??
+      detail.item ??
+      detail.decision ??
+      detail.question ??
+      detail,
   );
   const answer = boardRecord(
-    detail.answer ?? detail.response ?? detailItem.answer,
+    projection.answer ?? detail.answer ?? detail.response ?? detailItem.answer,
   );
   const revision = numberValue(
-    item.revision ?? detailItem.revision ?? detail.revision ?? 0,
+    item.revision ??
+      detailItem.revision ??
+      projection.revision ??
+      detail.revision ??
+      0,
   );
   const questionId = stringValue(
     detailItem.questionId ?? detailItem.id ?? item.entityId,

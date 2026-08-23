@@ -100,6 +100,7 @@ export interface NormalizedQuestion {
   recommendedText?: string;
   dismissible: boolean;
   retryableDelivery: boolean;
+  answerId?: string;
   deliveryState?: string;
   terminal: boolean;
   timeoutAt?: string;
@@ -312,6 +313,12 @@ export function normalizeSignalsQuestion(
   question: AgentBoardPendingQuestion,
   row: BoardRecord = {},
 ): NormalizedQuestion {
+  const projection = boardRecord(row.projection);
+  const answer = boardRecord(projection.answer ?? row.answer);
+  const answerId = text(answer.id ?? answer.answerId ?? row.answerId, "");
+  const userAnswerable = projection.userAnswerable ?? row.userAnswerable;
+  const retryableDelivery =
+    projection.retryableDelivery ?? row.retryableDelivery;
   return {
     source: "signals",
     uiId: `signals:question:${question.questionId}`,
@@ -325,10 +332,17 @@ export function normalizeSignalsQuestion(
     ...(question.recommendedText
       ? { recommendedText: question.recommendedText }
       : {}),
-    dismissible: row.dismissible === true,
-    retryableDelivery: row.retryableDelivery === true,
-    deliveryState: text(row.deliveryState ?? row.state, "pending"),
-    terminal: row.userAnswerable === false && row.retryableDelivery !== true,
+    dismissible: (projection.dismissible ?? row.dismissible) === true,
+    retryableDelivery: retryableDelivery === true,
+    ...(answerId ? { answerId } : {}),
+    deliveryState: text(
+      projection.deliveryState ??
+        projection.latestDeliveryAttempt ??
+        row.deliveryState ??
+        row.state,
+      "pending",
+    ),
+    terminal: userAnswerable === false && retryableDelivery !== true,
   };
 }
 

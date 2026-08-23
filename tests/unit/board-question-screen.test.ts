@@ -94,7 +94,7 @@ test("Signals answer fixtures preserve current kind and canonical fields", () =>
     );
 });
 
-test("Signals answer builder rejects unknown, duplicate, unordered, stale, and oversized input", () => {
+test("Signals answer builder normalizes provider order and rejects unknown, duplicate, stale, and oversized input", () => {
   assert.throws(() =>
     buildSignalsQuestionAnswer(question("single"), {
       selectedOptionIds: ["unknown"],
@@ -107,11 +107,12 @@ test("Signals answer builder rejects unknown, duplicate, unordered, stale, and o
       text: "",
     }),
   );
-  assert.throws(() =>
+  assert.deepEqual(
     buildSignalsQuestionAnswer(question("multiple"), {
       selectedOptionIds: ["b", "a"],
       text: "",
     }),
+    { kind: "multiple", optionIds: ["a", "b"] },
   );
   assert.throws(() =>
     buildSignalsQuestionAnswer(

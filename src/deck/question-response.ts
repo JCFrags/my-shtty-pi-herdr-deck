@@ -97,19 +97,14 @@ function validOptionIds(
   const allowed = new Map(options.map((option, index) => [option.id, index]));
   if (allowed.size !== options.length)
     throw new Error("The question options are invalid.");
-  const ids: string[] = [];
-  let previous = -1;
+  const selectedIds = new Set<string>();
   for (const id of selected) {
     if (typeof id !== "string" || !allowed.has(id))
       throw new Error("The selected option is not available.");
-    if (ids.includes(id)) throw new Error("An option was selected twice.");
-    const index = allowed.get(id)!;
-    if (index <= previous)
-      throw new Error("Selected options must keep question order.");
-    previous = index;
-    ids.push(id);
+    if (selectedIds.has(id)) throw new Error("An option was selected twice.");
+    selectedIds.add(id);
   }
-  return ids;
+  return options.map((option) => option.id).filter((id) => selectedIds.has(id));
 }
 
 function answerText(value: unknown): string {
