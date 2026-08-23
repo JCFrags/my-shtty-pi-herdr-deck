@@ -31,6 +31,11 @@ import type { PiCapabilitySnapshot } from "../pi/model-capabilities.js";
 import type { ModelPolicyConfig } from "../broker/model-policy.js";
 import type { DeckGroup, DeckQuestion, DeckResult } from "./types.js";
 import type { AgentBoardPendingQuestion } from "../shared/provider-projections.js";
+import {
+  visibleSurfaceSignature,
+  type VisibleDeckTab,
+  type VisibleWorkView,
+} from "./render-dependencies.js";
 
 export interface BrokerDeckAppOptions {
   client: BrokerClient;
@@ -38,10 +43,11 @@ export interface BrokerDeckAppOptions {
   getHeight(): number;
   targetPaneId?: string;
   onClose?(): void;
+  onRenderDecision?(decision: { rendered: boolean; tab: VisibleDeckTab; workView: VisibleWorkView }): void;
 }
 
-type DeckTab = "home" | "work" | "files" | "agents" | "inbox" | "more";
-type WorkView = "todo" | "tasks" | "results" | "groups" | "history";
+type DeckTab = VisibleDeckTab;
+type WorkView = VisibleWorkView;
 type InputMode =
   | "prompt"
   | "ask"
@@ -53,38 +59,6 @@ type InputMode =
   | "default"
   | "files-filter"
   | "model-filter";
-
-function stableRenderSignature(state: DeckState): string {
-  const clean = (value: unknown): unknown => {
-    if (Array.isArray(value)) return value.map(clean);
-    if (value instanceof Map)
-      return [...value.entries()].map(([key, item]) => [key, clean(item)]);
-    if (value && typeof value === "object")
-      return Object.fromEntries(
-        Object.entries(value as Record<string, unknown>)
-          .filter(
-            ([key]) =>
-              !/^(seq|adapterSeq|heartbeatAt|lastHeartbeatAt|updatedAt|timestamp)$/i.test(
-                key,
-              ),
-          )
-          .map(([key, item]) => [key, clean(item)]),
-      );
-    return value;
-  };
-  return JSON.stringify(
-    clean({
-      agents: state.agents,
-      tasks: state.tasks,
-      runs: state.runs,
-      workflows: state.workflows,
-      groups: state.groups,
-      questions: state.questions,
-      results: state.results,
-      providerProjections: state.providerProjections,
-    }),
-  );
-}
 
 const NAV_TABS: readonly DeckTab[] = [
   "home",
@@ -102,6 +76,7 @@ export class BrokerDeckApp implements Component {
   readonly #getHeight: () => number;
   readonly #targetPaneId: string | undefined;
   readonly #onClose: () => void;
+  readonly #onRenderDecision: BrokerDeckAppOptions["onRenderDecision"];
   readonly #unsubscribers: Array<() => void> = [];
   readonly #tracker = new PressReleaseTracker();
   #status: BrokerStatus;
@@ -144,8 +119,9 @@ export class BrokerDeckApp implements Component {
     this.#getHeight = options.getHeight;
     this.#targetPaneId = options.targetPaneId;
     this.#onClose = options.onClose ?? (() => undefined);
+    this.#onRenderDecision = options.onRenderDecision;
     this.#status = options.client.status;
-    this.#renderSignature = stableRenderSignature(options.client.store.state);
+    this.#renderSignature = this.visibleSignature(options.client.store.state);
     this.#unsubscribers.push(
       options.client.onStatus((status) => {
         this.#status = status;
@@ -153,6 +129,7 @@ export class BrokerDeckApp implements Component {
       }),
       options.client.store.onChange((state) => {
         const projection = currentProviderProjection(state, this.#targetPaneId);
+        const previousMessage = this.#message;
         if (
           this.#message &&
           ((projection?.files?.available &&
@@ -163,8 +140,10 @@ export class BrokerDeckApp implements Component {
               )))
         )
           this.#message = "";
-        const signature = stableRenderSignature(state);
-        if (signature === this.#renderSignature) return;
+        const signature = this.visibleSignature(state);
+        const rendered = signature !== this.#renderSignature || previousMessage !== this.#message;
+        this.#onRenderDecision?.({ rendered, tab: this.#tab, workView: this.#workView });
+        if (!rendered) return;
         this.#renderSignature = signature;
         this.#requestRender();
       }),
@@ -221,6 +200,7 @@ export class BrokerDeckApp implements Component {
             activate: () => {
               this.#workView = view;
               this.#closeConfirmation = undefined;
+              this.syncVisibleSignature();
             },
           }),
         ),
@@ -730,6 +710,18 @@ export class BrokerDeckApp implements Component {
     return `${value[0]?.toUpperCase() ?? ""}${value.slice(1)}`;
   }
 
+  private visibleSignature(state = this.#client.store.state): string {
+    return visibleSurfaceSignature(state, {
+      tab: this.#tab,
+      workView: this.#workView,
+      ...(this.#targetPaneId ? { targetPaneId: this.#targetPaneId } : {}),
+    });
+  }
+
+  private syncVisibleSignature(): void {
+    this.#renderSignature = this.visibleSignature();
+  }
+
   private selectTab(tab: DeckTab): void {
     // Input belongs to the tab that opened it. Never carry it into another tab.
     this.#inputMode = undefined;
@@ -743,6 +735,7 @@ export class BrokerDeckApp implements Component {
     }
     this.#closeConfirmation = undefined;
     this.#tracker.reset();
+    this.syncVisibleSignature();
     if (tab === "more") {
       this.#settingsScroll = 0;
       void this.loadSettings();
