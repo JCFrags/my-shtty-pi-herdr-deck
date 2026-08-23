@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { visibleWidth } from "@pi-herdr-deck/tui";
 import test from "node:test";
 import { BrokerClient } from "../../src/deck/broker-client.js";
 import { BrokerDeckApp } from "../../src/deck/broker-app.js";
@@ -34,10 +35,30 @@ test("production deck entry binds to an authenticated fake broker snapshot", asy
   const output = app.render(120).join("\\n");
   assert.match(output, /AGENT BOARD/);
   assert.match(output, /Build deck/);
-  const narrowNavigation = app.render(30).slice(1, 4).join(" ");
+  const narrowHeader = app.render(30);
+  assert.ok(narrowHeader.every((line) => visibleWidth(line) <= 30));
+  const narrowNavigation = narrowHeader.slice(1, 5).join(" ");
   for (const label of ["Board", "Files", "Agents", "Activity"])
     assert.match(narrowNavigation, new RegExp(label, "i"));
+  assert.match(narrowHeader.join(" "), /Settings/);
+  assert.match(narrowHeader.join(" "), /Help/);
   assert.doesNotMatch(narrowNavigation, /Home|Work/);
+  const activityY = narrowHeader.findIndex((line) =>
+    line.includes("Activity 4"),
+  );
+  assert.ok(activityY >= 0);
+  const activityX = narrowHeader[activityY]!.indexOf("Activity 4") + 1;
+  for (const type of ["press", "release"] as const)
+    app.handleMouse({
+      type,
+      button: "left",
+      x: activityX,
+      y: activityY,
+      shift: false,
+      alt: false,
+      ctrl: false,
+    });
+  assert.match(app.render(120).join("\n"), /ACTIVITY/);
   app.handleInput("2");
   assert.match(app.render(120).join("\n"), /FILES/);
   app.handleInput("1");
