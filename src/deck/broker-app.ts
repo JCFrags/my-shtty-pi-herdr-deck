@@ -187,7 +187,10 @@ export class BrokerDeckApp implements Component {
       options.client.store.onChange((state) => {
         if (
           this.#overlay.kind === "agent-more" &&
-          !isAgentMoreGuardCurrent(state, this.#overlay.guard)
+          !isAgentMoreGuardCurrent(
+            this.scopedWorkState(state),
+            this.#overlay.guard,
+          )
         )
           this.closeOverlay();
         const projection = currentProviderProjection(state, this.#targetPaneId);
@@ -552,7 +555,7 @@ export class BrokerDeckApp implements Component {
   private ensureAgentMoreCurrent(): boolean {
     if (
       this.#overlay.kind === "agent-more" &&
-      !isAgentMoreGuardCurrent(this.#client.store.state, this.#overlay.guard)
+      !this.guardedAgent(this.#overlay.guard)
     ) {
       this.closeOverlay();
       this.syncVisibleSignature();
@@ -565,7 +568,7 @@ export class BrokerDeckApp implements Component {
     const overlay = this.#overlay;
     if (overlay.kind !== "agent-more" || !this.ensureAgentMoreCurrent()) return;
     const presentation = openAgentMore(
-      this.#client.store.state,
+      this.scopedWorkState(this.#client.store.state),
       overlay.guard,
       overlay.focusedIndex ?? 0,
       this.agentActionContract(),
@@ -586,7 +589,7 @@ export class BrokerDeckApp implements Component {
   ): void {
     if (!this.ensureAgentMoreCurrent()) return;
     const presentation = openAgentMore(
-      this.#client.store.state,
+      this.scopedWorkState(this.#client.store.state),
       guard,
       index,
       this.agentActionContract(),
@@ -596,7 +599,7 @@ export class BrokerDeckApp implements Component {
       return;
     }
     activateAgentMore(
-      this.#client.store.state,
+      this.scopedWorkState(this.#client.store.state),
       presentation,
       this.agentActionContract(),
     );
@@ -636,7 +639,7 @@ export class BrokerDeckApp implements Component {
         return renderHelpScreen(width, () => this.closeOverlay());
       case "agent-more": {
         const presentation = openAgentMore(
-          this.#client.store.state,
+          this.scopedWorkState(this.#client.store.state),
           overlay.guard,
           overlay.focusedIndex ?? 0,
           this.agentActionContract(),
@@ -730,8 +733,10 @@ export class BrokerDeckApp implements Component {
     }
     if (overlay.kind === "agent-more") {
       if (data === "m" || data === "\u001b") this.closeOverlay();
-      else if (data === "\u001b[A" || data === "k") this.setAgentMoreFocus(-1);
-      else if (data === "\u001b[B" || data === "j") this.setAgentMoreFocus(1);
+      else if (data === "\u001b[A" || data === "k" || data === "\u001b[Z")
+        this.setAgentMoreFocus(-1);
+      else if (data === "\u001b[B" || data === "j" || data === "\t")
+        this.setAgentMoreFocus(1);
       else if (data === "\r" || data === "\n")
         this.activateAgentMore(overlay.guard, overlay.focusedIndex ?? 0);
       return;
@@ -955,14 +960,7 @@ export class BrokerDeckApp implements Component {
         accepted = await this.loadSettings();
       } else if (overlay.purpose === "default")
         accepted = await this.setDefault(value);
-      else {
-        // The broker request is launched synchronously. Close the editor now
-        // so navigation is not blocked while the request settles.
-        const request = this.run(overlay.purpose, value, target);
-        this.closeOverlay();
-        await request;
-        return;
-      }
+      else accepted = await this.run(overlay.purpose, value, target);
       if (!accepted) {
         this.#overlay = {
           ...overlay,
@@ -1212,9 +1210,7 @@ export class BrokerDeckApp implements Component {
         this.closeOverlay();
         return;
       }
-      // The guard validates the current board item. Keep the original target
-      // identity so a confirmation cannot silently switch sources.
-      target = overlay.target;
+      target = actionTargetForBoardItem(item, this.productTargetContext());
     } else if (
       overlay.action === "groupStop" ||
       overlay.action === "groupClose"
@@ -1245,9 +1241,7 @@ export class BrokerDeckApp implements Component {
         this.closeOverlay();
         return;
       }
-      // The guard validates the current board item. Keep the original target
-      // identity so a confirmation cannot silently switch sources.
-      target = overlay.target;
+      target = actionTargetForBoardItem(item, this.productTargetContext());
     } else {
       const agentId =
         overlay.target.agent?.id ?? guard.agentId ?? guard.targetId;

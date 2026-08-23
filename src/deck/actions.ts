@@ -140,7 +140,10 @@ const guards: Record<DeckAction, Guard> = {
       : "Follow-up requires a working agent.",
   answer: requireQuestion,
   interrupt: requireAgent,
-  compact: requireAgent,
+  compact: (target) =>
+    target.agent?.state === "idle"
+      ? undefined
+      : "Compact requires an idle agent.",
   setModel: requireAgent,
   setThinking: requireAgent,
   restart: requireAgent,

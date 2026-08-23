@@ -86,6 +86,22 @@ export type ActivityDetail =
     }
   | SignalActivityDetail
   | SystemActivityDetail;
+const activityRecord = (value: unknown): BoardRecord =>
+  value && typeof value === "object" && !Array.isArray(value)
+    ? (value as BoardRecord)
+    : {};
+
+const activityText = (value: unknown): string | undefined => {
+  if (typeof value === "string") return value;
+  if (value && typeof value === "object") {
+    const record = activityRecord(value);
+    const candidate =
+      record.text ?? record.summary ?? record.outcome ?? record.statusLabel;
+    return typeof candidate === "string" ? candidate : undefined;
+  }
+  return undefined;
+};
+
 export function activityDetail(item: ActivityItem): ActivityDetail {
   const base = {
     id: item.entityId,
@@ -115,35 +131,59 @@ export function activityDetail(item: ActivityItem): ActivityDetail {
     }
     default: {
       const source = item.source as BoardRecord;
+      const projection = activityRecord(source.projection);
+      const nested = activityRecord(
+        source.item ?? source.decision ?? projection.item ?? source,
+      );
+      const answer = activityRecord(projection.answer ?? source.answer);
+      const acknowledgement = activityRecord(
+        projection.acknowledgement ?? source.acknowledgement,
+      );
       return {
         kind: item.kind,
         ...base,
-        ...(typeof source.changedAt === "string"
-          ? { changedAt: source.changedAt }
+        ...(typeof (nested.changedAt ?? source.changedAt) === "string"
+          ? { changedAt: String(nested.changedAt ?? source.changedAt) }
           : {}),
-        ...(typeof source.createdAt === "string"
-          ? { createdAt: source.createdAt }
+        ...(typeof (nested.createdAt ?? source.createdAt) === "string"
+          ? { createdAt: String(nested.createdAt ?? source.createdAt) }
           : {}),
-        ...(typeof source.updatedAt === "string"
-          ? { updatedAt: source.updatedAt }
+        ...(typeof (nested.updatedAt ?? source.updatedAt) === "string"
+          ? { updatedAt: String(nested.updatedAt ?? source.updatedAt) }
           : {}),
-        ...(typeof source.terminalAt === "string"
-          ? { terminalAt: source.terminalAt }
+        ...(typeof (source.terminalAt ?? projection.terminalAt) === "string"
+          ? { terminalAt: String(source.terminalAt ?? projection.terminalAt) }
           : {}),
-        ...(typeof source.detail === "string" ? { detail: source.detail } : {}),
-        ...(typeof source.stage === "string" ? { stage: source.stage } : {}),
-        ...(typeof source.outcome === "string"
-          ? { outcome: source.outcome }
+        ...(activityText(nested.detail ?? projection.detail)
+          ? { detail: activityText(nested.detail ?? projection.detail) }
           : {}),
-        ...(typeof source.answer === "string" ? { answer: source.answer } : {}),
-        ...(typeof source.revision === "number"
-          ? { revision: source.revision }
+        ...(typeof nested.stage === "string" ? { stage: nested.stage } : {}),
+        ...(typeof (nested.outcome ?? source.outcome) === "string"
+          ? { outcome: String(nested.outcome ?? source.outcome) }
           : {}),
-        ...(typeof source.deliveryState === "string"
-          ? { deliveryState: source.deliveryState }
+        ...(activityText(answer.value ?? answer.text ?? acknowledgement.outcome)
+          ? {
+              answer: activityText(
+                answer.value ?? answer.text ?? acknowledgement.outcome,
+              ),
+            }
           : {}),
-        retryableDelivery: source.retryableDelivery === true,
-        archivable: source.archivable === true,
+        ...(typeof (nested.revision ?? source.revision) === "number"
+          ? { revision: Number(nested.revision ?? source.revision) }
+          : {}),
+        ...(typeof (projection.deliveryState ?? source.deliveryState) ===
+        "string"
+          ? {
+              deliveryState: String(
+                projection.deliveryState ?? source.deliveryState,
+              ),
+            }
+          : {}),
+        retryableDelivery:
+          (projection.retryableDelivery ?? source.retryableDelivery) === true,
+        archivable:
+          (nested.archivable ?? source.archivable) === true ||
+          nested.archived === false,
       } as ActivityDetail;
     }
   }

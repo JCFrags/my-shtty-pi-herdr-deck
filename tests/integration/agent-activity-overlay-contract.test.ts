@@ -106,6 +106,14 @@ test("BrokerDeckApp Agent More uses the exact generation guard for rendering and
   app.handleInput("3");
   app.handleInput("m");
   assert.match(app.render(100).join("\n"), /AGENT MORE/);
+  assert.match(app.render(100).join("\n"), /\(Compact\)/);
+  app.handleInput("\n");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.length, 0);
+
+  client.store.replace(snapshot(owner({ state: "idle", generation: 1 })));
+  app.invalidate();
+  assert.match(app.render(100).join("\n"), /\[Compact\]/);
   app.handleInput("\n");
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(requests.at(-1), {
