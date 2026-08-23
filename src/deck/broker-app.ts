@@ -34,8 +34,10 @@ import { visibleSurfaceSignature } from "./render-dependencies.js";
 import {
   selectActivityPresentation,
   selectUnifiedBoardPresentation,
+  type ActivityFilter,
   type ActivityItem,
   type AgentBoardTab,
+  type BoardFilter,
   type BoardItem,
 } from "./product-presentation.js";
 import {
@@ -136,7 +138,10 @@ export class BrokerDeckApp implements Component {
   #boardTab: "inbox" | "updates" | "decisions" | "history" = "inbox";
   #boardSelection: string | undefined;
   #unifiedBoardSelection: string | undefined;
+  #boardFilter: BoardFilter = "all-current";
+  #boardScroll = 0;
   #activitySelection: string | undefined;
+  #activityFilter: ActivityFilter = "all";
   #activityScroll = 0;
   #settingsOpen = false;
   #helpOpen = false;
@@ -313,6 +318,9 @@ export class BrokerDeckApp implements Component {
     else if (data === ",") this.toggleSettings();
     else if (data === "?") this.toggleHelp();
     else if (data === "r") void this.run("refresh");
+    else if (data === "v" && this.#tab === "board") this.cycleBoardFilter();
+    else if (data === "v" && this.#tab === "activity")
+      this.cycleActivityFilter();
     else if (data === "n" && this.#tab === "agents") this.beginInput("create");
     else if (data === "/" && this.#tab === "files")
       this.beginInput("files-filter");
@@ -403,6 +411,10 @@ export class BrokerDeckApp implements Component {
         this.#filesWheelDetached = true;
         this.#filesScroll = Math.max(0, this.#filesScroll + delta);
       } else if (this.#tab === "files") return false;
+      else if (this.#tab === "board")
+        this.#boardScroll = Math.max(0, this.#boardScroll + delta);
+      else if (this.#tab === "activity")
+        this.#activityScroll = Math.max(0, this.#activityScroll + delta);
       else this.move(delta);
       this.syncVisibleSignature();
       this.#requestRender();
@@ -433,6 +445,8 @@ export class BrokerDeckApp implements Component {
       agentFilter: this.#agentFilter,
       agentPage: this.#agentPage,
       boardTab: this.#boardTab,
+      boardFilter: this.#boardFilter,
+      activityFilter: this.#activityFilter,
       ...(this.#tab === "activity" && this.#activitySelection
         ? { boardSelectionId: this.#activitySelection }
         : this.#unifiedBoardSelection
@@ -716,6 +730,26 @@ export class BrokerDeckApp implements Component {
     }
   }
 
+  private cycleBoardFilter(): void {
+    const filters: BoardFilter[] = ["attention", "active", "all-current"];
+    this.#boardFilter =
+      filters[(filters.indexOf(this.#boardFilter) + 1) % filters.length]!;
+    this.#boardScroll = 0;
+  }
+
+  private cycleActivityFilter(): void {
+    const filters: ActivityFilter[] = [
+      "all",
+      "results",
+      "signals",
+      "agents",
+      "errors",
+    ];
+    this.#activityFilter =
+      filters[(filters.indexOf(this.#activityFilter) + 1) % filters.length]!;
+    this.#activityScroll = 0;
+  }
+
   private renderUnifiedBoard(
     lines: string[],
     width: number,
@@ -725,16 +759,61 @@ export class BrokerDeckApp implements Component {
       state,
       this.#targetPaneId,
       this.#unifiedBoardSelection,
+      this.#boardFilter,
     );
     lines.push(
       `BOARD  ${model.counts.work} current · ${model.counts.attention} need attention · ${model.counts.recentSignals} recent Signals`,
-      "NEEDS ATTENTION  Questions, blocked work, and waits",
     );
-    this.renderBoardItems(lines, width, model.attention);
-    lines.push("", "CURRENT WORK  Pi Todo and orchestrator work");
-    this.renderBoardItems(lines, width, model.work);
-    lines.push("", "RECENT SIGNALS  Active provider updates");
-    this.renderBoardItems(lines, width, model.recentSignals);
+    this.addControlRow(
+      lines,
+      (["attention", "active", "all-current"] as const).map((filter) => ({
+        id: `board:filter:${filter}`,
+        label: this.#boardFilter === filter ? `[${filter}]` : filter,
+        activate: () => {
+          this.#boardFilter = filter;
+          this.#boardScroll = 0;
+        },
+      })),
+      width,
+    );
+    const rowBudget = Math.max(4, this.#getHeight() - lines.length - 12);
+    const selectedIndex = model.selected
+      ? model.visible.findIndex((item) => item.id === model.selected?.id)
+      : -1;
+    if (selectedIndex >= 0) {
+      if (selectedIndex < this.#boardScroll) this.#boardScroll = selectedIndex;
+      if (selectedIndex >= this.#boardScroll + rowBudget)
+        this.#boardScroll = selectedIndex - rowBudget + 1;
+    }
+    this.#boardScroll = Math.max(
+      0,
+      Math.min(
+        this.#boardScroll,
+        Math.max(0, model.visible.length - rowBudget),
+      ),
+    );
+    let priorSection: BoardItem["section"] | undefined;
+    for (const item of model.visible.slice(
+      this.#boardScroll,
+      this.#boardScroll + rowBudget,
+    )) {
+      if (item.section !== priorSection) {
+        lines.push(
+          item.section === "attention"
+            ? "NEEDS ATTENTION"
+            : item.section === "work"
+              ? "CURRENT WORK"
+              : "RECENT SIGNALS",
+        );
+        priorSection = item.section;
+      }
+      this.renderBoardItems(lines, width, [item]);
+    }
+    if (model.visible.length === 0) lines.push("✓ No items match this filter.");
+    if (model.visible.length > rowBudget)
+      lines.push(
+        `  ↕ ${this.#boardScroll + 1}-${Math.min(model.visible.length, this.#boardScroll + rowBudget)} of ${model.visible.length}`,
+      );
     const selected = model.selected;
     if (!selected) return;
     this.selectBoardItem(selected);
@@ -970,11 +1049,25 @@ export class BrokerDeckApp implements Component {
       state,
       this.#targetPaneId,
       this.#activitySelection,
+      this.#activityFilter,
+      this.#client.store.notifications,
     );
-    lines.push(
-      "ACTIVITY  Results · decisions · updates · groups · lifecycle",
-      `${model.items.length} retained events`,
+    lines.push("ACTIVITY  Results · decisions · updates · groups · lifecycle");
+    this.addControlRow(
+      lines,
+      (["all", "results", "signals", "agents", "errors"] as const).map(
+        (filter) => ({
+          id: `activity:filter:${filter}`,
+          label: this.#activityFilter === filter ? `[${filter}]` : filter,
+          activate: () => {
+            this.#activityFilter = filter;
+            this.#activityScroll = 0;
+          },
+        }),
+      ),
+      width,
     );
+    lines.push(`${model.items.length} retained events`);
     if (model.items.length === 0)
       lines.push("✓ No historical activity is available.");
     const rowBudget = Math.max(4, this.#getHeight() - lines.length - 8);
@@ -1626,6 +1719,7 @@ export class BrokerDeckApp implements Component {
         state,
         this.#targetPaneId,
         this.#unifiedBoardSelection,
+        this.#boardFilter,
       );
       const items = model.visible;
       if (items.length > 0) {
@@ -1642,6 +1736,8 @@ export class BrokerDeckApp implements Component {
         state,
         this.#targetPaneId,
         this.#activitySelection,
+        this.#activityFilter,
+        this.#client.store.notifications,
       );
       if (model.items.length > 0) {
         const index = Math.max(

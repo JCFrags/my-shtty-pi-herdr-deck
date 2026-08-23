@@ -192,6 +192,7 @@ function activityModel(
     context.targetPaneId,
     context.boardSelectionId,
     context.activityFilter ?? "all",
+    context.notifications ?? [],
   );
   const selected = presentation.selected;
   const scoped = selectAdoptedScope(state, context.targetPaneId).state;

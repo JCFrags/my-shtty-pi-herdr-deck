@@ -76,11 +76,11 @@ The unified orchestrator extension is the sole owner of `/agent-board`. `/agent-
 
 ## Board item taxonomy
 
-`BoardItem` is a discriminated union with `todo`, `task`, `group`, `broker-question`, `signal-question`, `signal-update`, and `signal-recommendation`. Keys include the source kind, so equal source IDs do not collapse. Todo and orchestrator tasks remain separate. Current work excludes terminal tasks and groups. Attention contains unanswered broker questions and current Signals questions, updates, and recommendations. Stable kind-plus-ID ordering prevents map insertion order from changing the UI.
+`BoardItem` is a discriminated union with `todo`, `task`, `group`, `broker-question`, `signal-question`, `signal-update`, and `agent-alert`. Source-qualified keys prevent equal source IDs from collapsing. Needs Attention contains questions, blocked work, waits, and unrepresented blocked agents. Current Work contains nonterminal Todo, task, and group items. Recent Signals contains active update rows. Signals decisions belong only in Activity. Recommendation data belongs to its Signals question. Questions supersede their linked blocked task or group. Deterministic severity, state, source, timestamp, and stable-ID ordering does not depend on map insertion order.
 
 ## Activity item taxonomy
 
-`ActivityItem` contains `result`, terminal `task`, terminal `group`, terminal `agent`, `signal-update`, `signal-decision`, and `signal-history`. The adopted scope filters broker entities. Provider tabs stay bounded by the Signals presentation selector. Stable kind-plus-ID ordering gives deterministic fallback selection.
+`ActivityItem` contains results, terminal tasks, terminal groups, terminal agents, Signals updates, Signals decisions, Signals history, system errors, and system recoveries. A result supersedes its related terminal task. Signals entities are deduplicated across tabs. The agent history states are `stopped`, `failed`, `orphaned`, and `replaced`. Filters select All, Results, Signals, Agents, or Errors. Meaningful timestamps and stable IDs give deterministic order and fallback selection.
 
 ## Files interaction contract
 
@@ -91,13 +91,14 @@ The provider view is authoritative. A focused path and provider selection are di
 - Clicking a checkbox changes provider selection.
 - Enter can perform the explicit combined keyboard action.
 - Tree and preview have independent scroll state.
-- Filtering uses the provider action and a bounded local display filter for compatibility.
-- The action bar supports refresh, preview, clear, insert paths, insert contents, and standalone open.
+- Filtering uses one provider-authoritative query. An empty query clears it.
+- Provider state owns hidden visibility, selected context estimates, and the bounded persistent preview.
+- The one action bar supports refresh, clear, insert paths, insert contents, and standalone open.
 - The deck never reads arbitrary files directly.
 
 ## Responsive behavior
 
-Wide terminals keep enough room for list and detail information. Narrow terminals keep rows and controls in one column. Control rows wrap. Hit boxes are created from emitted geometry, not ANSI output. Files caret, checkbox, row, tree-scroll, and preview-scroll regions are independent.
+At 78 columns and wider, Files allocates about 38 percent to Tree and 62 percent to Preview. Narrow Files uses Tree and Preview panes. Board keeps a bounded list and selected detail. Control rows wrap. Hit boxes use emitted coordinates, not label searches or ANSI output. Files caret, checkbox, row, tree-scroll, and preview-scroll regions are independent.
 
 ## Render invariants
 
@@ -144,7 +145,7 @@ AGENTS · ACTIVE
   worker-b  idle
 AGENT DETAIL
 Model openai-codex/gpt-5.6-luna
-[Focus] [Prompt] [Ask] [Interrupt] [Stop] [Close]
+[Focus] [Prompt] [Ask] [Steer] [Follow-up] [Interrupt] [Stop] [More…]
 ```
 
 ### Activity
@@ -153,7 +154,7 @@ Model openai-codex/gpt-5.6-luna
 ACTIVITY  Results · decisions · updates · groups · lifecycle
 > [accepted] Validation passed
   [decision] SIGNALS · Keep compatibility alias
-  [closed] group release-check
+  [stopped] agent release-check
 ```
 
 ### Settings

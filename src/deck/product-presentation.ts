@@ -7,6 +7,7 @@ import type {
 } from "../shared/provider-projections.js";
 import type {
   DeckGroup,
+  DeckNotification,
   DeckQuestion,
   DeckResult,
   DeckState,
@@ -574,6 +575,7 @@ export function selectActivityPresentation(
   targetPaneId?: string,
   selectedId?: string,
   filter: ActivityFilter = "all",
+  notifications: readonly DeckNotification[] = [],
 ): ActivityPresentation {
   const provider = currentProviderProjection(state, targetPaneId);
   const scoped = selectAdoptedScope(state, targetPaneId).state;
@@ -667,6 +669,31 @@ export function selectActivityPresentation(
       signalByEntity.set(item.entityId, item);
   }
   items.push(...signalByEntity.values());
+  for (const notification of notifications.slice(-100)) {
+    if (
+      !["failure", "timeout", "budget", "recovery"].includes(notification.kind)
+    )
+      continue;
+    const recovery = notification.kind === "recovery";
+    items.push(
+      activityItem({
+        uiId: `system:${notification.id}`,
+        entityId: notification.id,
+        kind: recovery ? "system-recovery" : "system-error",
+        title: recovery ? "System recovery" : `System ${notification.kind}`,
+        summary: notification.text,
+        state: notification.kind,
+        sortTimestamp: String(notification.seq).padStart(16, "0"),
+        source: {
+          id: notification.id,
+          title: notification.text,
+          state: notification.kind,
+          sequence: notification.seq,
+        },
+        actions: { actions: ["copy-id"] },
+      }),
+    );
+  }
   const include = (item: ActivityItem): boolean =>
     filter === "all" ||
     (filter === "results" &&

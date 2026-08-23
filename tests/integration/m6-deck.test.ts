@@ -299,8 +299,8 @@ test("broker deck keyboard entry prompts and confirms close", async () => {
   );
 
   app.handleInput("x");
-  assert.match(app.render(120).join("\n"), /Press x again to close Alpha/);
-  app.handleInput("x");
+  assert.match(app.render(120).join("\n"), /CONFIRMATION[\s\S]*Close Alpha\?/);
+  app.handleInput("y");
   await waitForM6(() =>
     broker.requests.some((request) => request.method === "agent.close"),
   );

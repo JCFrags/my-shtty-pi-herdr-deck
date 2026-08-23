@@ -49,7 +49,7 @@ Each new agent has an explicit provider, model, and thinking selection. Selectio
 
 The broker reads `~/.config/pi-herdr-orchestrator/config.json` by default. Set `PI_HERDR_ORCH_CONFIG_PATH` to use a different owner-controlled file. Use `modelPolicy.defaults.global`, `modelPolicy.defaults.projects`, and `modelPolicy.defaults.roles` for scoped defaults. An optional allowlist can restrict the effective selection. The broker and provisioner validate the model and its exact thinking levels against the installed Pi catalog before they create a Herdr resource. This includes `xhigh` and `max` only when the installed model reports support.
 
-The More view shows installed choices. Press `d` to save a scoped default. Open Agents and press `n` to create an agent with an explicit provider, model, thinking level, and lifecycle class. The `agent_spawn` tool provides the same explicit fields for direct tool workflows. Pi always starts with explicit `--provider`, provider-qualified `--model`, and `--thinking` arguments. Managed registration must report the same selection.
+The Settings overlay shows installed choices. Press `d` in Settings to save a scoped default. Open Agents and press `n` to create an agent with an explicit provider, model, thinking level, and lifecycle class. The `agent_spawn` tool provides the same explicit fields for direct tool workflows. Pi always starts with explicit `--provider`, provider-qualified `--model`, and `--thinking` arguments. Managed registration must report the same selection.
 
 Lifecycle classes are `temporary`, `reusable`, `retained`, and `pinned`. Agent lists and the inspector show the class and close recommendation. A temporary agent is recommended for close only after its task is terminal and its result is collected. Reusable agents stay idle and marked for reuse. Press `o` in Settings to enable or disable safe automatic closure. Automatic closure never closes a pinned, retained, reusable, blocked, or active agent. It also never closes an agent with an uncollected result.
 
@@ -141,7 +141,7 @@ Inside a Pi pane managed by Herdr, run `/agent-board` to open the `pi.herdr.orch
 
 Agent Board is a mouse-first right-side control surface. Its stable views are:
 
-- **Board** combines Pi Todo work, orchestrator tasks and groups, broker questions, and Signals questions, updates, and recommendations.
+- **Board** partitions questions, blocked work, and waits into Needs Attention; active Todo, task, and group work into Current Work; and active provider updates into Recent Signals. Recommendation data belongs to a Signals question. Signals decisions appear only in Activity.
 - **Files** shows the provider-backed repository tree and preview. Row, caret, and checkbox clicks have separate actions. Tree and preview scrolling are independent.
 - **Agents** keeps broker-owned lifecycle, model, thinking, prompt, ask, stop, and close controls.
 - **Activity** combines retained results, decisions, updates, terminal tasks, groups, and agent lifecycle records.

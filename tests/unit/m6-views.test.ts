@@ -356,7 +356,7 @@ test("views expose state and result meaning without color", () => {
   );
 });
 
-test("switching tabs cancels the active DEFAULT input", () => {
+test("text input owns numeric tab shortcuts until cancelled", () => {
   const client = new BrokerClient({
     socketPath: "/tmp/m6-input.sock",
     secret: "test",
@@ -370,7 +370,10 @@ test("switching tabs cancels the active DEFAULT input", () => {
   app.handleInput("d");
   assert.match(app.render(120).join("\\n"), /DEFAULT:/);
   app.handleInput("1");
+  assert.match(app.render(120).join("\\n"), /DEFAULT: 1/);
+  app.handleInput("\u001b");
   assert.doesNotMatch(app.render(120).join("\\n"), /DEFAULT:/);
+  assert.match(app.render(120).join("\\n"), /SETTINGS/);
   app.dispose();
   client.stop();
 });
