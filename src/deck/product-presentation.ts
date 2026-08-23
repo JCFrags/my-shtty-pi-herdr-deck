@@ -127,6 +127,7 @@ interface ActivityItemBase<K extends string, S> {
   status: string;
   sortTimestamp: string;
   source: S;
+  revision?: number;
   actions: ItemActionAvailability;
 }
 export type ActivityItem =
@@ -705,6 +706,9 @@ function signalActivity(
         state: text(source.statusLabel ?? source.state ?? source.kind, tab),
         sortTimestamp: rowTimestamp(source),
         source,
+        ...(Number.isSafeInteger(source.revision)
+          ? { revision: Number(source.revision) }
+          : {}),
         actions: {
           actions: [
             ...(source.archivable === true ? ["archive-update"] : []),

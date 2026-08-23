@@ -6,6 +6,7 @@ import { BrokerDeckApp } from "../../src/deck/broker-app.js";
 import type { DeckSnapshot } from "../../src/deck/types.js";
 import type { Agent } from "../../src/state/types.js";
 import type { ProviderProjection } from "../../src/shared/provider-projections.js";
+import { approvedProviderProjection } from "../helpers/final-render-provider-fixtures.js";
 import { FakeDeckBroker, waitForM6 } from "../helpers/m6-deck-fixtures.js";
 
 const owner: Agent = {
@@ -46,12 +47,13 @@ const snapshot = (projection = provider()): DeckSnapshot => ({
 function appFor(
   client: BrokerClient,
   requestRender: () => void = () => undefined,
+  height = 40,
 ): BrokerDeckApp {
   return new BrokerDeckApp({
     client,
     targetPaneId: "pane-1",
     requestRender,
-    getHeight: () => 40,
+    getHeight: () => height,
   });
 }
 
@@ -114,6 +116,31 @@ test("BrokerDeckApp Files refresh captures the exact provider snapshot request",
   client.stop();
 });
 
+test("BrokerDeckApp renders approved Signals and Files contracts across widths and heights", () => {
+  const client = new BrokerClient({
+    socketPath: "/tmp/final-render-contracts.sock",
+    secret: "test",
+  });
+  client.store.replace(snapshot(approvedProviderProjection()));
+  const app = appFor(client);
+  for (const width of [50, 70, 78, 80, 100, 120])
+    for (const height of [8, 18, 40])
+      for (const tab of ["1", "2", "3", "4"]) {
+        const sizedApp = appFor(client, () => undefined, height);
+        sizedApp.handleInput(tab);
+        const lines = sizedApp.render(width);
+        assert.equal(lines.length, height, `${tab} at ${width}x${height}`);
+        assert.ok(
+          lines.every((line) => visibleWidth(line) <= width),
+          `${tab} at ${width}x${height}`,
+        );
+        sizedApp.dispose();
+      }
+  app.handleInput("2");
+  assert.match(app.render(120).join("\n"), /FILES/);
+  app.dispose();
+});
+
 test("BrokerDeckApp render gate ignores provider churn but reacts to visible body and shell changes", () => {
   let renders = 0;
   const client = new BrokerClient({
@@ -137,7 +164,7 @@ test("BrokerDeckApp render gate ignores provider churn but reacts to visible bod
     }),
   );
   const afterTodo = renders;
-  assert.ok(afterTodo === baseline || afterTodo === baseline + 1);
+  assert.equal(afterTodo, baseline);
 
   client.store.replace(
     snapshot(

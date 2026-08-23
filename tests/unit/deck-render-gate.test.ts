@@ -4,7 +4,10 @@ import type { TuiMouseEvent } from "@pi-herdr-deck/tui";
 import { BrokerDeckApp } from "../../src/deck/broker-app.js";
 import { renderButton } from "../../src/deck/components/controls.js";
 import { BrokerClient } from "../../src/deck/broker-client.js";
-import { visibleSurfaceSignature } from "../../src/deck/render-dependencies.js";
+import {
+  shellHeaderPresentation,
+  visibleSurfaceSignature,
+} from "../../src/deck/render-dependencies.js";
 import {
   currentProviderProjection,
   selectAdoptedRootAgent,
@@ -892,5 +895,126 @@ test("Files mouse regions keep preview, selection, and expansion distinct", asyn
   assert.match(scrolled, /line 2/);
   assert.doesNotMatch(scrolled, /\nline 1\n/);
   assert.match(scrolled, /app\.ts/);
+  app.dispose();
+});
+
+test("visible signatures derive guarded overlay state and exact action availability", () => {
+  const guarded = state();
+  guarded.tasks.set("task-1", {
+    id: "task-1",
+    state: "running",
+    title: "Task",
+    assignedAgentId: "agent-1",
+  } as never);
+  const overlay = {
+    tab: "board" as const,
+    targetPaneId: "pane-1",
+    overlay: "confirm" as const,
+    overlayGuard: {
+      kind: "confirm",
+      action: "cancelTask",
+      target: { task: guarded.tasks.get("task-1") },
+      guard: { targetId: "task-1" },
+      summary: "Cancel Task?",
+    },
+  };
+  const baseline = visibleSurfaceSignature(guarded, overlay);
+  guarded.tasks.set("task-1", {
+    ...guarded.tasks.get("task-1")!,
+    state: "succeeded",
+  } as never);
+  assert.notEqual(visibleSurfaceSignature(guarded, overlay), baseline);
+
+  const unrelated = state();
+  const unchanged = visibleSurfaceSignature(unrelated, {
+    tab: "board",
+    targetPaneId: "pane-1",
+    overlay: "agent-more",
+    overlayGuard: {
+      kind: "agent-more",
+      guard: { agentId: "agent-1", generation: 1 },
+    },
+  });
+  unrelated.tasks.set("other", { id: "other", state: "running" } as never);
+  assert.equal(
+    visibleSurfaceSignature(unrelated, {
+      tab: "board",
+      targetPaneId: "pane-1",
+      overlay: "agent-more",
+      overlayGuard: {
+        kind: "agent-more",
+        guard: { agentId: "agent-1", generation: 1 },
+      },
+    }),
+    unchanged,
+  );
+});
+
+test("shell attention is the canonical Board count, including synthetic waits, and scope is safe", () => {
+  const value = state();
+  const provider = value.providerProjections.get("agent-1")!;
+  provider.todo.items = [];
+  provider.todo.waitReason = "provider wait";
+  const shell = shellHeaderPresentation(value, {
+    tab: "board",
+    targetPaneId: "pane-1",
+    online: true,
+  });
+  assert.equal(shell.attentionCount, 1);
+  value.agents.set("agent-1", {
+    ...agent(),
+    displayName: "bad\u001b[31m\u202e",
+  } as Agent);
+  assert.doesNotMatch(
+    shellHeaderPresentation(value, {
+      tab: "board",
+      targetPaneId: "pane-1",
+    }).scopeLabel,
+    /\u001b|\u202e/u,
+  );
+});
+
+test("duplicate provider projection events coalesce before render gating", () => {
+  let renders = 0;
+  const client = new BrokerClient({
+    socketPath: "/tmp/provider-coalescing.sock",
+    secret: "test",
+  });
+  client.store.replace(snapshot());
+  const app = new BrokerDeckApp({
+    client,
+    targetPaneId: "pane-1",
+    requestRender: () => renders++,
+    getHeight: () => 30,
+  });
+  app.handleInput("2");
+  const baseline = renders;
+  assert.equal(
+    client.store.apply({
+      seq: 2,
+      id: "projection-duplicate",
+      event: "presentation.projection.changed",
+      refs: { agentId: "agent-1" },
+      data: { ownerAgentId: "agent-1", projection: projection() },
+    }),
+    true,
+  );
+  assert.equal(renders, baseline);
+  assert.equal(
+    client.store.apply({
+      seq: 3,
+      id: "projection-visible",
+      event: "presentation.projection.changed",
+      refs: { agentId: "agent-1" },
+      data: {
+        ownerAgentId: "agent-1",
+        projection: projection({
+          files: { available: true, view: { rows: ["b"] } },
+        }),
+      },
+    }),
+    true,
+  );
+  assert.equal(renders, baseline + 1);
   app.dispose();
 });
