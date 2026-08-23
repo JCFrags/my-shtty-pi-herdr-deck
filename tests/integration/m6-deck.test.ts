@@ -318,6 +318,7 @@ test("broker deck keyboard entry prompts and confirms close", async () => {
     ).message,
     "Build now.",
   );
+  await waitForM6(() => !app.render(120).join("\n").includes("PROMPT:"));
 
   app.handleInput("x");
   assert.match(app.render(120).join("\n"), /CONFIRMATION[\s\S]*Close Alpha\?/);
