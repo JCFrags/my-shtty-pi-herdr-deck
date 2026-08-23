@@ -456,6 +456,12 @@ export class BrokerDeckApp implements Component {
     else {
       const separator = item.id.indexOf(":");
       this.#boardSelection = item.id.slice(separator + 1);
+      this.#boardTab =
+        item.kind === "signal-question"
+          ? "inbox"
+          : item.kind === "signal-update"
+            ? "updates"
+            : "decisions";
     }
   }
 
@@ -540,6 +546,12 @@ export class BrokerDeckApp implements Component {
             this.beginInput(
               selected.kind === "signal-question" ? "board-answer" : "answer",
             ),
+        },
+        {
+          id: "board:recommendation",
+          label: "Use recommendation",
+          disabled: selected.kind !== "signal-recommendation",
+          activate: () => void this.runBoard("accept-recommendation"),
         },
         {
           id: "board:cancel",
@@ -1217,6 +1229,8 @@ export class BrokerDeckApp implements Component {
     this.#requestRender();
   }
   private async runBoard(action: string): Promise<void> {
+    if (action === "accept-recommendation" && this.#boardTab !== "decisions")
+      return;
     const agent = this.adoptedRootAgent();
     const projection = currentProviderProjection(
       this.#client.store.state,

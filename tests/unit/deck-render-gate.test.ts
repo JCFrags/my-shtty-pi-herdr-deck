@@ -1354,7 +1354,7 @@ test("Files mouse regions keep preview, selection, and expansion distinct", asyn
   app.dispose();
 });
 
-test("Board combines Signals questions, updates, and recommendations", () => {
+test("Board combines and acts on Signals questions, updates, and recommendations", async () => {
   const board = {
     available: true,
     openCount: 1,
@@ -1367,7 +1367,7 @@ test("Board combines Signals questions, updates, and recommendations", () => {
             rows: [{ id: "q1", title: "Question", userAnswerable: true }],
           },
           updates: { rows: [{ id: "u1", title: "Progress update" }] },
-          decisions: { rows: [{ id: "d1", title: "Use recommendation" }] },
+          decisions: { rows: [{ id: "d1", title: "Prefer the cache" }] },
         },
       },
     },
@@ -1377,6 +1377,11 @@ test("Board combines Signals questions, updates, and recommendations", () => {
     secret: "test",
   });
   client.store.replace(snapshot(projection({ agentBoard: board })));
+  const requests: Array<{ method: string; params: any }> = [];
+  (client as any).request = async (method: string, params: unknown) => {
+    requests.push({ method, params });
+    return {};
+  };
   const app = new BrokerDeckApp({
     client,
     targetPaneId: "pane-1",
@@ -1386,11 +1391,17 @@ test("Board combines Signals questions, updates, and recommendations", () => {
   let output = app.render(120).join("\n");
   assert.match(output, /Question/);
   assert.match(output, /Progress update/);
-  assert.match(output, /Use recommendation/);
+  assert.match(output, /Prefer the cache/);
   clickLabel(app, "Progress update");
   output = app.render(120).join("\n");
   assert.match(output, /DETAIL  SIGNAL-UPDATE/);
   assert.ok(output.includes(renderButton("Answer", { disabled: true })));
+  clickLabel(app, "Prefer the cache");
+  clickLabel(app, "Use recommendation");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.at(-1)?.method, "provider.agent_board_action");
+  assert.equal(requests.at(-1)?.params.action, "accept-recommendation");
+  assert.equal(requests.at(-1)?.params.questionId, "d1");
   app.dispose();
 });
 
