@@ -144,7 +144,7 @@ test("Board targets contain only the latest Todo, task, or Signals source", () =
   app.dispose();
 });
 
-test("confirmation keeps its exact guarded task target when state changes", () => {
+test("confirmation re-resolves the exact guarded task to its current object", () => {
   const first = {
     id: "task-guarded",
     title: "Guarded task",
@@ -179,7 +179,11 @@ test("confirmation keeps its exact guarded task target when state changes", () =
   click(app, "Confirm");
   assert.equal(captured.at(-1)?.action, "cancelTask");
   assert.equal(captured.at(-1)?.target.task.id, "task-guarded");
-  assert.equal(captured.at(-1)?.target.task.title, "Guarded task");
+  assert.equal(
+    captured.at(-1)?.target.task.title,
+    "Changed after confirmation opened",
+  );
+  assert.notEqual(captured.at(-1)?.target.task, first);
   app.dispose();
 });
 

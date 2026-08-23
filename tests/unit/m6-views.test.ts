@@ -480,7 +480,14 @@ test("every action has a keyboard-safe authorization result", () => {
   assert.equal(actions.authorize("refresh", {}), undefined);
   const worker = state.agents.get("agt_1");
   assert.ok(worker);
-  assert.equal(actions.authorize("compact", { agent: worker }), undefined);
+  assert.match(
+    actions.authorize("compact", { agent: worker }) ?? "",
+    /idle agent/,
+  );
+  assert.equal(
+    actions.authorize("compact", { agent: { ...worker, state: "idle" } }),
+    undefined,
+  );
   assert.match(
     actions.authorize("focus", { agent: worker }) ?? "",
     /Pane identity/,
