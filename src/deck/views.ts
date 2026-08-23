@@ -6,6 +6,7 @@ import type {
   DeckResult,
   DeckState,
 } from "./types.js";
+import { currentProviderProjection, selectAdoptedScope } from "./scope.js";
 
 const clip = (s: string, width: number): string => {
   const safeWidth = Math.max(0, width);
@@ -105,70 +106,17 @@ function questionForAgent(
   );
 }
 
-export function currentProviderProjection(
-  state: DeckState,
-  targetPaneId?: string,
-) {
-  const projections = [...state.providerProjections.values()];
-  const candidates = projections.filter((projection) => {
-    const agent = state.agents.get(projection.ownerAgentId);
-    return Boolean(
-      agent &&
-      !["closed", "stopped"].includes(agent.state) &&
-      (!targetPaneId || agent.paneId === targetPaneId),
-    );
-  });
-  const ranked = candidates.sort((a, b) => {
-    const agentA = state.agents.get(a.ownerAgentId);
-    const agentB = state.agents.get(b.ownerAgentId);
-    const score = (projection: typeof a, agent: Agent | undefined): number =>
-      (agent && projection.piSessionId === agent.piSessionId ? 8 : 0) +
-      (agent && !agent.parentAgentId ? 4 : 0) +
-      (agent && agent.state !== "idle" ? 1 : 0);
-    const connectionOrder =
-      (agentB?.connectionGeneration ?? 0) - (agentA?.connectionGeneration ?? 0);
-    return connectionOrder || score(b, agentB) - score(a, agentA);
-  });
-  return ranked[0] ?? (targetPaneId ? undefined : projections[0]);
-}
+export { currentProviderProjection } from "./scope.js";
 
 function currentScope(
   state: DeckState,
   targetPaneId?: string,
 ): { agents: Agent[]; tasks: Task[] } {
-  const projection = currentProviderProjection(state, targetPaneId);
-  const targetedRoot = targetPaneId
-    ? [...state.agents.values()].find((agent) => agent.paneId === targetPaneId)
-    : undefined;
-  const rootAgentId = targetedRoot?.id ?? projection?.ownerAgentId;
-  if (!rootAgentId) return { agents: [], tasks: [] };
-  const included = new Set([rootAgentId]);
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const agent of state.agents.values())
-      if (
-        !included.has(agent.id) &&
-        agent.parentAgentId &&
-        included.has(agent.parentAgentId)
-      ) {
-        included.add(agent.id);
-        changed = true;
-      }
-  }
-  const agents = [...state.agents.values()].filter((agent) =>
-    included.has(agent.id),
-  );
-  const tasks = [...state.tasks.values()].filter((task) => {
-    const run = task.currentRunId
-      ? state.runs.get(task.currentRunId)
-      : undefined;
-    return Boolean(
-      (task.assignedAgentId && included.has(task.assignedAgentId)) ||
-      (run?.agentId && included.has(run.agentId)),
-    );
-  });
-  return { agents, tasks };
+  const scoped = selectAdoptedScope(state, targetPaneId).state;
+  return {
+    agents: [...scoped.agents.values()],
+    tasks: [...scoped.tasks.values()],
+  };
 }
 
 export interface AgentPortfolioCounts {

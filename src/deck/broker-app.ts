@@ -36,6 +36,7 @@ import {
   type VisibleDeckTab,
   type VisibleWorkView,
 } from "./render-dependencies.js";
+import { selectAdoptedScope } from "./scope.js";
 
 export interface BrokerDeckAppOptions {
   client: BrokerClient;
@@ -43,7 +44,11 @@ export interface BrokerDeckAppOptions {
   getHeight(): number;
   targetPaneId?: string;
   onClose?(): void;
-  onRenderDecision?(decision: { rendered: boolean; tab: VisibleDeckTab; workView: VisibleWorkView }): void;
+  onRenderDecision?(decision: {
+    rendered: boolean;
+    tab: VisibleDeckTab;
+    workView: VisibleWorkView;
+  }): void;
 }
 
 type DeckTab = VisibleDeckTab;
@@ -141,8 +146,14 @@ export class BrokerDeckApp implements Component {
         )
           this.#message = "";
         const signature = this.visibleSignature(state);
-        const rendered = signature !== this.#renderSignature || previousMessage !== this.#message;
-        this.#onRenderDecision?.({ rendered, tab: this.#tab, workView: this.#workView });
+        const rendered =
+          signature !== this.#renderSignature ||
+          previousMessage !== this.#message;
+        this.#onRenderDecision?.({
+          rendered,
+          tab: this.#tab,
+          workView: this.#workView,
+        });
         if (!rendered) return;
         this.#renderSignature = signature;
         this.#requestRender();
@@ -688,6 +699,7 @@ export class BrokerDeckApp implements Component {
     else if (data === "t" && this.#tab === "agents") this.cycleThinking();
     else if (data === "\u001b[A" || data === "k") this.move(-1);
     else if (data === "\u001b[B" || data === "j") this.move(1);
+    this.syncVisibleSignature();
     this.#requestRender();
   }
 
@@ -698,7 +710,10 @@ export class BrokerDeckApp implements Component {
       return true;
     }
     const handled = this.#tracker.handle(event, this.#hitBoxes);
-    if (handled) this.#requestRender();
+    if (handled) {
+      this.syncVisibleSignature();
+      this.#requestRender();
+    }
     return handled;
   }
 
@@ -715,6 +730,19 @@ export class BrokerDeckApp implements Component {
       tab: this.#tab,
       workView: this.#workView,
       ...(this.#targetPaneId ? { targetPaneId: this.#targetPaneId } : {}),
+      ...(this.#selectedTask ? { selectedTaskId: this.#selectedTask } : {}),
+      ...(this.#selectedResult
+        ? { selectedResultId: this.#selectedResult }
+        : {}),
+      ...(this.#selectedGroup ? { selectedGroupId: this.#selectedGroup } : {}),
+      ...(this.#selectedAgent ? { selectedAgentId: this.#selectedAgent } : {}),
+      agentFilter: this.#agentFilter,
+      agentPage: this.#agentPage,
+      boardTab: this.#boardTab,
+      ...(this.#boardSelection
+        ? { boardSelectionId: this.#boardSelection }
+        : {}),
+      notifications: this.#client.store.notifications,
     });
   }
 
@@ -1305,49 +1333,7 @@ export class BrokerDeckApp implements Component {
   }
 
   private scopedWorkState(state: DeckState): DeckState {
-    const root = this.adoptedRootAgent();
-    if (!root)
-      return {
-        ...state,
-        agents: new Map(),
-        tasks: new Map(),
-        results: new Map(),
-        groups: new Map(),
-      };
-    const agents = new Set<string>([root.id]);
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (const agent of state.agents.values())
-        if (
-          agent.parentAgentId &&
-          agents.has(agent.parentAgentId) &&
-          !agents.has(agent.id)
-        ) {
-          agents.add(agent.id);
-          changed = true;
-        }
-    }
-    const scopedAgents = new Map(
-      [...state.agents].filter(([id]) => agents.has(id)),
-    );
-    const tasks = new Map(
-      [...state.tasks].filter(
-        ([, task]) =>
-          task.assignedAgentId && agents.has(task.assignedAgentId) && true,
-      ),
-    );
-    const results = new Map(
-      [...state.results].filter(([, result]) =>
-        result.taskId ? tasks.has(result.taskId) : false,
-      ),
-    );
-    const groups = new Map(
-      [...state.groups].filter(([, group]) =>
-        group.taskIds?.some((id: string) => tasks.has(id)),
-      ),
-    );
-    return { ...state, agents: scopedAgents, tasks, results, groups };
+    return selectAdoptedScope(state, this.#targetPaneId).state;
   }
 
   private visibleAgents(state: DeckState): Agent[] {
