@@ -7,6 +7,7 @@ import type {
   BoardItem,
   NormalizedQuestion,
 } from "./product-presentation.js";
+import { normalizeSignalsQuestion } from "./product-presentation.js";
 import { boardRecord, selectBoardPresentation } from "./board-presentation.js";
 import type { AgentBoardProjection } from "../shared/provider-projections.js";
 import { normalizeSignalsPresentation } from "./signals-presentation.js";
@@ -229,7 +230,12 @@ export function normalizedSignalsQuestionForBoardItem(
     row: item.source,
     detail: boardRecord(presentation.detail),
   });
-  if (!normalized || normalized.entityType !== "question") return undefined;
+  if (!normalized || normalized.entityType !== "question") {
+    const fallback = signalsQuestionForBoardItem(item, agentBoard);
+    return fallback
+      ? normalizeSignalsQuestion(fallback, item.source)
+      : undefined;
+  }
   return {
     source: "signals",
     uiId: `signals:question:${normalized.entityId}`,
