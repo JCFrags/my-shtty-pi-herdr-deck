@@ -487,11 +487,12 @@ export class BrokerDeckApp implements Component {
       online: this.#status === "connected",
       boardFilter: this.#boardFilter,
       activityFilter: this.#activityFilter,
-      ...(this.#tab === "activity" && this.#activitySelection
-        ? { boardSelectionId: this.#activitySelection }
-        : this.#unifiedBoardSelection
-          ? { boardSelectionId: this.#unifiedBoardSelection }
-          : {}),
+      ...(this.#unifiedBoardSelection
+        ? { boardSelectedId: this.#unifiedBoardSelection }
+        : {}),
+      ...(this.#activitySelection
+        ? { activitySelectedId: this.#activitySelection }
+        : {}),
       notifications: this.#client.store.notifications,
       ...(overlay.kind !== "none"
         ? { overlay: overlay.kind, overlayGuard: overlay }
