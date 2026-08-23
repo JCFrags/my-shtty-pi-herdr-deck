@@ -88,8 +88,9 @@ test("Files keeps informational rows inert and rejects unsafe action paths", () 
     summary: {},
     view: {
       rows: [
-        { rowType: "info", message: "Provider is loading", path: "" },
-        { rowType: "info", message: "No path yet" },
+        { rowType: "section", message: "Provider is loading", path: "" },
+        { rowType: "warning", message: "No path yet" },
+        { rowType: "info", message: "Compatibility row" },
         { path: "\u0000bad", kind: "file", name: "bad" },
         { path: "/absolute", kind: "file", name: "absolute" },
         { path: "C:\\absolute", kind: "file", name: "absolute" },
@@ -98,11 +99,12 @@ test("Files keeps informational rows inert and rejects unsafe action paths", () 
       ],
     },
   });
-  assert.equal(model.rows.length, 3);
-  assert.equal(model.rows[0]?.kind, "info");
+  assert.equal(model.rows.length, 4);
+  assert.equal(model.rows[0]?.kind, "section");
+  assert.equal(model.rows[1]?.kind, "warning");
   assert.equal(model.rows[0]?.actionPath, undefined);
   assert.equal(model.rows[0]?.message, "Provider is loading");
-  assert.equal(model.rows[2]?.actionPath, "odd name/é.txt");
+  assert.equal(model.rows[3]?.actionPath, "odd name/é.txt");
   const surface = renderFilesScreen(
     {
       presentation: model,
@@ -122,6 +124,73 @@ test("Files keeps informational rows inert and rejects unsafe action paths", () 
     surface.hitBoxes.filter((box) => box.id.includes("files-info")).length,
     0,
   );
+});
+
+test("Files keyboard skips inert rows and supports tree, preview, and action focus", () => {
+  const presentation = normalizeFilesPresentation({
+    available: true,
+    summary: {
+      selectedCount: 1,
+      selectedKnownBytes: 24,
+      selectedApproximateTokens: 6,
+    },
+    view: {
+      rows: [
+        { rowType: "section", message: "Selected files", path: "" },
+        { path: "src", kind: "directory", depth: 0, expanded: false },
+        { rowType: "warning", message: "More rows hidden", path: "" },
+        { path: "src/main.ts", kind: "file", depth: 1 },
+      ],
+      previewPath: "src/main.ts",
+      preview: {
+        metadata: {
+          relativePath: "src/main.ts",
+          size: 24,
+          absolutePath: "/repo/src/main.ts",
+        },
+        lines: ["one", "two"],
+      },
+    },
+  });
+  const actions: unknown[] = [];
+  const state: FilesScreenState = {
+    activePane: "tree",
+    treeScroll: 0,
+    previewScroll: 0,
+    focusTarget: "tree",
+    wheelDetached: false,
+  };
+  const options = {
+    presentation,
+    state,
+    onAction: (action: unknown) => actions.push(action),
+    onStateChange: (next: FilesScreenState) => Object.assign(state, next),
+  };
+  handleFilesKey(options, "ArrowDown");
+  assert.equal(options.state.focusedPath, "src");
+  handleFilesKey(options, "ArrowDown");
+  assert.equal(options.state.focusedPath, "src/main.ts");
+  handleFilesKey(options, "Enter");
+  assert.deepEqual(actions.at(-1), {
+    action: "preview",
+    actionPath: "src/main.ts",
+  });
+  handleFilesKey(options, "Tab");
+  assert.equal(options.state.focusTarget, "preview");
+  handleFilesKey(options, "PageDown");
+  assert.equal(options.state.previewScroll, 10);
+  handleFilesKey(options, "Shift+Tab");
+  assert.equal(options.state.focusTarget, "tree");
+  handleFilesKey(options, "ArrowUp");
+  assert.equal(options.state.focusedPath, "src");
+  handleFilesKey(options, "ArrowRight");
+  assert.deepEqual(actions.at(-1), {
+    action: "expand",
+    actionPath: "src",
+    expanded: true,
+  });
+  handleFilesKey(options, "h");
+  assert.deepEqual(actions.at(-1), { action: "toggle-hidden" });
 });
 
 test("Files row keys include unambiguous length-delimited identity", () => {

@@ -22,6 +22,7 @@ export interface BoardScreenState {
 
 export interface FilesScreenState {
   focusedPath?: string;
+  focusedAction?: string;
   activePane: FilesPane;
   treeScroll: number;
   previewScroll: number;

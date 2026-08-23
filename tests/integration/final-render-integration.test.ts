@@ -6,6 +6,7 @@ import { BrokerDeckApp } from "../../src/deck/broker-app.js";
 import type { DeckSnapshot } from "../../src/deck/types.js";
 import type { Agent } from "../../src/state/types.js";
 import type { ProviderProjection } from "../../src/shared/provider-projections.js";
+import { FakeDeckBroker, waitForM6 } from "../helpers/m6-deck-fixtures.js";
 
 const owner: Agent = {
   id: "owner",
@@ -78,6 +79,39 @@ test("BrokerDeckApp integrates the four typed surfaces at every supported width"
   app.handleInput("4");
   assert.match(app.render(120).join("\n"), /DETAIL/);
   app.dispose();
+});
+
+test("BrokerDeckApp Files refresh captures the exact provider snapshot request", async () => {
+  const broker = new FakeDeckBroker(
+    snapshot(
+      provider([{ path: "src/main.ts", name: "main.ts", kind: "file" }]),
+    ),
+  );
+  const client = new BrokerClient({
+    socketPath: "/tmp/files-refresh-capture.sock",
+    secret: "test",
+    socketFactory: () => broker.createSocket(),
+  });
+  await client.start();
+  await client.waitForReady();
+  const app = appFor(client);
+  app.handleInput("2");
+  app.render(120);
+  app.handleInput("r");
+  await waitForM6(() =>
+    broker.requests.some(
+      (request) => request.method === "provider.files_action",
+    ),
+  );
+  const request = broker.requests.find(
+    (item) => item.method === "provider.files_action",
+  );
+  assert.deepEqual(request?.params, {
+    ownerAgentId: "owner",
+    action: "snapshot",
+  });
+  app.dispose();
+  client.stop();
 });
 
 test("BrokerDeckApp render gate ignores provider churn but reacts to visible body and shell changes", () => {

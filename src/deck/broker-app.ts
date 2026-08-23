@@ -288,6 +288,8 @@ export class BrokerDeckApp implements Component {
       this.selectTab(NAV_TABS[Number(data) - 1]!);
     else if (data === ",") this.toggleSettings();
     else if (data === "?") this.toggleHelp();
+    else if (data === "r" && this.#tab === "files")
+      handleFilesKey(this.filesScreenOptions(), "r");
     else if (data === "r") void this.run("refresh");
     else if (data === "v" && this.#tab === "board") this.cycleBoardFilter();
     else if (data === "v" && this.#tab === "activity")
@@ -303,7 +305,15 @@ export class BrokerDeckApp implements Component {
             ? "ArrowDown"
             : data === "\r" || data === "\n"
               ? "Enter"
-              : data;
+              : data === "\t"
+                ? "Tab"
+                : data === "\u001b[Z"
+                  ? "Shift+Tab"
+                  : data === "\u001b[5~"
+                    ? "PageUp"
+                    : data === "\u001b[6~"
+                      ? "PageDown"
+                      : data;
       if (!handleFilesKey(this.filesScreenOptions(), key) && data === "/")
         this.beginInput("files-filter");
     } else if (data === "f" && this.#tab === "agents") void this.run("focus");
@@ -1382,9 +1392,11 @@ export class BrokerDeckApp implements Component {
       case "insert-paths":
       case "insert-contents":
       case "clear-selection":
-      case "refresh":
       case "toggle-hidden":
         void this.runFiles(request.action);
+        return;
+      case "refresh":
+        void this.runFiles("snapshot");
         return;
     }
   }
