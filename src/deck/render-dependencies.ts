@@ -1,5 +1,9 @@
 import type { DeckNotification, DeckState } from "./types.js";
-import { currentProviderProjection, selectAdoptedScope } from "./scope.js";
+import {
+  currentProviderProjection,
+  selectAdoptedScope,
+  selectFilesPresentationAuthority,
+} from "./scope.js";
 import {
   effectiveSelection,
   selectAgentInspectorRelation,
@@ -268,11 +272,17 @@ export function visibleSurfaceModel(
   state: DeckState,
   context: VisibleSurfaceContext,
 ): unknown {
-  const { provider, visible: authority } = providerAuthority(
-    state,
-    context.targetPaneId,
-  );
-  if (context.tab === "files") return { authority, files: provider?.files };
+  if (context.tab === "files") {
+    const filesAuthority = selectFilesPresentationAuthority(
+      state,
+      context.targetPaneId,
+    );
+    return {
+      authority: filesAuthority.providerIdentity,
+      canOpenStandalone: filesAuthority.canOpenStandalone,
+      files: filesAuthority.provider?.files,
+    };
+  }
   if (context.tab === "work") return workModel(state, context);
   if (context.tab === "agents") return agentsModel(state, context);
   if (context.tab === "inbox") return boardModel(state, context);

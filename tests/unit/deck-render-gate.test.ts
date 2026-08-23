@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { TuiMouseEvent } from "@pi-herdr-deck/tui";
 import { BrokerDeckApp } from "../../src/deck/broker-app.js";
+import { renderButton } from "../../src/deck/components/controls.js";
 import { BrokerClient } from "../../src/deck/broker-client.js";
 import { visibleSurfaceSignature } from "../../src/deck/render-dependencies.js";
 import {
@@ -258,6 +259,60 @@ test("authoritative provider selects the newest same-pane root and descendants",
   const scope = selectAdoptedScope(value, "pane-1");
   assert.equal(scope.rootAgentId, "new");
   assert.deepEqual([...scope.state.agents.keys()].sort(), ["new", "new-child"]);
+});
+
+test("provider authority requires one logical pane when no target is supplied", () => {
+  const single = state();
+  assert.equal(currentProviderProjection(single)?.ownerAgentId, "agent-1");
+
+  const differentPanes = state();
+  differentPanes.agents.set("agent-2", {
+    ...agent(9),
+    id: "agent-2",
+    paneId: "pane-2",
+  } as Agent);
+  differentPanes.providerProjections.set(
+    "agent-2",
+    projection({ ownerAgentId: "agent-2", piSessionId: "session-9" }),
+  );
+  assert.equal(currentProviderProjection(differentPanes), undefined);
+  assert.equal(selectAdoptedRootAgent(differentPanes), undefined);
+  const ambiguousScope = selectAdoptedScope(differentPanes);
+  assert.equal(ambiguousScope.rootAgentId, undefined);
+  assert.equal(ambiguousScope.rootExists, false);
+  assert.equal(ambiguousScope.state.agents.size, 0);
+
+  assert.equal(
+    currentProviderProjection(differentPanes, "pane-1")?.ownerAgentId,
+    "agent-1",
+  );
+
+  const samePane = state();
+  samePane.agents.set("agent-2", {
+    ...agent(2),
+    id: "agent-2",
+  } as Agent);
+  samePane.providerProjections.set(
+    "agent-2",
+    projection({ ownerAgentId: "agent-2", piSessionId: "session-2" }),
+  );
+  assert.equal(currentProviderProjection(samePane)?.ownerAgentId, "agent-2");
+
+  const unidentified = state();
+  unidentified.agents.set("agent-1", {
+    ...agent(),
+    paneId: undefined,
+  } as unknown as Agent);
+  unidentified.agents.set("agent-2", {
+    ...agent(2),
+    id: "agent-2",
+    paneId: undefined,
+  } as unknown as Agent);
+  unidentified.providerProjections.set(
+    "agent-2",
+    projection({ ownerAgentId: "agent-2", piSessionId: "session-2" }),
+  );
+  assert.equal(currentProviderProjection(unidentified), undefined);
 });
 
 test("terminal sole provider owners fail closed", () => {
@@ -740,6 +795,150 @@ test("Board answer keyboard action follows the visible provider tab", () => {
   clickLabel(app, "Inbox");
   app.handleInput("a");
   assert.match(app.render(120).join("\n"), /BOARD-ANSWER:/);
+  app.dispose();
+});
+
+test("BrokerDeckApp tracks fallback Files standalone availability only", () => {
+  const client = new BrokerClient({
+    socketPath: "/tmp/files-fallback-authority.sock",
+    secret: "test",
+  });
+  const empty = {
+    ...snapshot(),
+    agents: [],
+    providerProjections: [],
+  };
+  client.store.replace(empty);
+  let renders = 0;
+  const app = new BrokerDeckApp({
+    client,
+    targetPaneId: "pane-1",
+    requestRender: () => renders++,
+    getHeight: () => 40,
+  });
+  app.handleInput("3");
+  assert.ok(
+    app
+      .render(120)
+      .join("\n")
+      .includes(renderButton("Open standalone view", { disabled: true })),
+  );
+
+  const fallback = agent();
+  let baseline = renders;
+  client.store.replace({ ...empty, agents: [fallback] });
+  assert.equal(renders, baseline + 1);
+  assert.ok(
+    app
+      .render(120)
+      .join("\n")
+      .includes(renderButton("Open standalone view", { disabled: false })),
+  );
+
+  baseline = renders;
+  client.store.replace({
+    ...empty,
+    agents: [{ ...fallback, state: "idle" } as Agent],
+  });
+  assert.equal(renders, baseline);
+  const unrelated = {
+    ...agent(),
+    id: "other",
+    paneId: "pane-2",
+  } as Agent;
+  client.store.replace({
+    ...empty,
+    agents: [{ ...fallback, state: "idle" } as Agent, unrelated],
+  });
+  assert.equal(renders, baseline);
+
+  client.store.replace({ ...empty, agents: [unrelated] });
+  assert.equal(renders, baseline + 1);
+  assert.ok(
+    app
+      .render(120)
+      .join("\n")
+      .includes(renderButton("Open standalone view", { disabled: true })),
+  );
+
+  baseline = renders;
+  const owner = { ...fallback, state: "working" } as Agent;
+  const filesProvider = projection();
+  client.store.replace({
+    ...empty,
+    agents: [owner, unrelated],
+    providerProjections: [filesProvider],
+  });
+  assert.equal(renders, baseline + 1);
+  baseline = renders;
+  client.store.replace({
+    ...empty,
+    agents: [owner, unrelated],
+    providerProjections: [
+      projection({
+        todo: {
+          available: true,
+          total: 2,
+          completed: 0,
+          items: [{ id: "todo-2", text: "Other" }],
+        },
+      }),
+    ],
+  });
+  assert.equal(renders, baseline);
+  client.store.replace({
+    ...empty,
+    agents: [owner, unrelated],
+    providerProjections: [
+      projection({
+        todo: {
+          available: true,
+          total: 2,
+          completed: 0,
+          items: [{ id: "todo-2", text: "Other" }],
+        },
+        agentBoard: {
+          available: true,
+          openCount: 1,
+          items: [{ id: "question", title: "Question" }],
+        },
+      }),
+    ],
+  });
+  assert.equal(renders, baseline);
+  app.dispose();
+});
+
+test("BrokerDeckApp leaves Files unbound when no-target authority is ambiguous", () => {
+  const first = agent();
+  const second = {
+    ...agent(2),
+    id: "agent-2",
+    paneId: "pane-2",
+  } as Agent;
+  const client = new BrokerClient({
+    socketPath: "/tmp/files-ambiguous-authority.sock",
+    secret: "test",
+  });
+  client.store.replace({
+    ...snapshot(),
+    agents: [first, second],
+    providerProjections: [
+      projection(),
+      projection({ ownerAgentId: "agent-2", piSessionId: "session-2" }),
+    ],
+  });
+  const app = new BrokerDeckApp({
+    client,
+    requestRender: () => undefined,
+    getHeight: () => 40,
+  });
+  app.handleInput("3");
+  const output = app.render(120).join("\n");
+  assert.match(output, /○ CONNECTING/);
+  assert.ok(
+    output.includes(renderButton("Open standalone view", { disabled: true })),
+  );
   app.dispose();
 });
 

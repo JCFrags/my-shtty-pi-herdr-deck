@@ -2,20 +2,11 @@ import type { Agent } from "../state/types.js";
 import type { ProviderProjection } from "../shared/provider-projections.js";
 import type { DeckState } from "./types.js";
 
-export function currentProviderProjection(
+function rankProviderCandidates(
   state: DeckState,
-  targetPaneId?: string,
-): ProviderProjection | undefined {
-  const projections = [...state.providerProjections.values()];
-  const candidates = projections.filter((projection) => {
-    const agent = state.agents.get(projection.ownerAgentId);
-    return Boolean(
-      agent &&
-      !["closed", "stopped"].includes(agent.state) &&
-      (!targetPaneId || agent.paneId === targetPaneId),
-    );
-  });
-  const ranked = candidates.sort((a, b) => {
+  candidates: ProviderProjection[],
+): ProviderProjection[] {
+  return candidates.sort((a, b) => {
     const agentA = state.agents.get(a.ownerAgentId);
     const agentB = state.agents.get(b.ownerAgentId);
     const score = (
@@ -25,21 +16,73 @@ export function currentProviderProjection(
       (agent && projection.piSessionId === agent.piSessionId ? 8 : 0) +
       (agent && !agent.parentAgentId ? 4 : 0) +
       (agent && agent.state !== "idle" ? 1 : 0);
-    const connectionOrder =
-      (agentB?.connectionGeneration ?? 0) - (agentA?.connectionGeneration ?? 0);
     return (
-      connectionOrder ||
+      (agentB?.connectionGeneration ?? 0) -
+        (agentA?.connectionGeneration ?? 0) ||
       score(b, agentB) - score(a, agentA) ||
       a.ownerAgentId.localeCompare(b.ownerAgentId)
     );
   });
-  if (ranked[0]) return ranked[0];
-  if (targetPaneId) return undefined;
-  if (projections.length !== 1) return undefined;
-  const owner = state.agents.get(projections[0]!.ownerAgentId);
-  return owner && !["closed", "stopped"].includes(owner.state)
-    ? projections[0]
-    : undefined;
+}
+
+export function currentProviderProjection(
+  state: DeckState,
+  targetPaneId?: string,
+): ProviderProjection | undefined {
+  const candidates = [...state.providerProjections.values()].filter(
+    (projection) => {
+      const agent = state.agents.get(projection.ownerAgentId);
+      return Boolean(
+        agent &&
+        !["closed", "stopped"].includes(agent.state) &&
+        (!targetPaneId || agent.paneId === targetPaneId),
+      );
+    },
+  );
+  if (targetPaneId) return rankProviderCandidates(state, candidates)[0];
+  if (candidates.length === 1) return candidates[0];
+  if (candidates.length === 0) return undefined;
+  const paneIds = new Set(
+    candidates.map(
+      (candidate) => state.agents.get(candidate.ownerAgentId)?.paneId,
+    ),
+  );
+  if (paneIds.size !== 1 || ![...paneIds][0]) return undefined;
+  return rankProviderCandidates(state, candidates)[0];
+}
+
+export interface FilesPresentationAuthority {
+  provider?: ProviderProjection;
+  providerIdentity?: {
+    ownerAgentId: string;
+    piSessionId?: string;
+    connectionGeneration: number;
+  };
+  canOpenStandalone: boolean;
+}
+
+export function selectFilesPresentationAuthority(
+  state: DeckState,
+  targetPaneId?: string,
+): FilesPresentationAuthority {
+  const provider = currentProviderProjection(state, targetPaneId);
+  const owner = provider ? state.agents.get(provider.ownerAgentId) : undefined;
+  const adoptedRoot = selectAdoptedRootAgent(state, targetPaneId);
+  return {
+    ...(provider ? { provider } : {}),
+    ...(provider
+      ? {
+          providerIdentity: {
+            ownerAgentId: provider.ownerAgentId,
+            ...(provider.piSessionId
+              ? { piSessionId: provider.piSessionId }
+              : {}),
+            connectionGeneration: owner?.connectionGeneration ?? 0,
+          },
+        }
+      : {}),
+    canOpenStandalone: Boolean(adoptedRoot),
+  };
 }
 
 export function selectAdoptedRootAgent(

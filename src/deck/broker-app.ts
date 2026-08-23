@@ -36,7 +36,11 @@ import {
   type VisibleDeckTab,
   type VisibleWorkView,
 } from "./render-dependencies.js";
-import { selectAdoptedRootAgent, selectAdoptedScope } from "./scope.js";
+import {
+  selectAdoptedRootAgent,
+  selectAdoptedScope,
+  selectFilesPresentationAuthority,
+} from "./scope.js";
 import {
   effectiveSelection,
   moveAgentListSelection,
@@ -895,8 +899,11 @@ export class BrokerDeckApp implements Component {
     width: number,
     state: DeckState,
   ): void {
-    const projection = currentProviderProjection(state, this.#targetPaneId);
-    const files = projection?.files;
+    const filesAuthority = selectFilesPresentationAuthority(
+      state,
+      this.#targetPaneId,
+    );
+    const files = filesAuthority.provider?.files;
     const view = this.providerRecord(files?.view);
     const summary = this.providerRecord(files?.summary);
     const rows = Array.isArray(view.rows)
@@ -1043,7 +1050,7 @@ export class BrokerDeckApp implements Component {
         {
           id: "files:open",
           label: "Open standalone view",
-          disabled: !this.adoptedRootAgent(),
+          disabled: !filesAuthority.canOpenStandalone,
           activate: () => void this.runProvider("filesOpen", "files-open"),
         },
       ],
