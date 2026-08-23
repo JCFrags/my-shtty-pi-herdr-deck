@@ -72,6 +72,7 @@ interface BoardItemBase<K extends string, S> {
   relatedRunId?: string;
   relatedGroupId?: string;
   revision?: number;
+  pendingQuestion?: AgentBoardPendingQuestion;
   actions: ItemActionAvailability;
 }
 
@@ -442,6 +443,7 @@ export function selectUnifiedBoardPresentation(
         priority: row.retryableDelivery === true ? 5 : 1,
         sortTimestamp: rowTimestamp(row),
         revision: Number(row.revision ?? pending?.revision ?? 0),
+        ...(pending ? { pendingQuestion: pending } : {}),
         actions: {
           primary: "answer",
           actions: [

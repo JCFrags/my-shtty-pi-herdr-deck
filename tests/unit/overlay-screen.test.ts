@@ -32,6 +32,7 @@ const state = (
   kind: NormalizedQuestion["responseKind"],
 ): Extract<OverlayState, { kind: "question-response" }> => ({
   kind: "question-response",
+  target: {},
   question: question(kind),
   selectedOptionIds: [],
   text: "",

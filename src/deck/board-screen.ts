@@ -57,8 +57,9 @@ export function renderBoardScreen(
     corrected.listScroll,
     corrected.listScroll + listBudget,
   );
+  const listWidth = narrow ? width : Math.floor(width * 0.46);
   const listSurface = renderList(
-    width,
+    listWidth,
     visible,
     options.model,
     options.actions,

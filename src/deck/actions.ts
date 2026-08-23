@@ -69,6 +69,7 @@ export interface ActionTarget {
   };
   boardSelections?: Record<string, string>;
   boardAction?: { action: string; fields?: Record<string, unknown> };
+  copyId?: string;
 }
 
 export interface QuestionAnswer {
@@ -122,7 +123,9 @@ const guards: Record<DeckAction, Guard> = {
   openWorktree: (target) =>
     target.agent?.workspaceId ? undefined : "Agent worktree is unavailable.",
   copyId: (target) =>
-    target.agent || target.task ? undefined : "Select an agent or task first.",
+    target.agent || target.task || target.copyId
+      ? undefined
+      : "Select an agent or task first.",
   refresh: () => undefined,
   todoStart: (target) =>
     target.todoTaskId ? undefined : "Select a provider Todo item first.",
@@ -330,7 +333,7 @@ export class DeckActions {
           agentId: target.agent!.id,
         });
       case "copyId":
-        return target.agent?.id ?? target.task?.id ?? "";
+        return target.agent?.id ?? target.task?.id ?? target.copyId ?? "";
       case "refresh":
         return this.client.refresh();
       default:

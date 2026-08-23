@@ -1,3 +1,4 @@
+import type { ActionTarget } from "./actions.js";
 import type { NormalizedQuestion } from "./product-presentation.js";
 
 export const MAX_OVERLAY_TEXT = 16_384;
@@ -46,6 +47,7 @@ export type OverlayState =
       kind: "confirm";
       action: ConfirmationAction;
       guard?: OverlayTargetGuard;
+      target: ActionTarget;
       summary: string;
     } & OverlayCommon)
   | ({
@@ -58,6 +60,7 @@ export type OverlayState =
   | ({
       kind: "question-response";
       question: NormalizedQuestion;
+      target: ActionTarget;
       guard?: Required<Pick<OverlayTargetGuard, "questionId">> &
         Pick<OverlayTargetGuard, "revision">;
       selectedOptionIds: readonly string[];

@@ -7,20 +7,17 @@ import {
 import { BrokerClient, type BrokerStatus } from "./broker-client.js";
 import { DeckActions, type DeckAction } from "./actions.js";
 import {
-  currentBlockingQuestions,
   currentProviderProjection,
   getAgentModelChoices,
   getAgentThinkingChoices,
   renderNotifications,
 } from "./views.js";
 import { type HitBox, PressReleaseTracker } from "./components/controls.js";
-import type { Agent, Task } from "../state/types.js";
+import type { Agent } from "../state/types.js";
 import type { DeckState } from "./types.js";
 import { styleLines } from "./theme.js";
 import type { PiCapabilitySnapshot } from "../pi/model-capabilities.js";
 import type { ModelPolicyConfig } from "../broker/model-policy.js";
-import type { DeckGroup, DeckQuestion } from "./types.js";
-import type { AgentBoardPendingQuestion } from "../shared/provider-projections.js";
 import {
   shellHeaderPresentation,
   visibleSurfaceSignature,
@@ -34,7 +31,6 @@ import {
   type BoardFilter,
   type BoardItem,
   normalizeBrokerQuestion,
-  normalizeSignalsQuestion,
 } from "./product-presentation.js";
 import {
   selectAdoptedRootAgent,
@@ -42,11 +38,9 @@ import {
   selectFilesPresentationAuthority,
 } from "./scope.js";
 import {
-  effectiveSelection,
   moveAgentListSelection,
   selectAgentListPresentation,
 } from "./selections.js";
-import { selectBoardPresentation } from "./board-presentation.js";
 import {
   handleFilesKey,
   handleFilesMouse,
@@ -80,6 +74,16 @@ import {
   type TextInputPurpose,
 } from "./overlay-screen.js";
 import { renderSettingsScreen } from "./screens/settings-screen.js";
+import { renderSettingsContent } from "./settings-presentation.js";
+import {
+  actionTargetForActivityItem,
+  actionTargetForAgent,
+  actionTargetForBoardItem,
+  activityActionRequest,
+  normalizedSignalsQuestionForBoardItem,
+  signalsActionRequest,
+  signalsQuestionForBoardItem,
+} from "./product-actions.js";
 import { renderHelpScreen } from "./screens/help-screen.js";
 import { renderAgentMoreScreen } from "./screens/agent-more-screen.js";
 import { renderConfirmationScreen } from "./screens/confirmation-screen.js";
@@ -120,10 +124,6 @@ export class BrokerDeckApp implements Component {
   #tab: DeckTab = "board";
   #hitBoxes: HitBox[] = [];
   #selectedAgent: string | undefined;
-  #selectedGroup: string | undefined;
-  #selectedTask: string | undefined;
-  #selectedProviderTodo: string | undefined;
-  #selectedQuestion: string | undefined;
   #agentFilter: import("./views.js").AgentViewFilter = "active";
   #agentPage = 0;
   #modelFilter = "";
@@ -143,8 +143,6 @@ export class BrokerDeckApp implements Component {
   #filesSurface: FilesScreenSurface | undefined;
   #filesOptions: FilesScreenOptions | undefined;
   #filesSurfaceOffset = 0;
-  #boardTab: "inbox" | "updates" | "decisions" | "history" = "inbox";
-  #boardSelection: string | undefined;
   #unifiedBoardSelection: string | undefined;
   #boardFilter: BoardFilter = "all-current";
   #boardScroll = 0;
@@ -307,13 +305,19 @@ export class BrokerDeckApp implements Component {
     } else if (data === "f" && this.#tab === "agents") void this.run("focus");
     else if (data === "p" && this.#tab === "agents") this.beginInput("prompt");
     else if (data === "a" && this.#tab === "agents") this.beginInput("ask");
-    else if (data === "a" && this.#tab === "board")
-      this.beginQuestionResponse(
-        this.selectedBoardQuestion() ? "board-answer" : "answer",
-      );
-    else if (data === "y" && this.#tab === "board")
-      void this.runBoard("accept-recommendation");
-    else if (data === "i" && this.#tab === "agents") void this.run("interrupt");
+    else if (data === "a" && this.#tab === "board") {
+      const item = this.selectedBoardItem();
+      if (item?.kind === "signal-question")
+        this.beginQuestionResponse("board-answer", item);
+      else if (item?.kind === "broker-question")
+        this.beginQuestionResponse("answer", item);
+      else this.#message = "Select a question first.";
+    } else if (data === "y" && this.#tab === "board") {
+      const item = this.selectedBoardItem();
+      if (item?.kind === "signal-question")
+        void this.runSignalsAction(item, "accept-recommendation");
+    } else if (data === "i" && this.#tab === "agents")
+      void this.run("interrupt");
     else if (data === "s" && this.#tab === "agents") this.confirmAgentStop();
     else if (data === "x" && this.#tab === "agents") this.confirmClose();
     else if (data === "m" && this.#tab === "agents") this.openAgentMore();
@@ -496,7 +500,14 @@ export class BrokerDeckApp implements Component {
         return renderSettingsScreen({
           width,
           scroll: overlay.scroll ?? 0,
-          content: this.renderSettings(width),
+          content: renderSettingsContent({
+            capabilities: this.#capabilities,
+            modelPolicy: this.#modelPolicy,
+            modelFilter: this.#modelFilter,
+            autoCloseCompletedTemporary: this.#autoCloseCompletedTemporary,
+            scroll: overlay.scroll ?? 0,
+            height: this.#getHeight(),
+          }),
           onDefault: () => this.beginInput("default"),
           onAutoClose: () => void this.toggleAutoClose(),
           onClose: () => this.closeOverlay(),
@@ -636,8 +647,11 @@ export class BrokerDeckApp implements Component {
     };
   }
 
-  private beginInput(purpose: TextInputPurpose): void {
-    const target = this.target() as import("./actions.js").ActionTarget;
+  private beginInput(
+    purpose: TextInputPurpose,
+    targetOverride?: import("./actions.js").ActionTarget,
+  ): void {
+    const target = targetOverride ?? this.target();
     if (purpose === "create" && !target.agent) {
       this.#message = "Select a parent agent first.";
       return;
@@ -669,15 +683,13 @@ export class BrokerDeckApp implements Component {
     this.#tracker.reset();
   }
 
-  private beginQuestionResponse(source: "answer" | "board-answer"): void {
-    const target = this.target() as import("./actions.js").ActionTarget;
-    if (source === "answer") {
-      const question = this.selectedQuestion();
-      if (!question) {
-        this.#message = "Select a question first.";
-        return;
-      }
-      const normalized = normalizeBrokerQuestion(question);
+  private beginQuestionResponse(
+    source: "answer" | "board-answer",
+    item: BoardItem,
+  ): void {
+    const target = actionTargetForBoardItem(item, this.productTargetContext());
+    if (source === "answer" && item.kind === "broker-question") {
+      const normalized = normalizeBrokerQuestion(item.source);
       if (normalized.terminal) {
         this.#message = "The selected question is terminal.";
         return;
@@ -689,8 +701,9 @@ export class BrokerDeckApp implements Component {
       }
       this.#overlay = {
         kind: "question-response",
+        target,
         question: normalized,
-        guard: { questionId: question.id },
+        guard: { questionId: item.source.id },
         selectedOptionIds: [],
         text: "",
         cursor: 0,
@@ -698,15 +711,26 @@ export class BrokerDeckApp implements Component {
         scroll: 0,
         pending: false,
       };
-    } else {
-      const pending = this.selectedBoardQuestion();
-      if (!pending) {
+    } else if (source === "board-answer" && item.kind === "signal-question") {
+      const pending = signalsQuestionForBoardItem(
+        item,
+        this.productTargetContext().agentBoard,
+      );
+      const normalized = normalizedSignalsQuestionForBoardItem(
+        item,
+        this.productTargetContext().agentBoard,
+      );
+      if (!pending || !normalized) {
         this.#message = "Select a Signals question first.";
         return;
       }
-      const normalized = normalizeSignalsQuestion(pending);
       this.#overlay = {
         kind: "question-response",
+        target: {
+          ...target,
+          boardQuestion: pending,
+          questionId: pending.questionId,
+        },
         question: normalized,
         guard: { questionId: pending.questionId, revision: pending.revision },
         selectedOptionIds: [],
@@ -716,6 +740,9 @@ export class BrokerDeckApp implements Component {
         scroll: 0,
         pending: false,
       };
+    } else {
+      this.#message = "Select a question first.";
+      return;
     }
     this.#message = "";
     this.#tracker.reset();
@@ -785,12 +812,13 @@ export class BrokerDeckApp implements Component {
       };
       return;
     }
-    const target = this.target() as import("./actions.js").ActionTarget;
+    const target = overlay.target;
+    const currentTarget = this.target();
     const guard = overlay.guard;
     if (
       guard?.questionId &&
-      target.questionId !== guard.questionId &&
-      target.boardQuestion?.questionId !== guard.questionId
+      currentTarget.questionId !== guard.questionId &&
+      currentTarget.boardQuestion?.questionId !== guard.questionId
     ) {
       this.#overlay = {
         ...overlay,
@@ -801,7 +829,7 @@ export class BrokerDeckApp implements Component {
     if (
       overlay.question.source === "signals" &&
       guard?.revision !== undefined &&
-      target.boardQuestion?.revision !== guard.revision
+      currentTarget.boardQuestion?.revision !== guard.revision
     ) {
       this.#overlay = {
         ...overlay,
@@ -843,7 +871,8 @@ export class BrokerDeckApp implements Component {
     const state = this.scopedWorkState(this.#client.store.state);
     const guard = overlay.guard ?? {};
     if (overlay.action === "cancelTask") {
-      const task = state.tasks.get(guard.targetId ?? "");
+      const taskId = overlay.target.task?.id ?? guard.targetId;
+      const task = state.tasks.get(taskId ?? "");
       if (
         !task ||
         ["succeeded", "failed", "cancelled", "timed_out"].includes(task.state)
@@ -852,12 +881,12 @@ export class BrokerDeckApp implements Component {
         this.closeOverlay();
         return;
       }
-      this.#selectedTask = task.id;
     } else if (
       overlay.action === "groupStop" ||
       overlay.action === "groupClose"
     ) {
-      const group = state.groups.get(guard.targetId ?? "");
+      const groupId = overlay.target.group?.id ?? guard.targetId;
+      const group = state.groups.get(groupId ?? "");
       if (
         !group ||
         ["closed", "stopped", "completed", "failed", "cancelled"].includes(
@@ -868,9 +897,10 @@ export class BrokerDeckApp implements Component {
         this.closeOverlay();
         return;
       }
-      this.#selectedGroup = group.id;
     } else {
-      const agent = state.agents.get(guard.agentId ?? guard.targetId ?? "");
+      const agentId =
+        overlay.target.agent?.id ?? guard.agentId ?? guard.targetId;
+      const agent = state.agents.get(agentId ?? "");
       if (
         !agent ||
         (guard.generation !== undefined &&
@@ -880,38 +910,36 @@ export class BrokerDeckApp implements Component {
         this.closeOverlay();
         return;
       }
-      this.#selectedAgent = agent.id;
     }
     this.closeOverlay();
-    try {
-      await this.run(overlay.action);
-    } catch (error) {
-      this.#overlay = {
-        ...overlay,
-        pending: false,
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
+    await this.run(overlay.action, undefined, overlay.target);
   }
 
   private selectBoardItem(item: BoardItem): void {
     this.#unifiedBoardSelection = item.id;
-    if (item.kind === "todo") this.#selectedProviderTodo = item.source.id;
-    else if (item.kind === "task") this.#selectedTask = item.source.id;
-    else if (item.kind === "group") this.#selectedGroup = item.source.id;
-    else if (item.kind === "broker-question")
-      this.#selectedQuestion = item.source.id;
-    else if (item.kind === "agent-alert") this.#selectedAgent = item.source.id;
-    else {
-      const separator = item.id.indexOf(":");
-      this.#boardSelection = item.id.slice(separator + 1);
-      this.#boardTab =
-        item.kind === "signal-question"
-          ? "inbox"
-          : item.kind === "signal-update"
-            ? "updates"
-            : "decisions";
-    }
+  }
+
+  private selectedBoardItem(): BoardItem | undefined {
+    return selectUnifiedBoardPresentation(
+      this.#client.store.state,
+      this.#targetPaneId,
+      this.#unifiedBoardSelection,
+      this.#boardFilter,
+    ).selected;
+  }
+
+  private runSignalsAction(item: BoardItem, action: string): void {
+    const request = signalsActionRequest(
+      item,
+      action,
+      this.productTargetContext().agentBoard,
+    );
+    if (!request) return;
+    const target = actionTargetForBoardItem(item, this.productTargetContext());
+    void this.run("boardAction", undefined, {
+      ...target,
+      boardAction: request,
+    });
   }
 
   private cycleBoardFilter(): void {
@@ -964,34 +992,41 @@ export class BrokerDeckApp implements Component {
           this.#boardFilter = filter;
           this.#boardScroll = 0;
         },
-        answer: (item) =>
-          this.beginQuestionResponse(
-            item.kind === "signal-question" ? "board-answer" : "answer",
-          ),
+        answer: (item) => {
+          if (item.kind === "signal-question")
+            this.beginQuestionResponse("board-answer", item);
+          else if (item.kind === "broker-question")
+            this.beginQuestionResponse("answer", item);
+        },
         run: (item, action) => {
+          const target = actionTargetForBoardItem(
+            item,
+            this.productTargetContext(),
+          );
           if (item.kind === "todo" && action === "start")
-            void this.runProvider("todoStart", "todo-start");
+            void this.runProvider("todoStart", "todo-start", undefined, target);
           else if (item.kind === "todo" && action === "mark-done")
-            void this.runProvider("todoDone", "todo-done");
+            void this.runProvider("todoDone", "todo-done", undefined, target);
           else if (item.kind === "task" && action === "cancel-task")
-            this.confirmTaskCancel();
+            this.confirmTaskCancel(item);
           else if (item.kind === "group" && action === "wait")
-            void this.run("groupWait");
+            void this.run("groupWait", undefined, target);
           else if (item.kind === "group" && action === "stop")
-            this.confirmGroup("groupStop");
+            this.confirmGroup("groupStop", item);
           else if (item.kind === "group" && action === "close")
-            this.confirmGroup("groupClose");
+            this.confirmGroup("groupClose", item);
           else if (item.kind === "task" && action === "focus-agent")
-            void this.run("focus");
+            void this.run("focus", undefined, target);
           else if (item.kind === "task" && action === "open-agents")
             this.selectTab("agents");
           else if (item.kind === "agent-alert" && action === "focus")
-            void this.run("focus");
+            void this.run("focus", undefined, target);
           else if (item.kind === "agent-alert" && action === "prompt")
-            this.beginInput("prompt");
+            this.beginInput("prompt", target);
           else if (item.kind === "agent-alert" && action === "open-agents")
             this.selectTab("agents");
-          else if (item.kind.startsWith("signal-")) void this.runBoard(action);
+          else if (item.kind.startsWith("signal-"))
+            void this.runSignalsAction(item, action);
         },
       },
     });
@@ -1084,11 +1119,6 @@ export class BrokerDeckApp implements Component {
 
   private selectActivityItem(item: ActivityItem): void {
     this.#activitySelection = item.id;
-    if (item.kind === "terminal-task") this.#selectedTask = item.source.id;
-    else if (item.kind === "terminal-group")
-      this.#selectedGroup = item.source.id;
-    else if (item.kind === "terminal-agent")
-      this.#selectedAgent = item.source.id;
   }
 
   private renderActivitySurface(
@@ -1155,42 +1185,18 @@ export class BrokerDeckApp implements Component {
     action: ActivityAction,
   ): void {
     this.selectActivityItem(item);
-    if (action === "archive-update" || action === "retry-delivery") {
-      const source = this.providerRecord(item.source);
-      const fields =
-        action === "archive-update"
-          ? {
-              updateId: item.entityId,
-              expectedRevision: Number(source.revision ?? 0),
-            }
-          : {
-              questionId: String(
-                source.questionId ?? source.id ?? item.entityId,
-              ),
-              ...(source.answerId ? { answerId: String(source.answerId) } : {}),
-              expectedRevision: Number(source.revision ?? 0),
-            };
-      void this.runBoardAction(action, fields);
-    } else if (action === "focus") void this.run("focus");
-    else void this.run("copyId");
-  }
-
-  private async runBoardAction(
-    action: string,
-    fields: Record<string, unknown>,
-  ): Promise<void> {
-    const agent = this.adoptedRootAgent();
-    if (!agent) return;
-    try {
-      await this.#actions.run("boardAction", {
-        agent,
-        boardAction: { action, fields },
+    const target = actionTargetForActivityItem(
+      item,
+      this.productTargetContext(),
+    );
+    const request = activityActionRequest(item, action);
+    if (request)
+      void this.run("boardAction", undefined, {
+        ...target,
+        boardAction: request,
       });
-      this.#message = `Signals ${action} succeeded.`;
-    } catch (error) {
-      this.#message = error instanceof Error ? error.message : String(error);
-    }
-    this.#requestRender();
+    else if (action === "focus") void this.run("focus", undefined, target);
+    else void this.run("copyId", undefined, target);
   }
 
   private activityWheelRegion(
@@ -1247,16 +1253,10 @@ export class BrokerDeckApp implements Component {
     } as const;
   }
 
-
   private adoptedRootAgent(): Agent | undefined {
     return selectAdoptedRootAgent(this.#client.store.state, this.#targetPaneId);
   }
 
-  private providerRecord(value: unknown): Record<string, unknown> {
-    return value && typeof value === "object" && !Array.isArray(value)
-      ? (value as Record<string, unknown>)
-      : {};
-  }
   private filesScreenOptions(): FilesScreenOptions {
     const authority = selectFilesPresentationAuthority(
       this.#client.store.state,
@@ -1349,63 +1349,6 @@ export class BrokerDeckApp implements Component {
     }
     this.#requestRender();
   }
-  private async runBoard(action: string): Promise<void> {
-    const agent = this.adoptedRootAgent();
-    const projection = currentProviderProjection(
-      this.#client.store.state,
-      this.#targetPaneId,
-    )?.agentBoard;
-    const presentation = selectBoardPresentation(
-      projection,
-      this.#boardTab,
-      this.#boardSelection,
-    );
-    if (!agent || !presentation.selectedId) return;
-    const id = presentation.selectedId;
-    const detail = presentation.detail;
-    const detailProjection = this.providerRecord(detail.projection ?? detail);
-    const item = this.providerRecord(
-      detailProjection.item ?? detailProjection.decision ?? detailProjection,
-    );
-    const answer = this.providerRecord(
-      detailProjection.answer ??
-        this.providerRecord(detailProjection.decision).answer,
-    );
-    const questionId = String(item.id ?? item.questionId ?? id);
-    const answerId = String(
-      answer.id ?? answer.answerId ?? detailProjection.answerId ?? id,
-    );
-    const fields =
-      action === "archive-update"
-        ? { updateId: id, expectedRevision: presentation.selectedRevision }
-        : action === "acknowledge-answer"
-          ? {
-              answerId,
-              outcome: "applied",
-              summary: "Acknowledged from Agent Board.",
-            }
-          : action === "retry-delivery"
-            ? {
-                questionId,
-                answerId,
-                expectedRevision: presentation.selectedRevision,
-              }
-            : {
-                questionId,
-                expectedRevision: presentation.selectedRevision,
-              };
-    try {
-      await this.#actions.run("boardAction", {
-        agent,
-        boardAction: { action, fields },
-      } as never);
-      this.#message = `Signals ${action} succeeded.`;
-    } catch (error) {
-      this.#message = error instanceof Error ? error.message : String(error);
-    }
-    this.#requestRender();
-  }
-
   private scopedWorkState(state: DeckState): DeckState {
     return selectAdoptedScope(state, this.#targetPaneId).state;
   }
@@ -1423,125 +1366,14 @@ export class BrokerDeckApp implements Component {
   private selectedAgent(): Agent | undefined {
     return this.agentPresentation().selected;
   }
-  private selected<T extends { id: string }>(
-    items: T[],
-    id: string | undefined,
-  ): T | undefined {
-    return effectiveSelection(items, id);
-  }
 
-  private selectedGroup(
-    state: DeckState = this.#client.store.state,
-  ): DeckGroup | undefined {
-    return this.selected([...state.groups.values()], this.#selectedGroup);
-  }
-  private selectedTask(
-    state: DeckState = this.#client.store.state,
-  ): Task | undefined {
-    return this.selected([...state.tasks.values()], this.#selectedTask);
-  }
-  private selectedProviderTodo(
-    items = currentProviderProjection(
-      this.#client.store.state,
-      this.#targetPaneId,
-    )?.todo.items ?? [],
-  ) {
-    return this.selected(items, this.#selectedProviderTodo);
-  }
-  private selectedQuestion(): DeckQuestion | undefined {
-    return this.selected(
-      currentBlockingQuestions(this.#client.store.state, this.#targetPaneId),
-      this.#selectedQuestion,
-    );
-  }
-
-  private selectedBoardQuestion(): AgentBoardPendingQuestion | undefined {
-    if (this.#boardTab !== "inbox") return undefined;
-    const projection = currentProviderProjection(
-      this.#client.store.state,
-      this.#targetPaneId,
-    )?.agentBoard;
-    const questions = projection?.pendingQuestions ?? [];
-    const presentation = selectBoardPresentation(
-      projection,
-      "inbox",
-      this.#boardSelection,
-    );
-    if (presentation.pendingQuestion) return presentation.pendingQuestion;
-    const detail = presentation.detail;
-    const detailProjection = this.providerRecord(detail.projection);
-    const item = this.providerRecord(
-      detailProjection.item ?? detailProjection.question ?? detailProjection,
-    );
-    const response = this.providerRecord(
-      detailProjection.response ?? item.response,
-    );
-    const questionId = String(item.id ?? item.questionId ?? "");
-    const question = String(
-      item.question ??
-        item.prompt ??
-        item.title ??
-        detailProjection.question ??
-        "",
-    );
-    const revision = Number(item.revision ?? detailProjection.revision ?? 0);
-    const kind = response.kind;
-    if (
-      !questionId ||
-      !question ||
-      !Number.isSafeInteger(revision) ||
-      ![
-        "single",
-        "multiple",
-        "text",
-        "single_or_text",
-        "multiple_or_text",
-      ].includes(String(kind))
-    ) {
-      return (
-        (presentation.selectedId
-          ? questions.find(
-              (entry) => entry.questionId === presentation.selectedId,
-            )
-          : undefined) ?? questions[0]
-      );
-    }
-    const options = Array.isArray(response.options)
-      ? response.options.flatMap((value) => {
-          const option = this.providerRecord(value);
-          const id = typeof option.id === "string" ? option.id : "";
-          const label = typeof option.label === "string" ? option.label : "";
-          return id && label
-            ? [
-                {
-                  id,
-                  label,
-                  ...(typeof option.description === "string"
-                    ? { description: option.description }
-                    : {}),
-                },
-              ]
-            : [];
-        })
-      : [];
-    const recommendedOptionIds =
-      item.recommendedOptionIds ?? detailProjection.recommendedOptionIds;
-    const recommendedText =
-      item.recommendedText ?? detailProjection.recommendedText;
+  private productTargetContext() {
+    const state = this.#client.store.state;
     return {
-      questionId,
-      revision,
-      question,
-      response: {
-        kind: kind as AgentBoardPendingQuestion["response"]["kind"],
-        options,
-      },
-      recommendedOptionIds: Array.isArray(recommendedOptionIds)
-        ? recommendedOptionIds.filter(
-            (value): value is string => typeof value === "string",
-          )
-        : [],
-      ...(typeof recommendedText === "string" ? { recommendedText } : {}),
+      rootAgent: this.adoptedRootAgent(),
+      scopedAgents: this.scopedWorkState(state).agents,
+      agentBoard: currentProviderProjection(state, this.#targetPaneId)
+        ?.agentBoard,
     };
   }
 
@@ -1596,72 +1428,50 @@ export class BrokerDeckApp implements Component {
     if (this.#overlay.kind === "confirm") this.closeOverlay();
   }
 
-  private target() {
-    const scoped = this.scopedWorkState(this.#client.store.state);
-    const task =
-      this.#tab === "board" ? this.selectedTask(scoped) : this.selectedTask();
-    const boardSelected =
-      this.#tab === "board"
-        ? selectUnifiedBoardPresentation(
-            this.#client.store.state,
-            this.#targetPaneId,
-            this.#unifiedBoardSelection,
-            this.#boardFilter,
-          ).selected
-        : undefined;
-    const boardOwner =
-      boardSelected?.kind === "task" && boardSelected.source.assignedAgentId
-        ? scoped.agents.get(boardSelected.source.assignedAgentId)
-        : boardSelected?.kind === "agent-alert"
-          ? boardSelected.source
-          : undefined;
-    const agent =
-      boardOwner ??
-      (this.#tab === "board" || this.#tab === "files"
-        ? this.adoptedRootAgent()
-        : (this.selectedAgent() ?? this.adoptedRootAgent()));
-    const question = this.selectedQuestion();
-    const group =
-      this.#tab === "board" ? this.selectedGroup(scoped) : this.selectedGroup();
-    return {
-      ...(agent
-        ? {
-            agent,
-            ...(agent.paneId ? { paneId: agent.paneId } : {}),
-            ...(agent.terminalId ? { terminalId: agent.terminalId } : {}),
-            generation: agent.generation,
-            ...(agent.currentRunId ? { runId: agent.currentRunId } : {}),
-          }
-        : {}),
-      ...(task ? { task } : {}),
-      ...(group ? { group } : {}),
-      ...(this.selectedProviderTodo()
-        ? {
-            todoTaskId: this.selectedProviderTodo()!.id,
-            todoHasWait: Boolean(this.selectedProviderTodo()!.waitReason),
-          }
-        : {}),
-      ...(question ? { question, questionId: question.id } : {}),
-      ...(this.selectedBoardQuestion()
-        ? {
-            boardQuestion: this.selectedBoardQuestion(),
-            questionId: this.selectedBoardQuestion()!.questionId,
-          }
-        : {}),
-    };
+  private selectedActivityItem(): ActivityItem | undefined {
+    return selectActivityPresentation(
+      this.#client.store.state,
+      this.#targetPaneId,
+      this.#activitySelection,
+      this.#activityFilter,
+      this.#client.store.notifications,
+    ).selected;
   }
 
-  private runProvider(action: DeckAction, key: string, value?: unknown): void {
+  private target(): import("./actions.js").ActionTarget {
+    if (this.#tab === "board") {
+      const item = this.selectedBoardItem();
+      return item
+        ? actionTargetForBoardItem(item, this.productTargetContext())
+        : actionTargetForAgent(this.adoptedRootAgent());
+    }
+    if (this.#tab === "activity") {
+      const item = this.selectedActivityItem();
+      return item
+        ? actionTargetForActivityItem(item, this.productTargetContext())
+        : actionTargetForAgent(this.adoptedRootAgent());
+    }
+    return actionTargetForAgent(
+      this.#tab === "files"
+        ? this.adoptedRootAgent()
+        : (this.selectedAgent() ?? this.adoptedRootAgent()),
+    );
+  }
+
+  private runProvider(
+    action: DeckAction,
+    key: string,
+    value?: unknown,
+    targetOverride?: import("./actions.js").ActionTarget,
+  ): void {
     if (this.#providerPending.has(key)) return;
     this.#providerPending.add(key);
     this.#message = `${action} pending…`;
+    const target = targetOverride ?? this.target();
+    this.#onActionTarget?.(action, target);
     this.#requestRender();
     void this.#actions
-      .run(
-        action,
-        this.target() as import("./actions.js").ActionTarget,
-        value as never,
-      )
+      .run(action, target, value as never)
       .then(
         () => {
           this.#message = `${action} succeeded.`;
@@ -1676,9 +1486,13 @@ export class BrokerDeckApp implements Component {
         this.#requestRender();
       });
   }
-  private async run(action: DeckAction, value?: string): Promise<void> {
+  private async run(
+    action: DeckAction,
+    value?: string,
+    targetOverride?: import("./actions.js").ActionTarget,
+  ): Promise<void> {
     try {
-      const target = this.target() as import("./actions.js").ActionTarget;
+      const target = targetOverride ?? this.target();
       this.#onActionTarget?.(action, target);
       const result = await this.#actions.run(action, target, value);
       this.#message =
@@ -1690,79 +1504,6 @@ export class BrokerDeckApp implements Component {
       this.#message = error instanceof Error ? error.message : String(error);
     }
     this.#requestRender();
-  }
-
-  private renderSettings(_width: number): string[] {
-    const defaults = this.#modelPolicy?.defaults;
-    const lines = [
-      "DEFAULTS FOR NEW AGENTS",
-      `Global  ${defaults?.global ? `${defaults.global.provider}/${defaults.global.modelId}  ·  ${defaults.global.thinkingLevel}` : "Not set"}`,
-      ...Object.entries(defaults?.roles ?? {}).map(
-        ([key, model]) =>
-          `Role ${key}  ${model.provider}/${model.modelId}  ·  ${model.thinkingLevel}`,
-      ),
-      ...Object.entries(defaults?.projects ?? {}).map(
-        ([key, model]) =>
-          `Project ${key}  ${model.provider}/${model.modelId}  ·  ${model.thinkingLevel}`,
-      ),
-      "",
-      "LIFECYCLE",
-      `Automatic close after collected temporary work  ${this.#autoCloseCompletedTemporary ? "● ON" : "○ OFF"}`,
-      "Completed work is collected before safe automatic closure.",
-      "",
-      "MODEL CATALOG",
-      `${this.#modelFilter ? `Search: ${this.#modelFilter}` : "Press / to search by provider or model"}`,
-    ];
-    if (!this.#capabilities) {
-      lines.push("Loading installed Pi capabilities…");
-      return lines;
-    }
-    const filtered = this.#capabilities.models.filter(
-      (model) =>
-        !this.#modelFilter ||
-        `${model.provider}/${model.modelId}`
-          .toLowerCase()
-          .includes(this.#modelFilter.toLowerCase()),
-    );
-    const providerCounts = new Map<string, number>();
-    for (const model of filtered)
-      providerCounts.set(
-        model.provider,
-        (providerCounts.get(model.provider) ?? 0) + 1,
-      );
-    lines.push(
-      `${filtered.length} models from ${providerCounts.size} providers`,
-    );
-    if (!this.#modelFilter) {
-      for (const [provider, count] of [...providerCounts]
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 8))
-        lines.push(`  ${provider}  ${count} models`);
-      lines.push(
-        "",
-        "Search to choose an exact model. The full catalog stays out of the main view.",
-      );
-    } else {
-      const pageSize = Math.max(3, this.#getHeight() - lines.length - 4);
-      const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
-      const page = Math.min(
-        Math.floor(
-          (this.#overlay.kind === "settings"
-            ? (this.#overlay.scroll ?? 0)
-            : 0) / pageSize,
-        ),
-        pages - 1,
-      );
-      const start = page * pageSize;
-      for (const model of filtered.slice(start, start + pageSize))
-        lines.push(
-          `  ${model.provider}/${model.modelId}  ·  ${model.thinkingLevels.join(" ")}`,
-        );
-      lines.push(
-        `Page ${page + 1}/${pages}  ·  ↑↓ browse  ·  d set scoped default`,
-      );
-    }
-    return lines;
   }
 
   private async loadSettings(): Promise<void> {
@@ -1887,19 +1628,22 @@ export class BrokerDeckApp implements Component {
     this.#requestRender();
   }
 
-  private confirmTaskCancel(): void {
-    const task = this.selectedTask(
-      this.scopedWorkState(this.#client.store.state),
-    );
-    if (!task) {
+  private confirmTaskCancel(item?: BoardItem): void {
+    const selected = item ?? this.selectedBoardItem();
+    if (!selected || selected.kind !== "task") {
       this.#message = "Select a task first.";
       return;
     }
+    const target = actionTargetForBoardItem(
+      selected,
+      this.productTargetContext(),
+    );
     this.#overlay = {
       kind: "confirm",
       action: "cancelTask",
-      guard: { targetId: task.id },
-      summary: `Cancel ${task.title}?`,
+      target,
+      guard: { targetId: selected.source.id },
+      summary: `Cancel ${selected.source.title ?? selected.source.id}?`,
       focus: "primary",
       scroll: 0,
       pending: false,
@@ -1907,19 +1651,25 @@ export class BrokerDeckApp implements Component {
     this.#tracker.reset();
   }
 
-  private confirmGroup(action: "groupStop" | "groupClose"): void {
-    const group = this.selectedGroup(
-      this.scopedWorkState(this.#client.store.state),
-    );
-    if (!group) {
+  private confirmGroup(
+    action: "groupStop" | "groupClose",
+    item?: BoardItem,
+  ): void {
+    const selected = item ?? this.selectedBoardItem();
+    if (!selected || selected.kind !== "group") {
       this.#message = "Select a group first.";
       return;
     }
+    const target = actionTargetForBoardItem(
+      selected,
+      this.productTargetContext(),
+    );
     this.#overlay = {
       kind: "confirm",
       action,
-      guard: { targetId: group.id },
-      summary: `${action === "groupStop" ? "Stop" : "Close"} ${group.name ?? group.id}?`,
+      target,
+      guard: { targetId: selected.source.id },
+      summary: `${action === "groupStop" ? "Stop" : "Close"} ${selected.source.name ?? selected.source.title ?? selected.source.id}?`,
       focus: "primary",
       scroll: 0,
       pending: false,
@@ -1937,6 +1687,7 @@ export class BrokerDeckApp implements Component {
     this.#overlay = {
       kind: "confirm",
       action: "stop",
+      target: actionTargetForAgent(agent),
       guard: { agentId: agent.id, generation: agent.generation },
       summary: `Stop ${agent.displayName ?? agent.id}?`,
       focus: "primary",
@@ -1955,6 +1706,7 @@ export class BrokerDeckApp implements Component {
     this.#overlay = {
       kind: "confirm",
       action: "close",
+      target: actionTargetForAgent(agent),
       guard: { agentId: agent.id, generation: agent.generation },
       summary: `Close ${agent.displayName ?? agent.id}?`,
       focus: "primary",
