@@ -13,6 +13,7 @@ import type {
   DeckState,
 } from "./types.js";
 import {
+  boardRecord,
   selectBoardPresentation,
   type BoardRecord,
 } from "./board-presentation.js";
@@ -637,6 +638,45 @@ export function selectUnifiedBoardPresentation(
   };
 }
 
+const TERMINAL_SIGNAL_STATES = new Set([
+  "applied",
+  "answered",
+  "cancelled",
+  "closed",
+  "complete",
+  "completed",
+  "done",
+  "failed",
+  "rejected",
+  "resolved",
+  "succeeded",
+  "timed_out",
+  "timed out",
+]);
+
+function isTerminalSignalRecord(row: BoardRecord): boolean {
+  if (typeof row.terminalAt === "string" && row.terminalAt.length > 0)
+    return true;
+  const state = String(row.status ?? row.statusLabel ?? row.state ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[ _-]+/g, " ");
+  return TERMINAL_SIGNAL_STATES.has(state);
+}
+
+function signalDetailsById(
+  projection: AgentBoardProjection | undefined,
+  tab: "updates" | "decisions" | "history",
+): Record<string, BoardRecord> {
+  const outer = boardRecord(projection?.view);
+  const model = boardRecord(outer.view ?? outer);
+  const currentTab = boardRecord(boardRecord(model.tabs)[tab]);
+  const details = boardRecord(currentTab.detailsById);
+  return Object.fromEntries(
+    Object.entries(details).map(([id, value]) => [id, boardRecord(value)]),
+  );
+}
+
 function signalActivity(
   projection: AgentBoardProjection | undefined,
   tab: "updates" | "decisions" | "history",
@@ -647,26 +687,34 @@ function signalActivity(
       : tab === "decisions"
         ? "signal-decision"
         : "signal-history";
-  return signals(projection, tab).map((row, index) => {
+  const detailsById = signalDetailsById(projection, tab);
+  return signals(projection, tab).flatMap((row, index) => {
     const id = rowId(row, index);
-    return activityItem({
-      uiId: `signals:${tab}:${id}`,
-      entityId: id,
-      kind,
-      title: rowTitle(row, id),
-      summary: text(row.detail ?? row.outcome ?? row.answer, id),
-      state: text(row.statusLabel ?? row.state ?? row.kind, tab),
-      sortTimestamp: rowTimestamp(row),
-      source: row,
-      actions: {
-        actions: [
-          ...(row.archivable === true ? ["archive-update"] : []),
-          ...(row.retryableDelivery === true && hasAnswerId(row)
-            ? ["retry-delivery"]
-            : []),
-        ] as BoardAction[],
-      },
-    });
+    // Updates are live provider state, not history. Decisions and history are
+    // also admitted only when their provider record is terminal.
+    const detail = detailsById[id] ?? {};
+    const source = { ...row, ...detail };
+    if (!isTerminalSignalRecord(source)) return [];
+    return [
+      activityItem({
+        uiId: `signals:${tab}:${id}`,
+        entityId: id,
+        kind,
+        title: rowTitle(source, id),
+        summary: text(source.detail ?? source.outcome ?? source.answer, id),
+        state: text(source.statusLabel ?? source.state ?? source.kind, tab),
+        sortTimestamp: rowTimestamp(source),
+        source,
+        actions: {
+          actions: [
+            ...(source.archivable === true ? ["archive-update"] : []),
+            ...(source.retryableDelivery === true && hasAnswerId(source)
+              ? ["retry-delivery"]
+              : []),
+          ] as BoardAction[],
+        },
+      }),
+    ];
   });
 }
 

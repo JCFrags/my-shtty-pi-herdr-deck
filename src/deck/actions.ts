@@ -219,10 +219,13 @@ export class DeckActions {
           confirm: true,
         });
       case "answer": {
-        const answer = buildBrokerQuestionAnswer(
-          normalizeBrokerQuestion(target.question!),
-          questionSelection(value),
-        );
+        const answer =
+          typeof value === "object" && value !== null && "optionId" in value
+            ? (value as QuestionAnswer)
+            : buildBrokerQuestionAnswer(
+                normalizeBrokerQuestion(target.question!),
+                questionSelection(value),
+              );
         return this.client.answer(
           target.questionId ?? target.question!.id,
           answer,

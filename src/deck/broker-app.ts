@@ -51,8 +51,11 @@ import {
   type FilesScreenSurface,
 } from "./files-screen.js";
 import {
+  activateAgentMore,
   agentMoreGuard,
   isAgentMoreGuardCurrent,
+  moveAgentMoreFocus,
+  openAgentMore,
   renderAgents,
   type AgentActionContract,
   type AgentContractAction,
@@ -65,6 +68,7 @@ import {
 } from "./activity.js";
 import { renderBoardScreen } from "./board-screen.js";
 import {
+  allowsEmptyText,
   boundedOverlayText,
   noOverlay,
   questionResponseValid,
@@ -155,6 +159,7 @@ export class BrokerDeckApp implements Component {
   #activityFilter: ActivityFilter = "all";
   #activityScroll = 0;
   #activityDetailScroll = 0;
+  #activityWheelDetached = false;
   #activitySurface: import("./screen-types.js").RenderedSurface | undefined;
   #activitySurfaceOffset = 0;
   #renderSignature = "";
@@ -214,6 +219,7 @@ export class BrokerDeckApp implements Component {
   }
 
   render(width: number): string[] {
+    if (!this.ensureAgentMoreCurrent()) this.#requestRender();
     const safeWidth = Math.max(1, width);
     const state = this.#client.store.state;
     const overlay = this.#overlay;
@@ -275,6 +281,10 @@ export class BrokerDeckApp implements Component {
   }
 
   handleInput(data: string): void {
+    if (!this.ensureAgentMoreCurrent()) {
+      this.#requestRender();
+      return;
+    }
     if (this.#overlay.kind !== "none") {
       this.handleOverlayInput(data);
       this.syncVisibleSignature();
@@ -357,7 +367,16 @@ export class BrokerDeckApp implements Component {
   }
 
   handleMouse(event: TuiMouseEvent): boolean {
+    if (!this.ensureAgentMoreCurrent()) {
+      this.#requestRender();
+      return true;
+    }
     if (this.#overlay.kind !== "none") {
+      if (this.#overlay.kind === "agent-more" && event.type === "wheel") {
+        this.setAgentMoreFocus(event.direction === "down" ? 1 : -1);
+        this.#requestRender();
+        return true;
+      }
       if (event.type === "wheel") {
         this.#overlay = {
           ...this.#overlay,
@@ -409,6 +428,7 @@ export class BrokerDeckApp implements Component {
         );
         this.#activityScroll = result.state.listScroll;
         this.#activityDetailScroll = result.state.detailScroll;
+        this.#activityWheelDetached = result.state.wheelDetached;
         if (result.handled) {
           this.syncVisibleSignature();
           this.#requestRender();
@@ -428,6 +448,9 @@ export class BrokerDeckApp implements Component {
   }
 
   invalidate(): void {
+    if (!this.ensureAgentMoreCurrent()) {
+      this.#renderSignature = this.visibleSignature();
+    }
     this.#requestRender();
   }
 
@@ -498,6 +521,70 @@ export class BrokerDeckApp implements Component {
     this.#tracker.reset();
   }
 
+  private guardedAgent(
+    guard: Extract<OverlayState, { kind: "agent-more" }>["guard"],
+  ): Agent | undefined {
+    const agent = this.scopedWorkState(this.#client.store.state).agents.get(
+      guard.agentId,
+    );
+    return agent?.generation === guard.generation ? agent : undefined;
+  }
+
+  private ensureAgentMoreCurrent(): boolean {
+    if (
+      this.#overlay.kind === "agent-more" &&
+      !isAgentMoreGuardCurrent(this.#client.store.state, this.#overlay.guard)
+    ) {
+      this.closeOverlay();
+      this.syncVisibleSignature();
+      return false;
+    }
+    return true;
+  }
+
+  private setAgentMoreFocus(delta: number): void {
+    const overlay = this.#overlay;
+    if (overlay.kind !== "agent-more" || !this.ensureAgentMoreCurrent()) return;
+    const presentation = openAgentMore(
+      this.#client.store.state,
+      overlay.guard,
+      overlay.focusedIndex ?? 0,
+      this.agentActionContract(),
+    );
+    if (!presentation) {
+      this.closeOverlay();
+      return;
+    }
+    this.#overlay = {
+      ...overlay,
+      focusedIndex: moveAgentMoreFocus(presentation, delta).focusedIndex,
+    };
+  }
+
+  private activateAgentMore(
+    guard: Extract<OverlayState, { kind: "agent-more" }>["guard"],
+    index: number,
+  ): void {
+    if (!this.ensureAgentMoreCurrent()) return;
+    const presentation = openAgentMore(
+      this.#client.store.state,
+      guard,
+      index,
+      this.agentActionContract(),
+    );
+    if (!presentation) {
+      this.closeOverlay();
+      return;
+    }
+    activateAgentMore(
+      this.#client.store.state,
+      presentation,
+      this.agentActionContract(),
+    );
+    this.syncVisibleSignature();
+    this.#requestRender();
+  }
+
   private appendSurface(lines: string[], surface: RenderedSurface): void {
     const yOffset = lines.length;
     lines.push(...surface.lines);
@@ -528,20 +615,29 @@ export class BrokerDeckApp implements Component {
         });
       case "help":
         return renderHelpScreen(width, () => this.closeOverlay());
-      case "agent-more":
+      case "agent-more": {
+        const presentation = openAgentMore(
+          this.#client.store.state,
+          overlay.guard,
+          overlay.focusedIndex ?? 0,
+          this.agentActionContract(),
+        );
         return renderAgentMoreScreen({
           width,
-          agent: this.selectedAgent(),
-          onCompact: () => void this.run("compact"),
-          onRestart: () => void this.run("restart"),
-          onCloseAgent: () => this.confirmClose(),
-          onWorktree: () => void this.run("openWorktree"),
-          onCopy: () => void this.copySelectedId(),
-          onModel: () => this.cycleModel(),
-          onThinking: () => this.cycleThinking(),
-          onCreate: () => this.beginInput("create"),
+          agent: this.guardedAgent(overlay.guard),
+          ...(presentation ? { presentation } : {}),
+          onActivate: (index) => this.activateAgentMore(overlay.guard, index),
+          onCompact: () => undefined,
+          onRestart: () => undefined,
+          onCloseAgent: () => undefined,
+          onWorktree: () => undefined,
+          onCopy: () => undefined,
+          onModel: () => undefined,
+          onThinking: () => undefined,
+          onCreate: () => undefined,
           onClose: () => this.closeOverlay(),
         });
+      }
       case "confirm":
         return renderConfirmationScreen(
           width,
@@ -612,12 +708,11 @@ export class BrokerDeckApp implements Component {
       return;
     }
     if (overlay.kind === "agent-more") {
-      if (data === "m") this.closeOverlay();
-      else if (data === "c") void this.run("compact");
-      else if (data === "r") void this.run("restart");
-      else if (data === "x") this.confirmClose();
-      else if (data === "t") this.cycleThinking();
-      else if (data === "k") this.cycleModel();
+      if (data === "m" || data === "\u001b") this.closeOverlay();
+      else if (data === "\u001b[A" || data === "k") this.setAgentMoreFocus(-1);
+      else if (data === "\u001b[B" || data === "j") this.setAgentMoreFocus(1);
+      else if (data === "\r" || data === "\n")
+        this.activateAgentMore(overlay.guard, overlay.focusedIndex ?? 0);
       return;
     }
     if (overlay.kind === "text-input") {
@@ -670,7 +765,10 @@ export class BrokerDeckApp implements Component {
       return;
     }
     const denied =
-      purpose === "create" || purpose === "default"
+      purpose === "create" ||
+      purpose === "default" ||
+      purpose === "files-filter" ||
+      purpose === "model-filter"
         ? undefined
         : this.#actions.authorize(purpose as DeckAction, target);
     if (denied) {
@@ -790,27 +888,95 @@ export class BrokerDeckApp implements Component {
     const overlay = this.#overlay;
     if (overlay.kind !== "text-input" || overlay.pending) return;
     const value = overlay.value.trim();
-    if (!value) {
+    if (!value && !allowsEmptyText(overlay.purpose)) {
       this.#overlay = { ...overlay, error: "Text is required." };
       return;
     }
-    if (overlay.purpose === "default" || overlay.purpose === "model-filter")
+    const target = this.targetForOverlayGuard(overlay.guard);
+    if (overlay.guard?.agentId && !target?.agent) {
       this.#overlay = {
-        kind: "settings",
-        focus: "primary",
-        scroll: 0,
-        pending: false,
+        ...overlay,
+        error: "The agent changed. Close and select it again.",
       };
-    else this.closeOverlay();
-    if (overlay.purpose === "create") void this.createAgent(value);
-    else if (overlay.purpose === "files-filter") {
-      this.#filesScreen = { ...this.#filesScreen, treeScroll: 0 };
-      void this.runFiles("filter", value);
-    } else if (overlay.purpose === "model-filter") {
-      this.#modelFilter = value;
-      void this.loadSettings();
-    } else if (overlay.purpose === "default") void this.setDefault(value);
-    else void this.run(overlay.purpose, value);
+      return;
+    }
+    if (overlay.purpose === "create" && !target?.agent) {
+      this.#overlay = { ...overlay, error: "Select a parent agent first." };
+      return;
+    }
+    const action = overlay.purpose;
+    if (
+      action !== "create" &&
+      action !== "default" &&
+      action !== "files-filter" &&
+      action !== "model-filter"
+    ) {
+      const denied = this.#actions.authorize(
+        action as DeckAction,
+        target ?? {},
+      );
+      if (denied) {
+        this.#overlay = { ...overlay, error: denied };
+        return;
+      }
+    }
+    const { error: _overlayError, ...overlayWithoutError } = overlay;
+    this.#overlay = { ...overlayWithoutError, pending: true };
+    try {
+      let accepted = true;
+      if (overlay.purpose === "create")
+        accepted = await this.createAgent(value, target?.agent);
+      else if (overlay.purpose === "files-filter") {
+        this.#filesScreen = { ...this.#filesScreen, treeScroll: 0 };
+        accepted = await this.runFiles("filter", value);
+      } else if (overlay.purpose === "model-filter") {
+        this.#modelFilter = value;
+        accepted = await this.loadSettings();
+      } else if (overlay.purpose === "default")
+        accepted = await this.setDefault(value);
+      else {
+        // The broker request is launched synchronously. Close the editor now
+        // so navigation is not blocked while the request settles.
+        const request = this.run(overlay.purpose, value, target);
+        this.closeOverlay();
+        await request;
+        return;
+      }
+      if (!accepted) {
+        this.#overlay = {
+          ...overlay,
+          pending: false,
+          error: this.#message || "The request was rejected.",
+        };
+        return;
+      }
+      if (overlay.purpose === "default" || overlay.purpose === "model-filter")
+        this.#overlay = {
+          kind: "settings",
+          focus: "primary",
+          scroll: 0,
+          pending: false,
+        };
+      else this.closeOverlay();
+    } catch (error) {
+      this.#overlay = {
+        ...overlay,
+        pending: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+    this.#requestRender();
+  }
+
+  private targetForOverlayGuard(
+    guard: import("./overlay-screen.js").OverlayTargetGuard | undefined,
+  ): import("./actions.js").ActionTarget | undefined {
+    if (!guard?.agentId) return this.target();
+    const agent = this.scopedWorkState(this.#client.store.state).agents.get(
+      guard.agentId,
+    );
+    if (!agent || agent.generation !== guard.generation) return undefined;
+    return actionTargetForAgent(agent);
   }
 
   private async submitQuestionResponse(): Promise<void> {
@@ -947,6 +1113,7 @@ export class BrokerDeckApp implements Component {
     if (overlay.kind !== "confirm" || overlay.pending) return;
     const state = this.scopedWorkState(this.#client.store.state);
     const guard = overlay.guard ?? {};
+    let target: import("./actions.js").ActionTarget | undefined;
     if (overlay.action === "cancelTask") {
       const taskId = overlay.target.task?.id ?? guard.targetId;
       const task = state.tasks.get(taskId ?? "");
@@ -958,6 +1125,23 @@ export class BrokerDeckApp implements Component {
         this.closeOverlay();
         return;
       }
+      const item = selectUnifiedBoardPresentation(
+        this.#client.store.state,
+        this.#targetPaneId,
+        `orchestrator:task:${task.id}`,
+        this.#boardFilter,
+      ).visible.find(
+        (candidate) =>
+          candidate.kind === "task" && candidate.source.id === task.id,
+      );
+      if (!item || item.kind !== "task") {
+        this.#message = "The task changed. Close and select it again.";
+        this.closeOverlay();
+        return;
+      }
+      // The guard validates the current board item. Keep the original target
+      // identity so a confirmation cannot silently switch sources.
+      target = overlay.target;
     } else if (
       overlay.action === "groupStop" ||
       overlay.action === "groupClose"
@@ -974,6 +1158,23 @@ export class BrokerDeckApp implements Component {
         this.closeOverlay();
         return;
       }
+      const item = selectUnifiedBoardPresentation(
+        this.#client.store.state,
+        this.#targetPaneId,
+        `orchestrator:group:${group.id}`,
+        this.#boardFilter,
+      ).visible.find(
+        (candidate) =>
+          candidate.kind === "group" && candidate.source.id === group.id,
+      );
+      if (!item || item.kind !== "group") {
+        this.#message = "The group changed. Close and select it again.";
+        this.closeOverlay();
+        return;
+      }
+      // The guard validates the current board item. Keep the original target
+      // identity so a confirmation cannot silently switch sources.
+      target = overlay.target;
     } else {
       const agentId =
         overlay.target.agent?.id ?? guard.agentId ?? guard.targetId;
@@ -987,9 +1188,23 @@ export class BrokerDeckApp implements Component {
         this.closeOverlay();
         return;
       }
+      target = actionTargetForAgent(agent);
     }
+    const denied = this.#actions.authorize(overlay.action, target);
+    if (denied) {
+      this.#message = denied;
+      this.closeOverlay();
+      return;
+    }
+    this.#onActionTarget?.(overlay.action, target);
     this.closeOverlay();
-    await this.run(overlay.action, undefined, overlay.target);
+    try {
+      await this.#actions.run(overlay.action, target);
+      this.#message = `${overlay.action} accepted.`;
+    } catch (error) {
+      this.#message = error instanceof Error ? error.message : String(error);
+    }
+    this.#requestRender();
   }
 
   private selectBoardItem(item: BoardItem): void {
@@ -1129,19 +1344,19 @@ export class BrokerDeckApp implements Component {
           : this.#actions.authorize(action, target),
       activate: (action: AgentContractAction, target) => {
         if (target.agent) this.#selectedAgent = target.agent.id;
-        if (action === "create-child-agent") this.beginInput("create");
+        if (action === "create-child-agent") this.beginInput("create", target);
         else if (
           action === "prompt" ||
           action === "ask" ||
           action === "steer" ||
           action === "followUp"
         )
-          this.beginInput(action);
-        else if (action === "stop") this.confirmAgentStop();
-        else if (action === "close") this.confirmClose();
-        else if (action === "setModel") this.cycleModel();
-        else if (action === "setThinking") this.cycleThinking();
-        else void this.run(action);
+          this.beginInput(action, target);
+        else if (action === "stop") this.confirmAgentStop(target);
+        else if (action === "close") this.confirmClose(target);
+        else if (action === "setModel") this.cycleModel(target.agent);
+        else if (action === "setThinking") this.cycleThinking(target.agent);
+        else void this.run(action, undefined, target);
       },
     };
   }
@@ -1151,6 +1366,7 @@ export class BrokerDeckApp implements Component {
     this.#overlay = {
       kind: "agent-more",
       guard,
+      focusedIndex: 0,
       focus: "primary",
       scroll: 0,
       pending: false,
@@ -1198,6 +1414,22 @@ export class BrokerDeckApp implements Component {
 
   private selectActivityItem(item: ActivityItem): void {
     this.#activitySelection = item.id;
+    const model = selectActivityPresentation(
+      this.#client.store.state,
+      this.#targetPaneId,
+      item.id,
+      this.#activityFilter,
+      this.#client.store.notifications,
+    );
+    const index = model.items.findIndex(
+      (candidate) => candidate.id === item.id,
+    );
+    const visibleCount = Math.max(1, this.#getHeight() - 12);
+    if (index >= 0) {
+      if (index < this.#activityScroll) this.#activityScroll = index;
+      else if (index >= this.#activityScroll + visibleCount)
+        this.#activityScroll = index - visibleCount + 1;
+    }
   }
 
   private renderActivitySurface(
@@ -1241,34 +1473,62 @@ export class BrokerDeckApp implements Component {
       },
       width,
     );
-    if (surface.correctedState)
+    if (surface.correctedState) {
       this.#activityScroll = surface.correctedState.listScroll;
+      this.#activityDetailScroll = surface.correctedState.detailScroll;
+      this.#activityWheelDetached = surface.correctedState.wheelDetached;
+    }
     this.#activitySurface = surface;
     this.#activitySurfaceOffset = lines.length;
     this.appendSurface(lines, surface);
+  }
+
+  private currentActivityItem(uiId: string): ActivityItem | undefined {
+    return selectActivityPresentation(
+      this.#client.store.state,
+      this.#targetPaneId,
+      uiId,
+      this.#activityFilter,
+      this.#client.store.notifications,
+    ).items.find((candidate) => candidate.uiId === uiId);
   }
 
   private isActivityActionAllowed(
     item: ActivityItem,
     action: ActivityAction,
   ): boolean {
-    if (action === "archive-update" || action === "retry-delivery")
-      return Boolean(this.adoptedRootAgent());
-    if (action === "focus")
-      return item.kind === "terminal-agent" && Boolean(item.source.paneId);
-    return true;
+    const current = this.currentActivityItem(item.uiId);
+    if (!current || !current.actions.actions.includes(action)) return false;
+    const target = actionTargetForActivityItem(
+      current,
+      this.productTargetContext(),
+    );
+    if (action === "archive-update" || action === "retry-delivery") {
+      const request = activityActionRequest(current, action);
+      return Boolean(
+        request &&
+        !this.#actions.authorize("boardAction", {
+          ...target,
+          boardAction: request,
+        }),
+      );
+    }
+    if (action === "focus") return !this.#actions.authorize("focus", target);
+    return !this.#actions.authorize("copyId", target);
   }
 
   private activateActivityAction(
     item: ActivityItem,
     action: ActivityAction,
   ): void {
-    this.selectActivityItem(item);
+    const current = this.currentActivityItem(item.uiId);
+    if (!current || !this.isActivityActionAllowed(current, action)) return;
+    this.selectActivityItem(current);
     const target = actionTargetForActivityItem(
-      item,
+      current,
       this.productTargetContext(),
     );
-    const request = activityActionRequest(item, action);
+    const request = activityActionRequest(current, action);
     if (request)
       void this.run("boardAction", undefined, {
         ...target,
@@ -1311,7 +1571,9 @@ export class BrokerDeckApp implements Component {
       this.activityScreenState(),
       key,
       model.items.map((item) => item.id),
+      Math.max(1, this.#getHeight() - 12),
     );
+    this.#activityScroll = result.state.listScroll;
     if (result.selectedId) {
       const item = model.items.find(
         (candidate) => candidate.id === result.selectedId,
@@ -1328,7 +1590,7 @@ export class BrokerDeckApp implements Component {
         : {}),
       listScroll: this.#activityScroll,
       detailScroll: this.#activityDetailScroll,
-      wheelDetached: false,
+      wheelDetached: this.#activityWheelDetached,
     } as const;
   }
 
@@ -1405,11 +1667,11 @@ export class BrokerDeckApp implements Component {
     action: string,
     value?: string,
     expanded?: boolean,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const agent = this.adoptedRootAgent();
     if (!agent) {
       this.#message = "Files provider owner is unavailable.";
-      return;
+      return false;
     }
     try {
       await this.#actions.run("filesAction", {
@@ -1427,8 +1689,11 @@ export class BrokerDeckApp implements Component {
       this.#message = `Files ${action} succeeded.`;
     } catch (error) {
       this.#message = error instanceof Error ? error.message : String(error);
+      this.#requestRender();
+      return false;
     }
     this.#requestRender();
+    return true;
   }
   private scopedWorkState(state: DeckState): DeckState {
     return selectAdoptedScope(state, this.#targetPaneId).state;
@@ -1572,7 +1837,7 @@ export class BrokerDeckApp implements Component {
     action: DeckAction,
     value?: string,
     targetOverride?: import("./actions.js").ActionTarget,
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
       const target = targetOverride ?? this.target();
       this.#onActionTarget?.(action, target);
@@ -1582,13 +1847,16 @@ export class BrokerDeckApp implements Component {
           ? `Copied ID: ${String(result)}`
           : `${action} accepted.`;
       if (this.#overlay.kind === "confirm") this.closeOverlay();
+      this.#requestRender();
+      return true;
     } catch (error) {
       this.#message = error instanceof Error ? error.message : String(error);
+      this.#requestRender();
+      return false;
     }
-    this.#requestRender();
   }
 
-  private async loadSettings(): Promise<void> {
+  private async loadSettings(): Promise<boolean> {
     try {
       const [capabilities, settings] = await Promise.all([
         this.#client.request("model.capabilities", {}),
@@ -1605,8 +1873,11 @@ export class BrokerDeckApp implements Component {
       this.#message = "Installed model choices loaded.";
     } catch (error) {
       this.#message = error instanceof Error ? error.message : String(error);
+      this.#requestRender();
+      return false;
     }
     this.#requestRender();
+    return true;
   }
 
   private async toggleAutoClose(): Promise<void> {
@@ -1623,7 +1894,7 @@ export class BrokerDeckApp implements Component {
     this.#requestRender();
   }
 
-  private async setDefault(value: string): Promise<void> {
+  private async setDefault(value: string): Promise<boolean> {
     const [scope, key, provider, modelId, thinkingLevel, ...extra] = value
       .split("|")
       .map((part) => part.trim());
@@ -1638,7 +1909,7 @@ export class BrokerDeckApp implements Component {
       this.#message =
         "Use scope|key|provider|model|thinking. The global key is empty.";
       this.#requestRender();
-      return;
+      return false;
     }
     try {
       await this.#client.request("model.policy.set", {
@@ -1646,16 +1917,23 @@ export class BrokerDeckApp implements Component {
         key: key ?? "",
         model: { provider, modelId, thinkingLevel },
       });
-      await this.loadSettings();
+      const settingsAccepted = await this.loadSettings();
+      if (!settingsAccepted) return false;
       this.#message =
         "The scoped default was accepted for new agents. Running agents were not changed.";
     } catch (error) {
       this.#message = error instanceof Error ? error.message : String(error);
+      this.#requestRender();
+      return false;
     }
     this.#requestRender();
+    return true;
   }
 
-  private async createAgent(value: string): Promise<void> {
+  private async createAgent(
+    value: string,
+    parentOverride?: Agent,
+  ): Promise<boolean> {
     const [
       title,
       objective,
@@ -1666,7 +1944,7 @@ export class BrokerDeckApp implements Component {
       lifecycleClass,
       ...extra
     ] = value.split("|").map((part) => part.trim());
-    const parent = this.selectedAgent();
+    const parent = parentOverride ?? this.selectedAgent();
     if (
       extra.length ||
       !parent?.cwd ||
@@ -1683,7 +1961,7 @@ export class BrokerDeckApp implements Component {
       this.#message =
         "Use title|objective|profile|provider|model|thinking|lifecycle with a parent that has a project.";
       this.#requestRender();
-      return;
+      return false;
     }
     try {
       await this.#client.request("agent.spawn", {
@@ -1706,8 +1984,11 @@ export class BrokerDeckApp implements Component {
       await this.#client.refresh();
     } catch (error) {
       this.#message = error instanceof Error ? error.message : String(error);
+      this.#requestRender();
+      return false;
     }
     this.#requestRender();
+    return true;
   }
 
   private confirmTaskCancel(item?: BoardItem): void {
@@ -1759,17 +2040,15 @@ export class BrokerDeckApp implements Component {
     this.#tracker.reset();
   }
 
-  private async copySelectedId(): Promise<void> {
-    await this.run("copyId");
-  }
-
-  private confirmAgentStop(): void {
-    const agent = this.selectedAgent();
+  private confirmAgentStop(
+    targetOverride?: import("./actions.js").ActionTarget,
+  ): void {
+    const agent = targetOverride?.agent ?? this.selectedAgent();
     if (!agent) return;
     this.#overlay = {
       kind: "confirm",
       action: "stop",
-      target: actionTargetForAgent(agent),
+      target: targetOverride ?? actionTargetForAgent(agent),
       guard: { agentId: agent.id, generation: agent.generation },
       summary: `Stop ${agent.displayName ?? agent.id}?`,
       focus: "primary",
@@ -1779,8 +2058,10 @@ export class BrokerDeckApp implements Component {
     this.#tracker.reset();
   }
 
-  private confirmClose(): void {
-    const agent = this.selectedAgent();
+  private confirmClose(
+    targetOverride?: import("./actions.js").ActionTarget,
+  ): void {
+    const agent = targetOverride?.agent ?? this.selectedAgent();
     if (!agent) {
       this.#message = "Select an agent first.";
       return;
@@ -1788,7 +2069,7 @@ export class BrokerDeckApp implements Component {
     this.#overlay = {
       kind: "confirm",
       action: "close",
-      target: actionTargetForAgent(agent),
+      target: targetOverride ?? actionTargetForAgent(agent),
       guard: { agentId: agent.id, generation: agent.generation },
       summary: `Close ${agent.displayName ?? agent.id}?`,
       focus: "primary",
@@ -1798,8 +2079,7 @@ export class BrokerDeckApp implements Component {
     this.#tracker.reset();
   }
 
-  private cycleModel(): void {
-    const agent = this.selectedAgent();
+  private cycleModel(agent = this.selectedAgent()): void {
     const choices = getAgentModelChoices(agent);
     if (choices.length === 0) {
       this.#message =
@@ -1823,8 +2103,7 @@ export class BrokerDeckApp implements Component {
     void this.run("setModel", `${next.provider}/${next.id}`);
   }
 
-  private cycleThinking(): void {
-    const agent = this.selectedAgent();
+  private cycleThinking(agent = this.selectedAgent()): void {
     const choices = getAgentThinkingChoices(agent);
     if (choices.length === 0) {
       this.#message =

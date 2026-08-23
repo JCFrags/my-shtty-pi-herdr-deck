@@ -14,6 +14,11 @@ export type TextInputPurpose =
   | "files-filter"
   | "model-filter";
 
+/** Filter editors accept an empty value so that they can clear their filter. */
+export function allowsEmptyText(purpose: TextInputPurpose): boolean {
+  return purpose === "files-filter" || purpose === "model-filter";
+}
+
 export type ConfirmationAction =
   "cancelTask" | "groupStop" | "groupClose" | "close" | "stop";
 
@@ -42,6 +47,7 @@ export type OverlayState =
   | ({
       kind: "agent-more";
       guard: Required<Pick<OverlayTargetGuard, "agentId" | "generation">>;
+      focusedIndex?: number;
     } & OverlayCommon)
   | ({
       kind: "confirm";

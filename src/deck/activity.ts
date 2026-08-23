@@ -178,6 +178,7 @@ export function handleActivityKey(
   state: ActivityScreenState,
   key: string,
   itemIds: readonly string[],
+  visibleCount = Number.POSITIVE_INFINITY,
 ): ActivityKeyResult {
   if (key !== "ArrowUp" && key !== "ArrowDown" && key !== "j" && key !== "k")
     return { state, handled: false };
@@ -185,8 +186,15 @@ export function handleActivityKey(
   const current = Math.max(0, itemIds.indexOf(state.selectedId ?? ""));
   const delta = key === "ArrowUp" || key === "k" ? -1 : 1;
   const index = (current + delta + itemIds.length) % itemIds.length;
+  const nextScroll = Number.isFinite(visibleCount)
+    ? index < state.listScroll
+      ? index
+      : index >= state.listScroll + Math.max(1, visibleCount)
+        ? index - Math.max(1, visibleCount) + 1
+        : state.listScroll
+    : state.listScroll;
   return {
-    state,
+    state: { ...state, listScroll: Math.max(0, nextScroll) },
     handled: true,
     ...(itemIds[index] ? { selectedId: itemIds[index] } : {}),
   };
@@ -354,28 +362,30 @@ function renderPane(
     );
   const detail = new SurfaceBuilder(width);
   detail.addLine(`DETAIL · ${selected?.kind ?? "none"}`);
+  const actionButtons = selected
+    ? selected.actions.actions.filter(isSupportedAction).map((typed) => ({
+        id: `activity:action:${selected.uiId}:${typed}`,
+        label: actionLabel(typed),
+        disabled: input.actions
+          ? !input.actions.isAllowed(selected, typed)
+          : false,
+        activate: () => input.actions?.activate(selected, typed),
+      }))
+    : [];
+  // Keep actions above the detail body. This leaves them reachable when the
+  // terminal is short instead of placing them after an unbounded detail.
+  if (actionButtons.length > 0) detail.addButtons(actionButtons);
   detail.addLine("");
+  const detailLinesBudget = Math.max(
+    1,
+    (input.height ?? 24) - 2 - (actionButtons.length > 0 ? 1 : 0),
+  );
   const detailContent = detailLines(selected, input, width);
   for (const line of detailContent.slice(
     input.screen.detailScroll,
-    input.screen.detailScroll + Math.max(1, (input.height ?? 24) - 3),
+    input.screen.detailScroll + detailLinesBudget,
   ))
     detail.addLine(line);
-  if (selected) {
-    detail.addLine("");
-    detail.addButtons(
-      selected.actions.actions.filter(isSupportedAction).map((typed) => {
-        return {
-          id: `activity:action:${selected.uiId}:${typed}`,
-          label: actionLabel(typed),
-          disabled: input.actions
-            ? !input.actions.isAllowed(selected, typed)
-            : false,
-          activate: () => input.actions?.activate(selected, typed),
-        };
-      }),
-    );
-  }
   const left = list.finish();
   const right = detail.finish();
   const leftWidth = Math.max(1, Math.floor(width * 0.42));
