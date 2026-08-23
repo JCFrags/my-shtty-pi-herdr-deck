@@ -7,9 +7,9 @@ import type {
   BoardItem,
   NormalizedQuestion,
 } from "./product-presentation.js";
-import { normalizeSignalsQuestion } from "./product-presentation.js";
 import { boardRecord, selectBoardPresentation } from "./board-presentation.js";
 import type { AgentBoardProjection } from "../shared/provider-projections.js";
+import { normalizeSignalsPresentation } from "./signals-presentation.js";
 
 export interface ProductActionRequest {
   action: string;
@@ -218,19 +218,37 @@ export function normalizedSignalsQuestionForBoardItem(
   agentBoard: AgentBoardProjection | undefined,
 ): NormalizedQuestion | undefined {
   if (item.kind !== "signal-question") return undefined;
-  const question = signalsQuestionForBoardItem(item, agentBoard);
-  if (!question) return undefined;
   const presentation = selectBoardPresentation(
     agentBoard,
     "inbox",
     item.entityId,
   );
-  const detail = boardRecord(presentation.detail);
-  return normalizeSignalsQuestion(question, {
-    ...item.source,
-    ...detail,
-    projection: boardRecord(detail.projection),
+  const normalized = normalizeSignalsPresentation({
+    projection: agentBoard,
+    tab: "inbox",
+    row: item.source,
+    detail: boardRecord(presentation.detail),
   });
+  if (!normalized || normalized.entityType !== "question") return undefined;
+  return {
+    source: "signals",
+    uiId: `signals:question:${normalized.entityId}`,
+    entityId: normalized.entityId,
+    revision: normalized.revision,
+    prompt: normalized.prompt,
+    responseKind: normalized.responseKind,
+    options: normalized.options,
+    allowFreeform: normalized.responseKind.includes("text"),
+    recommendedOptionIds: normalized.recommendedOptionIds,
+    ...(normalized.recommendedText
+      ? { recommendedText: normalized.recommendedText }
+      : {}),
+    dismissible: normalized.dismissible,
+    retryableDelivery: normalized.retryableDelivery,
+    ...(normalized.answerId ? { answerId: normalized.answerId } : {}),
+    deliveryState: normalized.deliveryPending ? "pending" : "settled",
+    terminal: normalized.terminal,
+  };
 }
 
 export function signalsActionRequest(
