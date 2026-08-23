@@ -8,6 +8,8 @@ import {
   AGENT_BOARD_VIEW_RESPONSE_EVENT,
   FILES_PROVIDER_REQUEST_EVENT,
   FILES_PROVIDER_RESPONSE_EVENT,
+  FILES_PROVIDER_SUMMARY_EVENT,
+  FILES_PROVIDER_VIEW_EVENT,
   TODO_REQUEST_EVENT,
   TODO_SUMMARY_EVENT,
   validateProviderProjection,
@@ -199,6 +201,79 @@ test("collector unwraps runtime response envelopes and clears stale Files errors
     1,
   );
   collector.stop();
+});
+
+test("collector coalesces semantic bursts, retries failures, and cancels a stopped flush", async () => {
+  const events = new FakeEvents();
+  const published: ProviderProjection[] = [];
+  const collector = new ProviderProjectionCollector(events, async (value) => {
+    published.push(value);
+  });
+  collector.start();
+  collector.bind("agt_root", "pi-root");
+  const summary = {
+    version: 1,
+    cwd: "/repo",
+    currentPath: "",
+    selectedPaths: [],
+    selectedCount: 0,
+  };
+  const view = { version: 1, cwd: "/repo", currentPath: "", rows: [] };
+  events.emit(FILES_PROVIDER_SUMMARY_EVENT, { summary });
+  events.emit(FILES_PROVIDER_VIEW_EVENT, { view });
+  events.emit(AGENT_BOARD_CHANGED_EVENT, {
+    snapshot: {
+      pendingAsyncQuestionCount: 1,
+      questions: [{ id: "q", question: "Choose" }],
+    },
+  });
+  events.emit(TODO_SUMMARY_EVENT, {
+    snapshot: { items: [{ id: "t", text: "Work" }] },
+  });
+  await tick();
+  assert.equal(
+    published.length,
+    1,
+    "one synchronous provider burst publishes once",
+  );
+
+  events.emit(FILES_PROVIDER_SUMMARY_EVENT, { summary });
+  events.emit(FILES_PROVIDER_VIEW_EVENT, { view });
+  await tick();
+  assert.equal(
+    published.length,
+    1,
+    "identical semantic state does not publish",
+  );
+
+  events.emit(FILES_PROVIDER_VIEW_EVENT, {
+    view: { ...view, currentPath: "src" },
+  });
+  await tick();
+  assert.equal(published.length, 2, "one semantic change publishes once");
+  collector.stop();
+
+  let attempts = 0;
+  const retry = new ProviderProjectionCollector(undefined, async () => {
+    attempts += 1;
+    if (attempts === 1) throw new Error("offline");
+  });
+  retry.bind("agt_retry", "pi-retry");
+  retry.publish();
+  await tick();
+  assert.equal(attempts, 1);
+  retry.publish();
+  await tick();
+  assert.equal(attempts, 2, "a failed state remains retryable");
+
+  let stoppedPublishes = 0;
+  const stopped = new ProviderProjectionCollector(undefined, async () => {
+    stoppedPublishes += 1;
+  });
+  stopped.bind("agt_stopped", "pi-stopped");
+  stopped.stop();
+  await tick();
+  assert.equal(stoppedPublishes, 0, "stop cancels the scheduled flush");
 });
 
 test("provider projection validation is bounded and store reconnects ephemeral state", () => {

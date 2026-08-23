@@ -1,5 +1,6 @@
-import type { Agent, Task } from "../state/types.js";
+import type { Agent, Task, TaskState } from "../state/types.js";
 import type {
+  AgentBoardPendingQuestion,
   AgentBoardProjection,
   ProviderProjection,
   TodoProjectionItem,
@@ -15,99 +16,208 @@ import {
   type BoardRecord,
 } from "./board-presentation.js";
 import { selectAdoptedScope, currentProviderProjection } from "./scope.js";
-import { selectTaskRowPresentation } from "./selections.js";
 
 export type AgentBoardTab = "board" | "files" | "agents" | "activity";
+export type BoardSection = "attention" | "work" | "recent-signals";
+export type BoardFilter = "attention" | "active" | "all-current";
+export type ActivityFilter =
+  "all" | "results" | "signals" | "agents" | "errors";
+export type SourceLabel = "TODO" | "ORCHESTRATOR" | "SIGNALS";
+
+export interface ItemActionAvailability {
+  primary?: string;
+  actions: readonly string[];
+  disabledReason?: string;
+}
+
+interface BoardItemBase<K extends string, S> {
+  uiId: string;
+  /** Compatibility alias for the canonical UI ID. */
+  id: string;
+  entityId: string;
+  kind: K;
+  source: S;
+  sourceLabel: SourceLabel;
+  title: string;
+  summary: string;
+  state: string;
+  /** Compatibility alias for state. */
+  status: string;
+  section: BoardSection;
+  priority: number;
+  sortTimestamp: string;
+  ownerAgentId?: string;
+  relatedTaskId?: string;
+  relatedRunId?: string;
+  relatedGroupId?: string;
+  revision?: number;
+  actions: ItemActionAvailability;
+}
 
 export type BoardItem =
-  | {
-      kind: "todo";
-      id: string;
-      title: string;
-      status: string;
-      waitReason?: string;
-      source: TodoProjectionItem;
-    }
-  | { kind: "task"; id: string; title: string; status: string; source: Task }
-  | {
-      kind: "group";
-      id: string;
-      title: string;
-      status: string;
-      source: DeckGroup;
-    }
-  | {
-      kind: "broker-question";
-      id: string;
-      title: string;
-      status: "attention";
-      source: DeckQuestion;
-    }
-  | {
-      kind: "signal-question" | "signal-update" | "signal-recommendation";
-      id: string;
-      title: string;
-      status: string;
-      source: BoardRecord;
-    };
+  | BoardItemBase<"todo", TodoProjectionItem>
+  | BoardItemBase<"task", Task>
+  | BoardItemBase<"group", DeckGroup>
+  | BoardItemBase<"broker-question", DeckQuestion>
+  | BoardItemBase<"signal-question", BoardRecord>
+  | BoardItemBase<"signal-update", BoardRecord>
+  | BoardItemBase<"agent-alert", Agent>;
 
-export type ActivityItem =
-  | {
-      kind: "result";
-      id: string;
-      title: string;
-      status: string;
-      source: DeckResult;
-    }
-  | { kind: "task"; id: string; title: string; status: string; source: Task }
-  | {
-      kind: "group";
-      id: string;
-      title: string;
-      status: string;
-      source: DeckGroup;
-    }
-  | { kind: "agent"; id: string; title: string; status: string; source: Agent }
-  | {
-      kind: "signal-update" | "signal-decision" | "signal-history";
-      id: string;
-      title: string;
-      status: string;
-      source: BoardRecord;
-    };
+export interface NormalizedQuestion {
+  source: "orchestrator" | "signals";
+  uiId: string;
+  entityId: string;
+  revision?: number;
+  prompt: string;
+  responseKind:
+    "single" | "multiple" | "text" | "single_or_text" | "multiple_or_text";
+  options: readonly { id: string; label: string; description?: string }[];
+  allowFreeform: boolean;
+  recommendedOptionIds: readonly string[];
+  recommendedText?: string;
+  dismissible: boolean;
+  retryableDelivery: boolean;
+  deliveryState?: string;
+  terminal: boolean;
+  timeoutAt?: string;
+}
 
 export interface UnifiedBoardPresentation {
   provider?: ProviderProjection;
-  work: BoardItem[];
   attention: BoardItem[];
+  work: BoardItem[];
+  recentSignals: BoardItem[];
+  visible: BoardItem[];
   selected?: BoardItem;
-  counts: { work: number; attention: number };
+  counts: { attention: number; work: number; recentSignals: number };
+  filter: BoardFilter;
 }
+
+interface ActivityItemBase<K extends string, S> {
+  uiId: string;
+  id: string;
+  entityId: string;
+  kind: K;
+  title: string;
+  summary: string;
+  state: string;
+  status: string;
+  sortTimestamp: string;
+  source: S;
+  actions: ItemActionAvailability;
+}
+export type ActivityItem =
+  | ActivityItemBase<"result", DeckResult>
+  | ActivityItemBase<"terminal-task", Task>
+  | ActivityItemBase<"terminal-group", DeckGroup>
+  | ActivityItemBase<"terminal-agent", Agent>
+  | ActivityItemBase<
+      | "signal-update"
+      | "signal-decision"
+      | "signal-history"
+      | "system-error"
+      | "system-recovery",
+      BoardRecord
+    >;
 
 export interface ActivityPresentation {
   items: ActivityItem[];
   selected?: ActivityItem;
-  counts: Record<ActivityItem["kind"], number>;
+  counts: Record<ActivityFilter, number>;
+  filter: ActivityFilter;
 }
+
+const TASK_TERMINAL = new Set<TaskState>([
+  "succeeded",
+  "failed",
+  "cancelled",
+  "timed_out",
+]);
+const AGENT_TERMINAL = new Set(["stopped", "failed", "orphaned", "replaced"]);
+const GROUP_TERMINAL = new Set([
+  "completed",
+  "succeeded",
+  "failed",
+  "cancelled",
+  "closed",
+  "stopped",
+]);
+const TERMINAL_TODO = new Set([
+  "done",
+  "completed",
+  "complete",
+  "cancelled",
+  "canceled",
+  "closed",
+]);
+const WAITING_TODO = new Set(["waiting", "blocked", "paused"]);
+const SOURCE_PRIORITY: Record<SourceLabel, number> = {
+  ORCHESTRATOR: 0,
+  SIGNALS: 1,
+  TODO: 2,
+};
 
 function text(value: unknown, fallback: string): string {
   return typeof value === "string" && value.length > 0 ? value : fallback;
 }
-
 function rowId(row: BoardRecord, index: number): string {
   return text(row.id ?? row.entityId, `row-${index + 1}`);
 }
-
 function rowTitle(row: BoardRecord, id: string): string {
   return text(row.title ?? row.question ?? row.detail, id);
 }
-
-function stable<T extends { kind: string; id: string }>(items: T[]): T[] {
-  return items.sort((left, right) =>
-    `${left.kind}:${left.id}`.localeCompare(`${right.kind}:${right.id}`),
+function rowTimestamp(row: BoardRecord): string {
+  return text(
+    row.changedAt ?? row.terminalAt ?? row.updatedAt ?? row.createdAt,
+    "",
+  );
+}
+function normalizedStatus(value: string | undefined): string {
+  return (value ?? "open")
+    .trim()
+    .toLowerCase()
+    .replace(/[ _-]+/g, " ");
+}
+export function isTerminalTaskState(state: TaskState): boolean {
+  return TASK_TERMINAL.has(state);
+}
+export function isTerminalAgentState(state: Agent["state"]): boolean {
+  return AGENT_TERMINAL.has(state);
+}
+export function isTerminalTodoStatus(status: string | undefined): boolean {
+  return TERMINAL_TODO.has(normalizedStatus(status));
+}
+export function isWaitingTodo(item: TodoProjectionItem): boolean {
+  return (
+    Boolean(item.waitReason) || WAITING_TODO.has(normalizedStatus(item.status))
   );
 }
 
+function boardSort(left: BoardItem, right: BoardItem): number {
+  return (
+    left.section.localeCompare(right.section) ||
+    left.priority - right.priority ||
+    SOURCE_PRIORITY[left.sourceLabel] - SOURCE_PRIORITY[right.sourceLabel] ||
+    (right.sortTimestamp ?? "").localeCompare(left.sortTimestamp ?? "") ||
+    left.uiId.localeCompare(right.uiId)
+  );
+}
+function activitySort(left: ActivityItem, right: ActivityItem): number {
+  return (
+    (right.sortTimestamp ?? "").localeCompare(left.sortTimestamp ?? "") ||
+    left.uiId.localeCompare(right.uiId)
+  );
+}
+function boardItem<K extends BoardItem["kind"], S>(
+  input: Omit<BoardItemBase<K, S>, "id" | "status">,
+): BoardItemBase<K, S> {
+  return { ...input, id: input.uiId, status: input.state };
+}
+function activityItem<K extends ActivityItem["kind"], S>(
+  input: Omit<ActivityItemBase<K, S>, "id" | "status">,
+): ActivityItemBase<K, S> {
+  return { ...input, id: input.uiId, status: input.state };
+}
 function signals(
   projection: AgentBoardProjection | undefined,
   tab: "inbox" | "updates" | "decisions" | "history",
@@ -115,85 +225,316 @@ function signals(
   return selectBoardPresentation(projection, tab).rows;
 }
 
+export function normalizeBrokerQuestion(
+  question: DeckQuestion,
+): NormalizedQuestion {
+  const options = question.options ?? [];
+  return {
+    source: "orchestrator",
+    uiId: `orchestrator:question:${question.id}`,
+    entityId: question.id,
+    prompt: question.prompt,
+    responseKind:
+      options.length > 0
+        ? question.allowFreeform
+          ? "single_or_text"
+          : "single"
+        : "text",
+    options,
+    allowFreeform: question.allowFreeform === true || options.length === 0,
+    recommendedOptionIds: [],
+    dismissible: false,
+    retryableDelivery: false,
+    terminal:
+      question.answered === true ||
+      question.state === "answered" ||
+      question.state === "cancelled" ||
+      question.state === "timed_out",
+    ...(question.timeoutAt ? { timeoutAt: question.timeoutAt } : {}),
+  };
+}
+export function normalizeSignalsQuestion(
+  question: AgentBoardPendingQuestion,
+  row: BoardRecord = {},
+): NormalizedQuestion {
+  return {
+    source: "signals",
+    uiId: `signals:question:${question.questionId}`,
+    entityId: question.questionId,
+    revision: question.revision,
+    prompt: question.question,
+    responseKind: question.response.kind,
+    options: question.response.options,
+    allowFreeform: question.response.kind.includes("text"),
+    recommendedOptionIds: question.recommendedOptionIds,
+    ...(question.recommendedText
+      ? { recommendedText: question.recommendedText }
+      : {}),
+    dismissible: row.dismissible === true,
+    retryableDelivery: row.retryableDelivery === true,
+    deliveryState: text(row.deliveryState ?? row.state, "pending"),
+    terminal: row.userAnswerable === false && row.retryableDelivery !== true,
+  };
+}
+
 export function selectUnifiedBoardPresentation(
   state: DeckState,
   targetPaneId?: string,
   selectedId?: string,
+  filter: BoardFilter = "all-current",
 ): UnifiedBoardPresentation {
   const provider = currentProviderProjection(state, targetPaneId);
   const scoped = selectAdoptedScope(state, targetPaneId).state;
-  const todo: BoardItem[] = (provider?.todo.items ?? []).map((item) => ({
-    kind: "todo",
-    id: `todo:${item.id}`,
-    title: item.text,
-    status: item.status ?? (item.waitReason ? "waiting" : "open"),
-    ...(item.waitReason ? { waitReason: item.waitReason } : {}),
-    source: item,
-  }));
-  const tasks: BoardItem[] = [...scoped.tasks.values()]
-    .filter(
-      (item) =>
-        !["completed", "failed", "cancelled", "closed"].includes(item.state),
-    )
-    .map((item) => ({
-      kind: "task",
-      id: `task:${item.id}`,
-      title: text(item.title ?? item.objective, item.id),
-      status: item.state,
-      source: item,
-    }));
-  const groups: BoardItem[] = [...scoped.groups.values()]
-    .filter(
-      (item) =>
-        !["completed", "failed", "cancelled", "closed", "stopped"].includes(
-          item.state,
-        ),
-    )
-    .map((item) => ({
-      kind: "group",
-      id: `group:${item.id}`,
-      title: text(item.title ?? item.name, item.id),
-      status: item.state,
-      source: item,
-    }));
-  const questions: BoardItem[] = [...scoped.questions.values()]
-    .filter((item) => !item.answered && item.state !== "answered")
-    .map((item) => ({
-      kind: "broker-question",
-      id: `question:${item.id}`,
-      title: item.prompt,
-      status: "attention",
-      source: item,
-    }));
-  const signalRows = (
-    [
-      ["inbox", "signal-question"],
-      ["updates", "signal-update"],
-      ["decisions", "signal-recommendation"],
-    ] as const
-  ).flatMap(([tab, kind]) =>
-    signals(provider?.agentBoard, tab).map((row, index): BoardItem => {
-      const id = rowId(row, index);
-      return {
-        kind,
-        id: `${kind}:${id}`,
-        title: rowTitle(row, id),
-        status: text(row.statusLabel ?? row.state, tab),
-        source: row,
-      };
-    }),
+  const items: BoardItem[] = [];
+  for (const todo of provider?.todo.items ?? []) {
+    if (isTerminalTodoStatus(todo.status)) continue;
+    const waiting = isWaitingTodo(todo);
+    const status = normalizedStatus(todo.status);
+    items.push(
+      boardItem({
+        uiId: `todo:${todo.id}`,
+        entityId: todo.id,
+        kind: "todo",
+        source: todo,
+        sourceLabel: "TODO",
+        title: todo.text,
+        summary: todo.waitReason ?? status,
+        state: status,
+        section: waiting ? "attention" : "work",
+        priority: waiting ? 20 : 60,
+        sortTimestamp: "",
+        actions: {
+          primary: waiting ? "clear-wait" : "start",
+          actions: waiting ? ["clear-wait"] : ["start", "mark-done"],
+        },
+      }),
+    );
+  }
+  const openQuestions = [...scoped.questions.values()].filter(
+    (q) => !normalizeBrokerQuestion(q).terminal,
   );
-  const work = stable([...todo, ...tasks, ...groups]);
-  const attention = stable([...questions, ...signalRows]);
-  const all = [...attention, ...work];
+  const representedTasks = new Set(
+    openQuestions.flatMap((q) => (q.taskId ? [q.taskId] : [])),
+  );
+  const representedGroups = new Set(
+    openQuestions.flatMap((q) =>
+      [...scoped.groups.values()]
+        .filter((g) => g.questionIds?.includes(q.id))
+        .map((g) => g.id),
+    ),
+  );
+  for (const question of openQuestions)
+    items.push(
+      boardItem({
+        uiId: `orchestrator:question:${question.id}`,
+        entityId: question.id,
+        kind: "broker-question",
+        source: question,
+        sourceLabel: "ORCHESTRATOR",
+        title: question.prompt,
+        summary: "Answer required",
+        state: "open",
+        section: "attention",
+        priority: 0,
+        sortTimestamp: "",
+        ...(question.agentId ? { ownerAgentId: question.agentId } : {}),
+        ...(question.taskId ? { relatedTaskId: question.taskId } : {}),
+        ...(question.runId ? { relatedRunId: question.runId } : {}),
+        actions: { primary: "answer", actions: ["answer"] },
+      }),
+    );
+  for (const task of scoped.tasks.values()) {
+    if (isTerminalTaskState(task.state) || representedTasks.has(task.id))
+      continue;
+    const attention = task.state === "blocked";
+    items.push(
+      boardItem({
+        uiId: `orchestrator:task:${task.id}`,
+        entityId: task.id,
+        kind: "task",
+        source: task,
+        sourceLabel: "ORCHESTRATOR",
+        title: text(task.title ?? task.objective, task.id),
+        summary: task.objective,
+        state: task.state,
+        section: attention ? "attention" : "work",
+        priority: attention ? 10 : 40,
+        sortTimestamp: task.createdAt,
+        ...(task.assignedAgentId ? { ownerAgentId: task.assignedAgentId } : {}),
+        relatedTaskId: task.id,
+        ...(task.currentRunId ? { relatedRunId: task.currentRunId } : {}),
+        actions: {
+          primary: "cancel-task",
+          actions: ["cancel-task", "focus-agent", "open-agents"],
+        },
+      }),
+    );
+  }
+  for (const group of scoped.groups.values()) {
+    if (GROUP_TERMINAL.has(group.state) || representedGroups.has(group.id))
+      continue;
+    const attention = group.state === "blocked" || Boolean(group.blockedReason);
+    items.push(
+      boardItem({
+        uiId: `orchestrator:group:${group.id}`,
+        entityId: group.id,
+        kind: "group",
+        source: group,
+        sourceLabel: "ORCHESTRATOR",
+        title: text(group.title ?? group.name, group.id),
+        summary: group.blockedReason ?? group.objective ?? group.state,
+        state: group.state,
+        section: attention ? "attention" : "work",
+        priority: attention ? 15 : 50,
+        sortTimestamp: "",
+        relatedGroupId: group.id,
+        actions: { primary: "wait", actions: ["wait", "stop", "close"] },
+      }),
+    );
+  }
+  const signalInbox = selectBoardPresentation(provider?.agentBoard, "inbox");
+  for (const [index, row] of signalInbox.rows.entries()) {
+    const id = rowId(row, index);
+    const pending = provider?.agentBoard.pendingQuestions?.find(
+      (q) => q.questionId === id,
+    );
+    items.push(
+      boardItem({
+        uiId: `signals:question:${id}`,
+        entityId: id,
+        kind: "signal-question",
+        source: row,
+        sourceLabel: "SIGNALS",
+        title: rowTitle(row, id),
+        summary: text(row.detail ?? row.statusLabel, "Answer required"),
+        state: text(row.state ?? row.deliveryState, "pending"),
+        section: "attention",
+        priority: row.retryableDelivery === true ? 5 : 1,
+        sortTimestamp: rowTimestamp(row),
+        revision: Number(row.revision ?? pending?.revision ?? 0),
+        actions: {
+          primary: "answer",
+          actions: [
+            "answer",
+            ...(pending?.recommendedOptionIds.length || pending?.recommendedText
+              ? ["use-recommendation"]
+              : []),
+            ...(row.dismissible === true ? ["dismiss"] : []),
+            ...(row.retryableDelivery === true ? ["retry-delivery"] : []),
+          ],
+        },
+      }),
+    );
+  }
+  const signalIds = new Set(
+    items.filter((i) => i.kind === "signal-question").map((i) => i.entityId),
+  );
+  for (const [index, row] of signals(
+    provider?.agentBoard,
+    "updates",
+  ).entries()) {
+    const id = rowId(row, index);
+    if (signalIds.has(id)) continue;
+    items.push(
+      boardItem({
+        uiId: `signals:update:${id}`,
+        entityId: id,
+        kind: "signal-update",
+        source: row,
+        sourceLabel: "SIGNALS",
+        title: rowTitle(row, id),
+        summary: text(row.detail ?? row.stage, "Recent update"),
+        state: text(row.state ?? row.kind, "active"),
+        section: "recent-signals",
+        priority: 70,
+        sortTimestamp: rowTimestamp(row),
+        revision: Number(row.revision ?? 0),
+        actions: {
+          actions: [
+            ...(row.archivable === true ? ["archive"] : []),
+            ...(row.retryableDelivery === true ? ["retry-delivery"] : []),
+          ],
+        },
+      }),
+    );
+  }
+  const representedAgents = new Set(
+    items.flatMap((i) => (i.ownerAgentId ? [i.ownerAgentId] : [])),
+  );
+  for (const agent of scoped.agents.values())
+    if (agent.state === "blocked" && !representedAgents.has(agent.id))
+      items.push(
+        boardItem({
+          uiId: `orchestrator:agent-alert:${agent.id}`,
+          entityId: agent.id,
+          kind: "agent-alert",
+          source: agent,
+          sourceLabel: "ORCHESTRATOR",
+          title: text(agent.displayName ?? agent.herdrName, agent.id),
+          summary: "Agent is blocked",
+          state: agent.state,
+          section: "attention",
+          priority: 30,
+          sortTimestamp: "",
+          ownerAgentId: agent.id,
+          actions: {
+            primary: "focus",
+            actions: ["focus", "prompt", "open-agents"],
+          },
+        }),
+      );
+  if (
+    provider?.todo.waitReason &&
+    !(provider.todo.items ?? []).some(isWaitingTodo)
+  )
+    items.push(
+      boardItem({
+        uiId: "todo:provider-wait",
+        entityId: "provider-wait",
+        kind: "todo",
+        source: {
+          id: "provider-wait",
+          text: "Todo provider wait",
+          waitReason: provider.todo.waitReason,
+        },
+        sourceLabel: "TODO",
+        title: "Todo provider wait",
+        summary: provider.todo.waitReason,
+        state: "waiting",
+        section: "attention",
+        priority: 25,
+        sortTimestamp: "",
+        actions: { actions: [] },
+      }),
+    );
+  const attention = items
+    .filter((i) => i.section === "attention")
+    .sort(boardSort);
+  const work = items.filter((i) => i.section === "work").sort(boardSort);
+  const recentSignals = items
+    .filter((i) => i.section === "recent-signals")
+    .sort(boardSort);
+  const visible =
+    filter === "attention"
+      ? attention
+      : filter === "active"
+        ? [...work, ...recentSignals]
+        : [...attention, ...work, ...recentSignals];
+  const selected =
+    visible.find((item) => item.uiId === selectedId) ?? visible[0];
   return {
     ...(provider ? { provider } : {}),
-    work,
     attention,
-    ...((all.find((item) => item.id === selectedId) ?? all[0])
-      ? { selected: all.find((item) => item.id === selectedId) ?? all[0] }
-      : {}),
-    counts: { work: work.length, attention: attention.length },
+    work,
+    recentSignals,
+    visible,
+    ...(selected ? { selected } : {}),
+    counts: {
+      attention: attention.length,
+      work: work.length,
+      recentSignals: recentSignals.length,
+    },
+    filter,
   };
 }
 
@@ -209,13 +550,22 @@ function signalActivity(
         : "signal-history";
   return signals(projection, tab).map((row, index) => {
     const id = rowId(row, index);
-    return {
+    return activityItem({
+      uiId: `signals:${tab}:${id}`,
+      entityId: id,
       kind,
-      id: `${kind}:${id}`,
       title: rowTitle(row, id),
-      status: text(row.statusLabel ?? row.state ?? row.kind, tab),
+      summary: text(row.detail ?? row.outcome ?? row.answer, id),
+      state: text(row.statusLabel ?? row.state ?? row.kind, tab),
+      sortTimestamp: rowTimestamp(row),
       source: row,
-    };
+      actions: {
+        actions: [
+          ...(row.archivable === true ? ["archive"] : []),
+          ...(row.retryableDelivery === true ? ["retry-delivery"] : []),
+        ],
+      },
+    });
   });
 }
 
@@ -223,74 +573,125 @@ export function selectActivityPresentation(
   state: DeckState,
   targetPaneId?: string,
   selectedId?: string,
+  filter: ActivityFilter = "all",
 ): ActivityPresentation {
   const provider = currentProviderProjection(state, targetPaneId);
   const scoped = selectAdoptedScope(state, targetPaneId).state;
-  const taskRows = selectTaskRowPresentation(scoped).history.map(
-    (item): ActivityItem => ({
-      kind: "task",
-      id: `task:${item.id}`,
-      title: text(item.title ?? item.objective, item.id),
-      status: item.state,
-      source: item,
-    }),
-  );
-  const results = [...scoped.results.values()].map((item): ActivityItem => ({
-    kind: "result",
-    id: `result:${item.id}`,
-    title: text(item.summary, item.id),
-    status: item.status,
-    source: item,
-  }));
-  const groups = [...scoped.groups.values()]
-    .filter((item) =>
-      ["completed", "failed", "cancelled", "closed", "stopped"].includes(
-        item.state,
-      ),
+  const representedTasks = new Set<string>();
+  const items: ActivityItem[] = [];
+  for (const result of scoped.results.values()) {
+    if (result.taskId) representedTasks.add(result.taskId);
+    const task = result.taskId ? scoped.tasks.get(result.taskId) : undefined;
+    if (task?.id) representedTasks.add(task.id);
+    items.push(
+      activityItem({
+        uiId: `orchestrator:result:${result.id}`,
+        entityId: result.id,
+        kind: "result",
+        title: text(result.summary, result.id),
+        summary: text(result.summary, result.status),
+        state: result.status,
+        sortTimestamp: task?.resultCollectedAt ?? task?.createdAt ?? "",
+        source: result,
+        actions: { actions: ["copy-id"] },
+      }),
+    );
+  }
+  for (const task of scoped.tasks.values())
+    if (
+      isTerminalTaskState(task.state) &&
+      !representedTasks.has(task.id) &&
+      ![...scoped.results.values()].some(
+        (r) =>
+          r.runId &&
+          (r.runId === task.currentRunId || task.runIds?.includes(r.runId)),
+      )
     )
-    .map((item): ActivityItem => ({
-      kind: "group",
-      id: `group:${item.id}`,
-      title: text(item.title ?? item.name, item.id),
-      status: item.state,
-      source: item,
-    }));
-  const agents = [...scoped.agents.values()]
-    .filter((item) => ["closed", "stopped", "failed"].includes(item.state))
-    .map((item): ActivityItem => ({
-      kind: "agent",
-      id: `agent:${item.id}`,
-      title: text(item.displayName ?? item.herdrName, item.id),
-      status: item.state,
-      source: item,
-    }));
-  const items = stable([
-    ...results,
-    ...taskRows,
-    ...groups,
-    ...agents,
+      items.push(
+        activityItem({
+          uiId: `orchestrator:task:${task.id}`,
+          entityId: task.id,
+          kind: "terminal-task",
+          title: text(task.title ?? task.objective, task.id),
+          summary: task.terminalReason?.message ?? task.objective,
+          state: task.state,
+          sortTimestamp: task.resultCollectedAt ?? task.createdAt,
+          source: task,
+          actions: { actions: ["copy-id"] },
+        }),
+      );
+  for (const group of scoped.groups.values())
+    if (GROUP_TERMINAL.has(group.state))
+      items.push(
+        activityItem({
+          uiId: `orchestrator:group:${group.id}`,
+          entityId: group.id,
+          kind: "terminal-group",
+          title: text(group.title ?? group.name, group.id),
+          summary: group.blockedReason ?? group.objective ?? group.state,
+          state: group.state,
+          sortTimestamp: "",
+          source: group,
+          actions: { actions: ["copy-id"] },
+        }),
+      );
+  for (const agent of scoped.agents.values())
+    if (isTerminalAgentState(agent.state))
+      items.push(
+        activityItem({
+          uiId: `orchestrator:agent:${agent.id}`,
+          entityId: agent.id,
+          kind: "terminal-agent",
+          title: text(agent.displayName ?? agent.herdrName, agent.id),
+          summary: agent.closeReason ?? agent.state,
+          state: agent.state,
+          sortTimestamp: "",
+          source: agent,
+          actions: { actions: ["copy-id", ...(agent.paneId ? ["focus"] : [])] },
+        }),
+      );
+  const signalByEntity = new Map<string, ActivityItem>();
+  for (const item of [
     ...signalActivity(provider?.agentBoard, "updates"),
     ...signalActivity(provider?.agentBoard, "decisions"),
     ...signalActivity(provider?.agentBoard, "history"),
-  ]);
-  const counts = Object.fromEntries(
-    (
-      [
-        "result",
-        "task",
-        "group",
-        "agent",
-        "signal-update",
-        "signal-decision",
-        "signal-history",
-      ] as const
-    ).map((kind) => [kind, items.filter((item) => item.kind === kind).length]),
-  ) as ActivityPresentation["counts"];
-  return {
-    items,
-    ...((items.find((item) => item.id === selectedId) ?? items[0])
-      ? { selected: items.find((item) => item.id === selectedId) ?? items[0] }
-      : {}),
-    counts,
+  ]) {
+    const existing = signalByEntity.get(item.entityId);
+    const rank = (value: ActivityItem) =>
+      value.kind === "signal-history"
+        ? 3
+        : value.kind === "signal-decision"
+          ? 2
+          : 1;
+    if (!existing || rank(item) > rank(existing))
+      signalByEntity.set(item.entityId, item);
+  }
+  items.push(...signalByEntity.values());
+  const include = (item: ActivityItem): boolean =>
+    filter === "all" ||
+    (filter === "results" &&
+      ["result", "terminal-task", "terminal-group"].includes(item.kind)) ||
+    (filter === "signals" && item.kind.startsWith("signal-")) ||
+    (filter === "agents" && item.kind === "terminal-agent") ||
+    (filter === "errors" &&
+      (item.kind.startsWith("system-") ||
+        ["failed", "timed_out"].includes(item.state)));
+  const all = items.sort(activitySort);
+  const visible = all.filter(include);
+  const selected =
+    visible.find((item) => item.uiId === selectedId) ?? visible[0];
+  const counts: Record<ActivityFilter, number> = {
+    all: all.length,
+    results: all.filter((i) =>
+      ["result", "terminal-task", "terminal-group"].includes(i.kind),
+    ).length,
+    signals: all.filter((i) => i.kind.startsWith("signal-")).length,
+    agents: all.filter((i) => i.kind === "terminal-agent").length,
+    errors: all.filter(
+      (i) =>
+        i.kind.startsWith("system-") ||
+        ["failed", "timed_out"].includes(i.state),
+    ).length,
   };
+  return { items: visible, ...(selected ? { selected } : {}), counts, filter };
 }

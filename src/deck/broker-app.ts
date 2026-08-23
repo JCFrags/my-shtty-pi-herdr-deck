@@ -1,4 +1,9 @@
-import type { Component, TuiMouseEvent } from "@pi-herdr-deck/tui";
+import {
+  truncateToWidth,
+  visibleWidth,
+  type Component,
+  type TuiMouseEvent,
+} from "@pi-herdr-deck/tui";
 import { BrokerClient, type BrokerStatus } from "./broker-client.js";
 import { DeckActions, type DeckAction } from "./actions.js";
 import {
@@ -25,10 +30,7 @@ import type { PiCapabilitySnapshot } from "../pi/model-capabilities.js";
 import type { ModelPolicyConfig } from "../broker/model-policy.js";
 import type { DeckGroup, DeckQuestion } from "./types.js";
 import type { AgentBoardPendingQuestion } from "../shared/provider-projections.js";
-import {
-  visibleSurfaceSignature,
-  type VisibleWorkView,
-} from "./render-dependencies.js";
+import { visibleSurfaceSignature } from "./render-dependencies.js";
 import {
   selectActivityPresentation,
   selectUnifiedBoardPresentation,
@@ -47,6 +49,7 @@ import {
   selectAgentListPresentation,
 } from "./selections.js";
 import { selectBoardPresentation } from "./board-presentation.js";
+import { normalizeFilesPresentation } from "./files-screen.js";
 
 export interface BrokerDeckAppOptions {
   client: BrokerClient;
@@ -54,11 +57,7 @@ export interface BrokerDeckAppOptions {
   getHeight(): number;
   targetPaneId?: string;
   onClose?(): void;
-  onRenderDecision?(decision: {
-    rendered: boolean;
-    tab: AgentBoardTab;
-    workView: VisibleWorkView;
-  }): void;
+  onRenderDecision?(decision: { rendered: boolean; tab: AgentBoardTab }): void;
   onActionTarget?(
     action: DeckAction,
     target: import("./actions.js").ActionTarget,
@@ -66,7 +65,13 @@ export interface BrokerDeckAppOptions {
 }
 
 type DeckTab = AgentBoardTab;
-type WorkView = VisibleWorkView;
+interface ConfirmationState {
+  action: "cancelTask" | "groupStop" | "groupClose" | "close" | "stop";
+  targetId: string;
+  summary: string;
+  generation?: number;
+}
+
 type InputMode =
   | "prompt"
   | "ask"
@@ -81,6 +86,12 @@ type InputMode =
 
 const NAV_TABS: readonly DeckTab[] = ["board", "files", "agents", "activity"];
 
+function safeTerminalText(value: unknown): string {
+  return String(value ?? "")
+    .replace(/[\u0000-\u001f\u007f-\u009f]/gu, "�")
+    .replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu, "�");
+}
+
 export class BrokerDeckApp implements Component {
   readonly #client: BrokerClient;
   readonly #actions: DeckActions;
@@ -94,7 +105,6 @@ export class BrokerDeckApp implements Component {
   readonly #tracker = new PressReleaseTracker();
   #status: BrokerStatus;
   #tab: DeckTab = "board";
-  #workView: WorkView = "todo";
   #hitBoxes: HitBox[] = [];
   #selectedAgent: string | undefined;
   #selectedGroup: string | undefined;
@@ -109,7 +119,7 @@ export class BrokerDeckApp implements Component {
   #message = "";
   #inputMode: InputMode | undefined;
   #input = "";
-  #closeConfirmation: string | undefined;
+  #confirmation: ConfirmationState | undefined;
   #capabilities: PiCapabilitySnapshot | undefined;
   #modelPolicy: ModelPolicyConfig | undefined;
   #autoCloseCompletedTemporary = false;
@@ -119,6 +129,7 @@ export class BrokerDeckApp implements Component {
   #filesPath = "";
   #filesScroll = 0;
   #filesPreviewScroll = 0;
+  #filesWheelDetached = false;
   #filesTreeRegion: { start: number; end: number } | undefined;
   #filesPreviewRegion: { start: number; end: number } | undefined;
   #filesPreviewPath: string | undefined;
@@ -129,6 +140,7 @@ export class BrokerDeckApp implements Component {
   #activityScroll = 0;
   #settingsOpen = false;
   #helpOpen = false;
+  #agentMoreOpen = false;
   #renderSignature = "";
 
   constructor(options: BrokerDeckAppOptions) {
@@ -164,11 +176,7 @@ export class BrokerDeckApp implements Component {
         const rendered =
           signature !== this.#renderSignature ||
           previousMessage !== this.#message;
-        this.#onRenderDecision?.({
-          rendered,
-          tab: this.#tab,
-          workView: this.#workView,
-        });
+        this.#onRenderDecision?.({ rendered, tab: this.#tab });
         if (!rendered) return;
         this.#renderSignature = signature;
         this.#requestRender();
@@ -221,8 +229,10 @@ export class BrokerDeckApp implements Component {
       "",
     );
 
-    if (this.#settingsOpen) this.renderSettingsSurface(lines, safeWidth);
+    if (this.#confirmation) this.renderConfirmationSurface(lines, safeWidth);
+    else if (this.#settingsOpen) this.renderSettingsSurface(lines, safeWidth);
     else if (this.#helpOpen) this.renderHelpSurface(lines);
+    else if (this.#agentMoreOpen) this.renderAgentMoreSurface(lines, safeWidth);
     else if (this.#tab === "board")
       this.renderUnifiedBoard(lines, safeWidth, state);
     else if (this.#tab === "files")
@@ -257,37 +267,51 @@ export class BrokerDeckApp implements Component {
     const laidOut = lines
       .slice(0, height)
       .map((line) =>
-        line.length <= safeWidth
+        visibleWidth(line) <= safeWidth
           ? line
-          : `${line.slice(0, Math.max(0, safeWidth - 1))}…`,
+          : `${truncateToWidth(line, Math.max(0, safeWidth - 1))}…`,
       );
     return styleLines(laidOut);
   }
 
   handleInput(data: string): void {
     if (this.#inputMode) {
-      if (data >= "1" && data <= "4") {
-        this.selectTab(NAV_TABS[Number(data) - 1]!);
-        return;
-      }
       this.handleEditorInput(data);
       this.#requestRender();
       return;
     }
-    if (data === "\u001b" && (this.#settingsOpen || this.#helpOpen)) {
-      this.#settingsOpen = false;
-      this.#helpOpen = false;
-    } else if (data === "q" || data === "\u0003" || data === "\u001b") {
+    if (this.#confirmation) {
+      if (data === "\u001b" || data === "n") this.#confirmation = undefined;
+      else if (data === "y" || data === "\r" || data === "\n")
+        void this.submitConfirmation();
+      this.syncVisibleSignature();
+      this.#requestRender();
+      return;
+    }
+    if (this.#settingsOpen || this.#helpOpen || this.#agentMoreOpen) {
+      if (
+        data === "\u001b" ||
+        (this.#settingsOpen && data === ",") ||
+        (this.#helpOpen && data === "?")
+      ) {
+        this.#settingsOpen = false;
+        this.#helpOpen = false;
+        this.#agentMoreOpen = false;
+      } else if (this.#settingsOpen && data === "/")
+        this.beginInput("model-filter");
+      else if (this.#settingsOpen && data === "d") this.beginInput("default");
+      else if (this.#settingsOpen && data === "o") void this.toggleAutoClose();
+      this.syncVisibleSignature();
+      this.#requestRender();
+      return;
+    }
+    if (data === "q" || data === "\u0003" || data === "\u001b") {
       this.#onClose();
       return;
     } else if (data >= "1" && data <= "4")
       this.selectTab(NAV_TABS[Number(data) - 1]!);
     else if (data === ",") this.toggleSettings();
     else if (data === "?") this.toggleHelp();
-    else if (this.#settingsOpen && data === "/")
-      this.beginInput("model-filter");
-    else if (this.#settingsOpen && data === "d") this.beginInput("default");
-    else if (this.#settingsOpen && data === "o") void this.toggleAutoClose();
     else if (data === "r") void this.run("refresh");
     else if (data === "n" && this.#tab === "agents") this.beginInput("create");
     else if (data === "/" && this.#tab === "files")
@@ -313,10 +337,12 @@ export class BrokerDeckApp implements Component {
     else if (data === "y" && this.#tab === "board")
       void this.runBoard("accept-recommendation");
     else if (data === "i" && this.#tab === "agents") void this.run("interrupt");
-    else if (data === "s" && this.#tab === "agents") void this.run("stop");
+    else if (data === "s" && this.#tab === "agents") this.confirmAgentStop();
     else if (data === "x" && this.#tab === "agents") this.confirmClose();
-    else if (data === "m" && this.#tab === "agents") this.cycleModel();
-    else if (data === "t" && this.#tab === "agents") this.cycleThinking();
+    else if (data === "m" && this.#tab === "agents") {
+      this.#agentMoreOpen = true;
+      this.#tracker.reset();
+    } else if (data === "t" && this.#tab === "agents") this.cycleThinking();
     else if (data === "\u001b[A" || data === "k") this.move(-1);
     else if (data === "\u001b[B" || data === "j") this.move(1);
     this.syncVisibleSignature();
@@ -324,6 +350,38 @@ export class BrokerDeckApp implements Component {
   }
 
   handleMouse(event: TuiMouseEvent): boolean {
+    if (this.#confirmation) {
+      if (event.type === "wheel") return true;
+      const handled = this.#tracker.handle(
+        event,
+        this.#hitBoxes.filter((box) => box.id.startsWith("confirm:")),
+      );
+      if (handled) this.#requestRender();
+      return true;
+    }
+    if (this.#settingsOpen || this.#helpOpen || this.#agentMoreOpen) {
+      if (event.type === "wheel") {
+        if (this.#settingsOpen)
+          this.#settingsScroll = Math.max(
+            0,
+            this.#settingsScroll + (event.direction === "down" ? 1 : -1),
+          );
+        this.#requestRender();
+        return true;
+      }
+      const prefix = this.#settingsOpen
+        ? "settings:"
+        : this.#helpOpen
+          ? "help:"
+          : "agent-more:";
+      const overlayBoxes = this.#hitBoxes.filter((box) =>
+        box.id.startsWith(prefix),
+      );
+      const handled = this.#tracker.handle(event, overlayBoxes);
+      if (handled) this.#requestRender();
+      return true;
+    }
+    if (this.#inputMode) return true;
     if (event.type === "wheel") {
       const delta = event.direction === "down" ? 1 : -1;
       if (
@@ -336,8 +394,15 @@ export class BrokerDeckApp implements Component {
           0,
           this.#filesPreviewScroll + delta,
         );
-      else if (this.#tab === "files" && this.#filesTreeRegion)
+      else if (
+        this.#tab === "files" &&
+        this.#filesTreeRegion &&
+        event.y >= this.#filesTreeRegion.start &&
+        event.y <= this.#filesTreeRegion.end
+      ) {
+        this.#filesWheelDetached = true;
         this.#filesScroll = Math.max(0, this.#filesScroll + delta);
+      } else if (this.#tab === "files") return false;
       else this.move(delta);
       this.syncVisibleSignature();
       this.#requestRender();
@@ -358,7 +423,6 @@ export class BrokerDeckApp implements Component {
   private visibleSignature(state = this.#client.store.state): string {
     return visibleSurfaceSignature(state, {
       tab: this.#tab,
-      workView: this.#workView,
       ...(this.#targetPaneId ? { targetPaneId: this.#targetPaneId } : {}),
       ...(this.#selectedTask ? { selectedTaskId: this.#selectedTask } : {}),
       ...(this.#selectedResult
@@ -375,6 +439,37 @@ export class BrokerDeckApp implements Component {
           ? { boardSelectionId: this.#unifiedBoardSelection }
           : {}),
       notifications: this.#client.store.notifications,
+      ...(this.#confirmation
+        ? {
+            overlay: "confirm" as const,
+            overlayGuard: this.#confirmation,
+          }
+        : this.#inputMode
+          ? {
+              overlay:
+                this.#inputMode === "answer" ||
+                this.#inputMode === "board-answer"
+                  ? ("question-response" as const)
+                  : ("text-input" as const),
+              overlayGuard: {
+                mode: this.#inputMode,
+                selectedQuestion: this.#selectedQuestion,
+                selectedBoardQuestion: this.#boardSelection,
+              },
+            }
+          : this.#settingsOpen
+            ? { overlay: "settings" as const }
+            : this.#helpOpen
+              ? { overlay: "help" as const }
+              : this.#agentMoreOpen
+                ? {
+                    overlay: "agent-more" as const,
+                    overlayGuard: {
+                      agentId: this.#selectedAgent,
+                      generation: this.selectedAgent()?.generation,
+                    },
+                  }
+                : {}),
     });
   }
 
@@ -387,8 +482,9 @@ export class BrokerDeckApp implements Component {
     this.#input = "";
     this.#settingsOpen = false;
     this.#helpOpen = false;
+    this.#agentMoreOpen = false;
     this.#tab = tab;
-    this.#closeConfirmation = undefined;
+    this.#confirmation = undefined;
     this.#tracker.reset();
     this.syncVisibleSignature();
     this.#requestRender();
@@ -406,6 +502,7 @@ export class BrokerDeckApp implements Component {
   private toggleHelp(): void {
     this.#helpOpen = !this.#helpOpen;
     this.#settingsOpen = false;
+    this.syncVisibleSignature();
     this.#requestRender();
   }
 
@@ -436,6 +533,7 @@ export class BrokerDeckApp implements Component {
   }
 
   private renderHelpSurface(lines: string[]): void {
+    const y = lines.length;
     lines.push(
       "HELP  Escape or ? closes",
       "1 Board  2 Files  3 Agents  4 Activity",
@@ -443,6 +541,159 @@ export class BrokerDeckApp implements Component {
       "Files: row previews; caret expands; checkbox selects; each pane scrolls independently.",
       "Agents: f focus, p prompt, a ask, i interrupt, s stop, x close.",
       "Activity contains results, decisions, updates, groups, tasks, and lifecycle history.",
+    );
+    this.addHitBox("help:close", y, 4, () => this.toggleHelp(), false, 0);
+  }
+
+  private renderConfirmationSurface(lines: string[], width: number): void {
+    const confirmation = this.#confirmation;
+    if (!confirmation) return;
+    lines.push(
+      "CONFIRMATION",
+      confirmation.summary,
+      "Target: " + confirmation.targetId,
+      "",
+    );
+    this.addControlRow(
+      lines,
+      [
+        {
+          id: "confirm:cancel",
+          label: "Cancel",
+          activate: () => {
+            this.#confirmation = undefined;
+            this.#tracker.reset();
+          },
+        },
+        {
+          id: "confirm:accept",
+          label: "Confirm",
+          activate: () => void this.submitConfirmation(),
+        },
+      ],
+      width,
+    );
+  }
+
+  private async submitConfirmation(): Promise<void> {
+    const confirmation = this.#confirmation;
+    if (!confirmation) return;
+    const state = this.scopedWorkState(this.#client.store.state);
+    if (confirmation.action === "cancelTask") {
+      const task = state.tasks.get(confirmation.targetId);
+      if (
+        !task ||
+        ["succeeded", "failed", "cancelled", "timed_out"].includes(task.state)
+      ) {
+        this.#message = "The task changed or became terminal.";
+        this.#confirmation = undefined;
+        return;
+      }
+      this.#selectedTask = task.id;
+    } else if (
+      confirmation.action === "groupStop" ||
+      confirmation.action === "groupClose"
+    ) {
+      const group = state.groups.get(confirmation.targetId);
+      if (
+        !group ||
+        ["closed", "stopped", "completed", "failed", "cancelled"].includes(
+          group.state,
+        )
+      ) {
+        this.#message = "The group changed or became terminal.";
+        this.#confirmation = undefined;
+        return;
+      }
+      this.#selectedGroup = group.id;
+    } else {
+      const agent = state.agents.get(confirmation.targetId);
+      if (
+        !agent ||
+        (confirmation.generation !== undefined &&
+          agent.generation !== confirmation.generation)
+      ) {
+        this.#message = "The agent changed or disappeared.";
+        this.#confirmation = undefined;
+        return;
+      }
+      this.#selectedAgent = agent.id;
+    }
+    this.#confirmation = undefined;
+    this.#tracker.reset();
+    await this.run(confirmation.action);
+  }
+
+  private renderAgentMoreSurface(lines: string[], width: number): void {
+    const agent = this.selectedAgent();
+    lines.push(
+      "AGENT MORE  Escape closes",
+      agent
+        ? `${agent.displayName ?? agent.herdrName ?? agent.id} · ${agent.state}`
+        : "Agent is unavailable",
+      "",
+    );
+    this.addControlRow(
+      lines,
+      [
+        {
+          id: "agent-more:compact",
+          label: "Compact",
+          disabled: agent?.state !== "idle",
+          activate: () => void this.run("compact"),
+        },
+        {
+          id: "agent-more:restart",
+          label: "Restart",
+          disabled: !agent || ["stopped", "replaced"].includes(agent.state),
+          activate: () => void this.run("restart"),
+        },
+        {
+          id: "agent-more:close",
+          label: "Close",
+          disabled: !agent,
+          activate: () => this.confirmClose(),
+        },
+        {
+          id: "agent-more:worktree",
+          label: "Open worktree",
+          disabled: !agent?.cwd,
+          activate: () => void this.run("openWorktree"),
+        },
+        {
+          id: "agent-more:copy",
+          label: "Copy ID",
+          disabled: !agent,
+          activate: () => void this.copySelectedId(),
+        },
+        {
+          id: "agent-more:model",
+          label: "Running model",
+          disabled: getAgentModelChoices(agent).length === 0,
+          activate: () => this.cycleModel(),
+        },
+        {
+          id: "agent-more:thinking",
+          label: "Thinking level",
+          disabled: getAgentThinkingChoices(agent).length === 0,
+          activate: () => this.cycleThinking(),
+        },
+        {
+          id: "agent-more:create",
+          label: "Create child agent",
+          disabled: !agent?.cwd,
+          activate: () => this.beginInput("create"),
+        },
+        {
+          id: "agent-more:close-drawer",
+          label: "Close drawer",
+          activate: () => {
+            this.#agentMoreOpen = false;
+            this.#tracker.reset();
+          },
+        },
+      ],
+      width,
     );
   }
 
@@ -476,12 +727,14 @@ export class BrokerDeckApp implements Component {
       this.#unifiedBoardSelection,
     );
     lines.push(
-      `BOARD  ${model.counts.work} current · ${model.counts.attention} need attention`,
-      "CURRENT WORK  Pi Todo and orchestrator work",
+      `BOARD  ${model.counts.work} current · ${model.counts.attention} need attention · ${model.counts.recentSignals} recent Signals`,
+      "NEEDS ATTENTION  Questions, blocked work, and waits",
     );
-    this.renderBoardItems(lines, width, model.work);
-    lines.push("", "ATTENTION  Broker questions and SIGNALS");
     this.renderBoardItems(lines, width, model.attention);
+    lines.push("", "CURRENT WORK  Pi Todo and orchestrator work");
+    this.renderBoardItems(lines, width, model.work);
+    lines.push("", "RECENT SIGNALS  Active provider updates");
+    this.renderBoardItems(lines, width, model.recentSignals);
     const selected = model.selected;
     if (!selected) return;
     this.selectBoardItem(selected);
@@ -550,7 +803,9 @@ export class BrokerDeckApp implements Component {
         {
           id: "board:recommendation",
           label: "Use recommendation",
-          disabled: selected.kind !== "signal-recommendation",
+          disabled:
+            selected.kind !== "signal-question" ||
+            !selected.actions.actions.includes("use-recommendation"),
           activate: () => void this.runBoard("accept-recommendation"),
         },
         {
@@ -630,15 +885,12 @@ export class BrokerDeckApp implements Component {
       ),
       "",
     );
-    this.addEntityHitBoxes(
-      lines,
-      start,
-      visible,
-      (item) => item.displayName ?? item.herdrName ?? item.id,
-      (id) => {
-        this.#selectedAgent = id;
-      },
-    );
+    for (const [index, item] of visible.entries()) {
+      const y = start + 4 + index * 2;
+      this.addHitBox(`agent:row:${item.id}`, y, width, () => {
+        this.#selectedAgent = item.id;
+      });
+    }
     lines.push(...renderAgentInspector(agent, state, width), "");
     this.addControlRow(
       lines,
@@ -671,26 +923,8 @@ export class BrokerDeckApp implements Component {
           id: "agent:stop",
           label: "Stop",
           disabled: !agent,
-          activate: () => void this.run("stop"),
+          activate: () => this.confirmAgentStop(),
         },
-        {
-          id: "agent:close",
-          label: "Close",
-          disabled: !agent,
-          activate: () => this.confirmClose(),
-        },
-        {
-          id: "agent:create",
-          label: "Create",
-          disabled: !agent?.cwd,
-          activate: () => this.beginInput("create"),
-        },
-      ],
-      width,
-    );
-    this.addControlRow(
-      lines,
-      [
         {
           id: "agent:steer",
           label: "Steer",
@@ -704,40 +938,13 @@ export class BrokerDeckApp implements Component {
           activate: () => this.beginInput("followUp"),
         },
         {
-          id: "agent:compact",
-          label: "Compact",
-          disabled: agent?.state !== "idle",
-          activate: () => void this.run("compact"),
-        },
-        {
-          id: "agent:restart",
-          label: "Restart",
-          disabled: !agent || ["closed", "stopped"].includes(agent.state),
-          activate: () => void this.run("restart"),
-        },
-        {
-          id: "agent:worktree",
-          label: "Worktree",
-          disabled: !agent?.cwd,
-          activate: () => void this.run("openWorktree"),
-        },
-        {
-          id: "agent:copy",
-          label: "Copy ID",
+          id: "agent:more",
+          label: "More…",
           disabled: !agent,
-          activate: () => void this.copySelectedId(),
-        },
-        {
-          id: "agent:model",
-          label: "Model",
-          disabled: getAgentModelChoices(agent).length === 0,
-          activate: () => this.cycleModel(),
-        },
-        {
-          id: "agent:thinking",
-          label: "Thinking",
-          disabled: getAgentThinkingChoices(agent).length === 0,
-          activate: () => this.cycleThinking(),
+          activate: () => {
+            this.#agentMoreOpen = true;
+            this.#tracker.reset();
+          },
         },
       ],
       width,
@@ -747,9 +954,11 @@ export class BrokerDeckApp implements Component {
   private selectActivityItem(item: ActivityItem): void {
     this.#activitySelection = item.id;
     if (item.kind === "result") this.#selectedResult = item.source.id;
-    else if (item.kind === "task") this.#selectedTask = item.source.id;
-    else if (item.kind === "group") this.#selectedGroup = item.source.id;
-    else if (item.kind === "agent") this.#selectedAgent = item.source.id;
+    else if (item.kind === "terminal-task") this.#selectedTask = item.source.id;
+    else if (item.kind === "terminal-group")
+      this.#selectedGroup = item.source.id;
+    else if (item.kind === "terminal-agent")
+      this.#selectedAgent = item.source.id;
   }
 
   private renderActivitySurface(
@@ -810,7 +1019,7 @@ export class BrokerDeckApp implements Component {
       );
       if (model.selected.kind === "result")
         lines.push(...renderResultDetail(model.selected.source, width));
-      else if (model.selected.kind === "task")
+      else if (model.selected.kind === "terminal-task")
         lines.push(
           ...renderTaskDetail(
             model.selected.source,
@@ -818,8 +1027,9 @@ export class BrokerDeckApp implements Component {
             width,
           ),
         );
-      else if (model.selected.kind === "group")
+      else if (model.selected.kind === "terminal-group")
         lines.push(...renderGroupDetail(model.selected.source, width));
+      else lines.push(model.selected.summary);
     }
   }
 
@@ -870,24 +1080,6 @@ export class BrokerDeckApp implements Component {
     lines.push(line.slice(0, width));
   }
 
-  private addEntityHitBoxes<T extends { id: string }>(
-    lines: readonly string[],
-    start: number,
-    items: readonly T[],
-    needle: (item: T) => string,
-    select: (id: string) => void,
-  ): void {
-    for (const item of items) {
-      const y = lines.findIndex(
-        (line, index) => index >= start && line.includes(needle(item)),
-      );
-      if (y >= start)
-        this.addHitBox(`row:${item.id}`, y, Math.max(1, lines[y]!.length), () =>
-          select(item.id),
-        );
-    }
-  }
-
   private adoptedRootAgent(): Agent | undefined {
     return selectAdoptedRootAgent(this.#client.store.state, this.#targetPaneId);
   }
@@ -919,7 +1111,8 @@ export class BrokerDeckApp implements Component {
     );
     if (!row) return;
     const folder = row.kind === "directory" || row.kind === "root";
-    if (folder) void this.runFiles("expand", this.#filesPath);
+    if (folder)
+      void this.runFiles("expand", this.#filesPath, row.expanded !== true);
     else
       void this.runFiles("toggle-selection", this.#filesPath).then(() =>
         this.runFiles("preview", this.#filesPath),
@@ -935,74 +1128,46 @@ export class BrokerDeckApp implements Component {
       this.#targetPaneId,
     );
     const files = filesAuthority.provider?.files;
-    const view = this.providerRecord(files?.view);
-    const summary = this.providerRecord(files?.summary);
-    const rows = Array.isArray(view.rows)
-      ? view.rows.map((item) => this.providerRecord(item))
-      : [];
-    const cwd = String(summary.cwd ?? view.cwd ?? "");
-    const currentPath = String(
-      (view.currentPath ?? summary.currentPath ?? this.#filesPath) || ".",
-    );
+    const presentation = normalizeFilesPresentation(files);
+    const view: Record<string, unknown> = {
+      currentPath: presentation.currentPath,
+      filter: presentation.filter,
+      showHidden: presentation.showHidden,
+      ...(presentation.preview
+        ? {
+            previewPath: presentation.preview.path,
+            preview: presentation.preview,
+          }
+        : {}),
+    };
+    const summary: Record<string, unknown> = {
+      cwd: presentation.cwd,
+      currentPath: presentation.currentPath,
+      selectedCount: presentation.selectedCount,
+      showHidden: presentation.showHidden,
+      selectedKnownBytes: presentation.selectedKnownBytes,
+      selectedApproximateTokens: presentation.selectedApproximateTokens,
+      limits: presentation.limits,
+    };
+    const rows: Record<string, unknown>[] = presentation.rows.map((row) => ({
+      ...row,
+    }));
+    const cwd = presentation.cwd;
+    const currentPath = presentation.currentPath || ".";
     lines.push(
       "FILES",
       `${files?.available ? "● READY" : "○ CONNECTING"}  ${cwd || "Waiting for the Pi Files provider…"}`,
     );
-    this.addControlRow(
-      lines,
-      [
-        {
-          id: "files:refresh",
-          label: "↻ Refresh",
-          disabled: !files?.available,
-          activate: () => void this.runFiles("snapshot"),
-        },
-        {
-          id: "files:preview",
-          label: "Preview",
-          disabled: !files?.available || !this.#filesPath,
-          activate: () => void this.runFiles("preview", this.#filesPath),
-        },
-        {
-          id: "files:clear",
-          label: "Clear selection",
-          disabled:
-            !files?.available || Number(summary.selectedCount ?? 0) === 0,
-          activate: () => void this.runFiles("clear-selection"),
-        },
-        {
-          id: "files:paths",
-          label: "Insert paths",
-          disabled:
-            !files?.available || Number(summary.selectedCount ?? 0) === 0,
-          activate: () => void this.runFiles("insert-paths"),
-        },
-        {
-          id: "files:contents",
-          label: "Insert contents",
-          disabled:
-            !files?.available || Number(summary.selectedCount ?? 0) === 0,
-          activate: () => void this.runFiles("insert-contents"),
-        },
-      ],
-      width,
-    );
     lines.push(
-      `⌂ /${currentPath === "." ? "" : currentPath}   ${String(summary.selectedCount ?? 0)} selected   ${this.#filesFilter ? `filter: ${this.#filesFilter}` : "no filter"}`,
+      `⌂ /${currentPath === "." ? "" : currentPath}   ${String(summary.selectedCount ?? 0)} selected   ${String(view.filter ?? "") ? `filter: ${String(view.filter)}` : "no filter"}   hidden ${summary.showHidden === true || view.showHidden === true ? "on" : "off"}   ${Number(summary.selectedApproximateTokens ?? 0)} approx tokens`,
       "TREE",
     );
-    const visible = rows.filter(
-      (row) =>
-        !this.#filesFilter ||
-        String(row.name ?? row.path)
-          .toLowerCase()
-          .includes(this.#filesFilter.toLowerCase()),
-    );
+    const visible = rows;
     const rowBudget = Math.max(3, this.#getHeight() - lines.length - 12);
     const selectedIndex = visible.findIndex(
       (row) => String(row.path ?? "") === this.#filesPath,
     );
-    if (selectedIndex >= 0) {
+    if (selectedIndex >= 0 && !this.#filesWheelDetached) {
       if (selectedIndex < this.#filesScroll) this.#filesScroll = selectedIndex;
       if (selectedIndex >= this.#filesScroll + rowBudget)
         this.#filesScroll = selectedIndex - rowBudget + 1;
@@ -1026,7 +1191,7 @@ export class BrokerDeckApp implements Component {
       const prefix = `${cursor} ${indent}${caret} [${marker}] `;
       const y = lines.length;
       lines.push(
-        `${prefix}${String(row.name ?? path)}${row.error ? `  ! ${String(row.error)}` : ""}`,
+        `${prefix}${safeTerminalText(row.name ?? path)}${row.error ? `  ! ${safeTerminalText(row.error)}` : ""}`,
       );
       const caretX = 2 + indent.length;
       const checkX = caretX + 2;
@@ -1037,7 +1202,8 @@ export class BrokerDeckApp implements Component {
           1,
           () => {
             this.#filesPath = path;
-            void this.runFiles("expand", path);
+            this.#filesWheelDetached = false;
+            void this.runFiles("expand", path, row.expanded !== true);
           },
           false,
           caretX,
@@ -1048,6 +1214,7 @@ export class BrokerDeckApp implements Component {
         3,
         () => {
           this.#filesPath = path;
+          this.#filesWheelDetached = false;
           void this.runFiles("toggle-selection", path);
         },
         false,
@@ -1059,6 +1226,7 @@ export class BrokerDeckApp implements Component {
         Math.max(1, width - prefix.length),
         () => {
           this.#filesPath = path;
+          this.#filesWheelDetached = false;
           if (!folder) {
             this.#filesPreviewScroll = 0;
             void this.runFiles("preview", path);
@@ -1081,7 +1249,7 @@ export class BrokerDeckApp implements Component {
     if (Object.keys(preview).length) {
       lines.push(
         "",
-        `PREVIEW  ${String(this.#filesPreviewPath ?? this.#filesPath)}`,
+        `PREVIEW  ${String(view.previewPath ?? this.#filesPreviewPath ?? this.#filesPath)}`,
       );
       const previewStart = lines.length;
       const previewLines = Array.isArray(preview.lines) ? preview.lines : [];
@@ -1092,26 +1260,27 @@ export class BrokerDeckApp implements Component {
           Math.max(0, previewLines.length - 8),
         ),
       );
-      for (const line of previewLines.slice(
-        this.#filesPreviewScroll,
-        this.#filesPreviewScroll + 8,
-      ))
-        lines.push(`│ ${String(line)}`);
+      for (const [offset, line] of previewLines
+        .slice(this.#filesPreviewScroll, this.#filesPreviewScroll + 8)
+        .entries())
+        lines.push(
+          `│ ${String(this.#filesPreviewScroll + offset + 1).padStart(4)} ${safeTerminalText(line)}`,
+        );
       if (previewLines.length > 8)
         lines.push(
           `  ↕ preview ${this.#filesPreviewScroll + 1}-${Math.min(previewLines.length, this.#filesPreviewScroll + 8)} of ${previewLines.length}`,
         );
-      if (preview.error) lines.push(`! ${String(preview.error)}`);
+      if (preview.error) lines.push(`! ${safeTerminalText(preview.error)}`);
       this.#filesPreviewRegion = {
         start: previewStart,
         end: Math.max(previewStart, lines.length - 1),
       };
     }
     if (files?.error && !(files.available && rows.length > 0))
-      lines.push("", `! ${files.error}`);
+      lines.push("", `! ${safeTerminalText(files.error)}`);
     lines.push(
       "",
-      `/ filter${this.#filesFilter ? `: ${this.#filesFilter}` : ""}  •  h hidden ${this.#filesHidden ? "on" : "off"}  •  Enter open/select  •  p preview`,
+      `/ filter${String(view.filter ?? "") ? `: ${String(view.filter)}` : ""}  •  h hidden ${summary.showHidden === true || view.showHidden === true ? "on" : "off"}  •  Enter primary action`,
     );
     const selectedCount = Number(summary.selectedCount ?? 0);
     this.addControlRow(
@@ -1202,7 +1371,11 @@ export class BrokerDeckApp implements Component {
     return lines;
   }
 
-  private async runFiles(action: string, value?: string): Promise<void> {
+  private async runFiles(
+    action: string,
+    value?: string,
+    expanded?: boolean,
+  ): Promise<void> {
     const agent = this.adoptedRootAgent();
     if (!agent) {
       this.#message = "Files provider owner is unavailable.";
@@ -1213,11 +1386,12 @@ export class BrokerDeckApp implements Component {
         agent,
         filesAction: {
           action,
-          ...(value
+          ...(value !== undefined
             ? action === "filter"
               ? { query: value }
               : { path: value }
             : {}),
+          ...(expanded !== undefined ? { expanded } : {}),
         },
       } as never);
       this.#filesPreviewPath =
@@ -1453,7 +1627,7 @@ export class BrokerDeckApp implements Component {
         this.#targetPaneId,
         this.#unifiedBoardSelection,
       );
-      const items = [...model.attention, ...model.work];
+      const items = model.visible;
       if (items.length > 0) {
         const index = Math.max(
           0,
@@ -1491,9 +1665,10 @@ export class BrokerDeckApp implements Component {
             ? 0
             : Math.max(0, Math.min(items.length - 1, index + delta));
         this.#filesPath = String(items[next]?.path ?? "");
+        this.#filesWheelDetached = false;
       }
     }
-    this.#closeConfirmation = undefined;
+    this.#confirmation = undefined;
   }
 
   private target() {
@@ -1569,7 +1744,7 @@ export class BrokerDeckApp implements Component {
         action === "copyId"
           ? `Copied ID: ${String(result)}`
           : `${action} accepted.`;
-      this.#closeConfirmation = undefined;
+      this.#confirmation = undefined;
     } catch (error) {
       this.#message = error instanceof Error ? error.message : String(error);
     }
@@ -1848,12 +2023,12 @@ export class BrokerDeckApp implements Component {
       this.#message = "Select a task first.";
       return;
     }
-    const key = `task-cancel:${task.id}`;
-    if (this.#closeConfirmation === key) void this.run("cancelTask");
-    else {
-      this.#closeConfirmation = key;
-      this.#message = `Press Cancel task again to cancel ${task.title}.`;
-    }
+    this.#confirmation = {
+      action: "cancelTask",
+      targetId: task.id,
+      summary: `Cancel ${task.title}?`,
+    };
+    this.#tracker.reset();
   }
 
   private async copySelectedId(): Promise<void> {
@@ -1872,12 +2047,24 @@ export class BrokerDeckApp implements Component {
       this.#message = "Select a group first.";
       return;
     }
-    const key = `${action}:${group.id}`;
-    if (this.#closeConfirmation === key) void this.run(action);
-    else {
-      this.#closeConfirmation = key;
-      this.#message = `Press the button again to ${action === "groupStop" ? "stop" : "close"} ${group.name ?? group.id}.`;
-    }
+    this.#confirmation = {
+      action,
+      targetId: group.id,
+      summary: `${action === "groupStop" ? "Stop" : "Close"} ${group.name ?? group.id}?`,
+    };
+    this.#tracker.reset();
+  }
+
+  private confirmAgentStop(): void {
+    const agent = this.selectedAgent();
+    if (!agent) return;
+    this.#confirmation = {
+      action: "stop",
+      targetId: agent.id,
+      generation: agent.generation,
+      summary: `Stop ${agent.displayName ?? agent.id}?`,
+    };
+    this.#tracker.reset();
   }
 
   private confirmClose(): void {
@@ -1886,11 +2073,13 @@ export class BrokerDeckApp implements Component {
       this.#message = "Select an agent first.";
       return;
     }
-    if (this.#closeConfirmation === agent.id) void this.run("close");
-    else {
-      this.#closeConfirmation = agent.id;
-      this.#message = `Press x again to close ${agent.displayName ?? agent.id}.`;
-    }
+    this.#confirmation = {
+      action: "close",
+      targetId: agent.id,
+      generation: agent.generation,
+      summary: `Close ${agent.displayName ?? agent.id}?`,
+    };
+    this.#tracker.reset();
   }
 
   private cycleModel(): void {
