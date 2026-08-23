@@ -1,21 +1,45 @@
+import type { TuiMouseEvent } from "@pi-herdr-deck/tui";
 import type { FilesProjection } from "../shared/provider-projections.js";
+import { composeColumns, SurfaceBuilder } from "./geometry.js";
+import type {
+  FilesScreenState,
+  RenderedSurface,
+  SurfaceRegion,
+} from "./screen-types.js";
+import { hitTest } from "./components/controls.js";
 
+export type FilesRowKind = "root" | "directory" | "file" | "symlink" | "other";
+
+/** A row keeps the provider path untouched for commands and separate values for UI use. */
 export interface FilesRowPresentation {
+  /** Exact provider path. Never use this value as terminal text or a DOM/id value. */
+  actionPath: string;
+  /** Backward-compatible safe path display. */
   path: string;
+  /** Terminal-safe path/name values. */
+  displayPath: string;
   name: string;
-  kind: "root" | "directory" | "file" | "symlink" | "other";
+  /** Stable, terminal-safe geometry identifier derived from actionPath. */
+  rowKey: string;
+  kind: FilesRowKind;
   depth: number;
   selected: boolean;
   partiallySelected: boolean;
   expanded: boolean;
   error?: string;
 }
+
 export interface FilesPreviewPresentation {
+  /** Exact provider path for preview requests. */
+  actionPath: string;
+  /** Backward-compatible safe display path. */
   path: string;
+  displayPath: string;
   lines: string[];
   metadata: Record<string, unknown>;
   error?: string;
 }
+
 export interface FilesPresentation {
   available: boolean;
   error?: string;
@@ -31,6 +55,7 @@ export interface FilesPresentation {
   capability?: unknown;
   limits: Record<string, unknown>;
 }
+
 export interface FilesLayout {
   narrow: boolean;
   treeWidth: number;
@@ -38,34 +63,82 @@ export interface FilesLayout {
   separatorWidth: number;
 }
 
+export type FilesAction =
+  | "expand"
+  | "toggle-selection"
+  | "preview"
+  | "insert-paths"
+  | "insert-contents"
+  | "clear-selection"
+  | "toggle-hidden"
+  | "set-filter";
+
+export interface FilesActionRequest {
+  action: FilesAction;
+  /** Exact provider path for row actions. Absent for screen actions. */
+  actionPath?: string;
+  /** Present for set-filter. The provider remains the source of truth. */
+  filter?: string;
+}
+
+export interface FilesScreenOptions {
+  presentation: FilesPresentation;
+  state: FilesScreenState;
+  onAction(request: FilesActionRequest): void;
+  onStateChange?(state: FilesScreenState): void;
+}
+
+export interface FilesScreenSurface extends RenderedSurface<FilesScreenState> {
+  layout: FilesLayout;
+  presentation: FilesPresentation;
+}
+
 const record = (value: unknown): Record<string, unknown> =>
   value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
-const text = (value: unknown, limit = 4096): string =>
-  typeof value === "string"
-    ? value
-        .slice(0, limit)
-        .replace(/[\u0000-\u001f\u007f-\u009f]/gu, "�")
-        .replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu, "�")
-    : "";
-const integer = (value: unknown): number | undefined =>
-  Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : undefined;
+
+/** Replace terminal controls and bidi overrides, without changing the provider path. */
+export function safeFilesDisplay(value: string, limit = 4096): string {
+  return value
+    .slice(0, limit)
+    .replace(/[\u0000-\u001f\u007f-\u009f]/gu, "�")
+    .replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu, "�");
+}
+
+function text(value: unknown, limit = 4096): string {
+  return typeof value === "string" ? value.slice(0, limit) : "";
+}
+
+function integer(value: unknown): number | undefined {
+  return Number.isSafeInteger(value) && Number(value) >= 0
+    ? Number(value)
+    : undefined;
+}
+
+function rowKey(actionPath: string): string {
+  let encoded = "";
+  for (const character of actionPath)
+    encoded += character.codePointAt(0)?.toString(16) ?? "0";
+  return `files-row-${encoded || "root"}`;
+}
 
 export function filesLayout(width: number): FilesLayout {
-  if (width < 78)
+  const safeWidth = Math.max(1, Math.floor(width));
+  if (safeWidth < 78)
     return {
       narrow: true,
-      treeWidth: Math.max(1, width),
-      previewWidth: Math.max(1, width),
+      treeWidth: safeWidth,
+      previewWidth: safeWidth,
       separatorWidth: 0,
     };
-  const interior = Math.max(2, width - 1);
-  const treeWidth = Math.max(1, Math.floor(interior * 0.38));
+  // The separator is one terminal cell. The panes use the remaining cells.
+  const paneWidth = safeWidth - 1;
+  const treeWidth = Math.max(1, Math.round(paneWidth * 0.38));
   return {
     narrow: false,
     treeWidth,
-    previewWidth: interior - treeWidth,
+    previewWidth: paneWidth - treeWidth,
     separatorWidth: 1,
   };
 }
@@ -77,59 +150,74 @@ export function normalizeFilesPresentation(
   const view = record(files?.view);
   const rawRows = Array.isArray(view.rows) ? view.rows.slice(0, 256) : [];
   const rows = rawRows.flatMap((value): FilesRowPresentation[] => {
-    const row = record(value);
-    const path = text(row.path, 4096);
-    const kind = row.kind;
+    const source = record(value);
+    const actionPath = text(source.actionPath ?? source.path, 4096);
+    const kind = source.kind;
     if (
-      !path ||
+      !actionPath ||
       !["root", "directory", "file", "symlink", "other"].includes(String(kind))
     )
       return [];
-    const depth = integer(row.depth) ?? 0;
+    const name = text(source.name, 1024) || actionPath;
     return [
       {
-        path,
-        name: text(row.name, 1024) || path,
-        kind: kind as FilesRowPresentation["kind"],
-        depth: Math.min(depth, 128),
-        selected: row.selected === true,
-        partiallySelected: row.partiallySelected === true,
-        expanded: row.expanded === true,
-        ...(text(row.error, 512) ? { error: text(row.error, 512) } : {}),
+        actionPath,
+        path: safeFilesDisplay(actionPath),
+        displayPath: safeFilesDisplay(actionPath),
+        name: safeFilesDisplay(name, 1024),
+        rowKey: rowKey(actionPath),
+        kind: kind as FilesRowKind,
+        depth: Math.min(integer(source.depth) ?? 0, 128),
+        selected: source.selected === true,
+        partiallySelected: source.partiallySelected === true,
+        expanded: source.expanded === true,
+        ...(text(source.error, 512)
+          ? { error: safeFilesDisplay(text(source.error, 512)) }
+          : {}),
       },
     ];
   });
   const preview = record(view.preview);
-  const previewPath = text(
-    view.previewPath ?? record(preview.metadata).relativePath,
+  const previewActionPath = text(
+    view.previewActionPath ??
+      view.previewPath ??
+      preview.actionPath ??
+      record(preview.metadata).relativePath,
     4096,
   );
   const previewLines = Array.isArray(preview.lines)
-    ? preview.lines.slice(0, 5000).map((line) => text(line, 4096))
+    ? preview.lines
+        .slice(0, 5000)
+        .map((line) => safeFilesDisplay(text(line, 4096)))
     : [];
-  const selectedKnownBytes = integer(summary.selectedKnownBytes);
-  const selectedApproximateTokens = integer(summary.selectedApproximateTokens);
+  const knownBytes = integer(summary.selectedKnownBytes);
+  const tokens = integer(summary.selectedApproximateTokens);
   return {
     available: files?.available === true,
-    ...(text(files?.error, 512) ? { error: text(files?.error, 512) } : {}),
-    cwd: text(summary.cwd ?? view.cwd, 4096),
-    currentPath: text(view.currentPath ?? summary.currentPath, 4096),
-    filter: text(view.filter, 256),
-    showHidden: summary.showHidden === true || view.showHidden === true,
+    ...(text(files?.error, 512)
+      ? { error: safeFilesDisplay(text(files?.error, 512)) }
+      : {}),
+    cwd: safeFilesDisplay(text(summary.cwd ?? view.cwd, 4096)),
+    currentPath: safeFilesDisplay(
+      text(view.currentPath ?? summary.currentPath, 4096),
+    ),
+    // These are provider-owned values. Do not filter rows or toggle hidden locally.
+    filter: safeFilesDisplay(text(view.filter, 256)),
+    showHidden: view.showHidden === true,
     selectedCount: integer(summary.selectedCount) ?? 0,
-    ...(selectedKnownBytes === undefined ? {} : { selectedKnownBytes }),
-    ...(selectedApproximateTokens === undefined
-      ? {}
-      : { selectedApproximateTokens }),
+    ...(knownBytes === undefined ? {} : { selectedKnownBytes: knownBytes }),
+    ...(tokens === undefined ? {} : { selectedApproximateTokens: tokens }),
     rows,
-    ...(previewPath || previewLines.length > 0 || text(preview.error, 512)
+    ...(previewActionPath || previewLines.length > 0 || text(preview.error, 512)
       ? {
           preview: {
-            path: previewPath,
+            actionPath: previewActionPath,
+            path: safeFilesDisplay(previewActionPath),
+            displayPath: safeFilesDisplay(previewActionPath),
             lines: previewLines,
             metadata: record(preview.metadata),
             ...(text(preview.error, 512)
-              ? { error: text(preview.error, 512) }
+              ? { error: safeFilesDisplay(text(preview.error, 512)) }
               : {}),
           },
         }
@@ -139,4 +227,331 @@ export function normalizeFilesPresentation(
       : { capability: files.capability }),
     limits: record(summary.limits),
   };
+}
+
+function displayMetadata(metadata: Record<string, unknown>): string[] {
+  return Object.entries(metadata).flatMap(([key, value]) => {
+    const safeKey = safeFilesDisplay(key, 80);
+    const safeValue = safeFilesDisplay(
+      typeof value === "string" ? value : JSON.stringify(value),
+      240,
+    );
+    return safeKey && safeValue ? [`${safeKey}: ${safeValue}`] : [];
+  });
+}
+
+function appendSurface(
+  root: SurfaceBuilder,
+  surface: RenderedSurface,
+  yOffset: number,
+): void {
+  for (const line of surface.lines) root.addLine(line);
+  for (const box of surface.hitBoxes)
+    root.addHitBox({ ...box, y: box.y + yOffset });
+  for (const region of surface.regions)
+    root.addRegion({ ...region, y: region.y + yOffset });
+}
+
+function withState(
+  options: FilesScreenOptions,
+  patch: Partial<FilesScreenState>,
+): FilesScreenState {
+  const next = { ...options.state, ...patch };
+  options.onStateChange?.(next);
+  return next;
+}
+
+function isFolder(row: FilesRowPresentation): boolean {
+  return row.kind === "root" || row.kind === "directory";
+}
+
+export function renderFilesScreen(
+  options: FilesScreenOptions,
+  width: number,
+  height = 24,
+): FilesScreenSurface {
+  const { presentation } = options;
+  const layout = filesLayout(width);
+  const root = new SurfaceBuilder(width);
+  root.addLine(
+    `FILES  ${presentation.available ? "● READY" : "○ UNAVAILABLE"}`,
+  );
+  root.addLine(
+    `${presentation.cwd || "Provider working directory unavailable"}  ${presentation.selectedCount} selected  filter: ${presentation.filter || "none"}  hidden: ${presentation.showHidden ? "on" : "off"}`,
+  );
+  const contentY = root.lines.length;
+  const tree = new SurfaceBuilder(layout.treeWidth);
+  const preview = new SurfaceBuilder(layout.previewWidth);
+  const visibleRows = presentation.rows; // Provider already applied filter and hidden policy.
+  const rowBudget = Math.max(1, height - contentY - 4);
+  const selectedIndex = visibleRows.findIndex(
+    (row) => row.actionPath === options.state.focusedPath,
+  );
+  let treeScroll = Math.max(0, options.state.treeScroll);
+  if (!options.state.wheelDetached && selectedIndex >= 0)
+    treeScroll = Math.max(
+      0,
+      Math.min(selectedIndex, treeScroll + rowBudget - 1),
+    );
+  treeScroll = Math.min(
+    treeScroll,
+    Math.max(0, visibleRows.length - rowBudget),
+  );
+  for (const row of visibleRows.slice(treeScroll, treeScroll + rowBudget)) {
+    const y = tree.lines.length;
+    const indent = "  ".repeat(row.depth);
+    const marker = row.selected ? "x" : row.partiallySelected ? "-" : " ";
+    const caret = isFolder(row) ? (row.expanded ? "v" : ">") : ".";
+    const selected = options.state.focusedPath === row.actionPath;
+    tree.addRow(
+      `${row.rowKey}:row`,
+      `${selected ? ">" : " "} ${indent}${caret} [${marker}] ${row.name}${row.error ? ` ! ${row.error}` : ""}`,
+      () => {
+        withState(options, {
+          focusedPath: row.actionPath,
+          focusTarget: "tree",
+          wheelDetached: false,
+        });
+        if (!isFolder(row))
+          options.onAction({ action: "preview", actionPath: row.actionPath });
+      },
+      { width: layout.treeWidth },
+    );
+    if (isFolder(row))
+      tree.addHitBox({
+        id: `${row.rowKey}:expand`,
+        x: Math.min(layout.treeWidth - 1, 2 + indent.length),
+        y,
+        width: 1,
+        height: 1,
+        disabled: false,
+        activate: () =>
+          options.onAction({ action: "expand", actionPath: row.actionPath }),
+      });
+    tree.addHitBox({
+      id: `${row.rowKey}:select`,
+      x: Math.min(layout.treeWidth - 1, 4 + indent.length),
+      y,
+      width: 3,
+      height: 1,
+      disabled: false,
+      activate: () =>
+        options.onAction({
+          action: "toggle-selection",
+          actionPath: row.actionPath,
+        }),
+    });
+  }
+  if (visibleRows.length === 0) tree.addLine("No provider rows.");
+
+  const selectedPreview = presentation.preview;
+  preview.addLine(
+    selectedPreview
+      ? `PREVIEW  ${selectedPreview.displayPath}`
+      : "PREVIEW  No file selected",
+  );
+  if (selectedPreview) {
+    for (const line of displayMetadata(selectedPreview.metadata))
+      preview.addLine(line);
+    preview.addLine("");
+    const previewBudget = Math.max(
+      1,
+      height - contentY - preview.lines.length - 2,
+    );
+    const start = Math.min(
+      options.state.previewScroll,
+      Math.max(0, selectedPreview.lines.length - previewBudget),
+    );
+    for (const [index, line] of selectedPreview.lines
+      .slice(start, start + previewBudget)
+      .entries())
+      preview.addLine(`${String(start + index + 1).padStart(4)} ${line}`);
+    if (selectedPreview.error) preview.addLine(`! ${selectedPreview.error}`);
+  } else preview.addLine("Select a file to request a preview.");
+  const treeRegion: SurfaceRegion = {
+    id: "files:tree-region",
+    x: 0,
+    y: 0,
+    width: layout.treeWidth,
+    height: Math.max(1, tree.lines.length),
+  };
+  const previewRegion: SurfaceRegion = {
+    id: "files:preview-region",
+    x: 0,
+    y: 0,
+    width: layout.previewWidth,
+    height: Math.max(1, preview.lines.length),
+  };
+  tree.addRegion(treeRegion);
+  preview.addRegion(previewRegion);
+  if (layout.narrow) {
+    const tabY = root.addLine(
+      `>${options.state.activePane === "tree" ? "Tree" : "Preview"}<  [Tree] [Preview]`,
+    );
+    root.addHitBox({
+      id: "files:tab-tree",
+      x: 0,
+      y: tabY,
+      width: 8,
+      height: 1,
+      disabled: false,
+      activate: () =>
+        withState(options, { activePane: "tree", focusTarget: "tree" }),
+    });
+    root.addHitBox({
+      id: "files:tab-preview",
+      x: 9,
+      y: tabY,
+      width: 11,
+      height: 1,
+      disabled: false,
+      activate: () =>
+        withState(options, { activePane: "preview", focusTarget: "preview" }),
+    });
+    appendSurface(
+      root,
+      options.state.activePane === "tree" ? tree : preview,
+      root.lines.length,
+    );
+  } else {
+    const columns = composeColumns(
+      tree.finish(),
+      preview.finish(),
+      layout.treeWidth,
+      layout.previewWidth,
+    );
+    appendSurface(root, columns, root.lines.length);
+  }
+  root.addLine("");
+  // This is the only command bar. Header, pane titles, metadata, and empty states are inert.
+  root.addButtons([
+    {
+      id: "files:action-insert-paths",
+      label: `Insert paths (${presentation.selectedCount})`,
+      disabled: presentation.selectedCount === 0,
+      activate: () => options.onAction({ action: "insert-paths" }),
+    },
+    {
+      id: "files:action-insert-contents",
+      label: `Insert contents (${presentation.selectedCount})`,
+      disabled: presentation.selectedCount === 0,
+      activate: () => options.onAction({ action: "insert-contents" }),
+    },
+    {
+      id: "files:action-clear",
+      label: "Clear selection",
+      disabled: presentation.selectedCount === 0,
+      activate: () => options.onAction({ action: "clear-selection" }),
+    },
+  ]);
+  const correctedState =
+    treeScroll === options.state.treeScroll
+      ? undefined
+      : { ...options.state, treeScroll };
+  const finished: RenderedSurface<FilesScreenState> =
+    correctedState === undefined
+      ? root.finish<FilesScreenState>()
+      : root.finish({ correctedState });
+  return { ...finished, layout, presentation };
+}
+
+export function handleFilesKey(
+  options: FilesScreenOptions,
+  key: string,
+): boolean {
+  const rows = options.presentation.rows;
+  const current = Math.max(
+    0,
+    rows.findIndex((row) => row.actionPath === options.state.focusedPath),
+  );
+  const move = (delta: number): void => {
+    const row = rows[Math.max(0, Math.min(rows.length - 1, current + delta))];
+    if (row)
+      withState(options, {
+        focusedPath: row.actionPath,
+        focusTarget: "tree",
+        wheelDetached: false,
+      });
+  };
+  if (key === "ArrowDown" || key === "j") {
+    move(1);
+    return true;
+  }
+  if (key === "ArrowUp" || key === "k") {
+    move(-1);
+    return true;
+  }
+  const row = rows[current];
+  if (key === "Enter" && row) {
+    options.onAction({
+      action: isFolder(row) ? "expand" : "preview",
+      actionPath: row.actionPath,
+    });
+    return true;
+  }
+  if ((key === " " || key === "Space") && row) {
+    options.onAction({
+      action: "toggle-selection",
+      actionPath: row.actionPath,
+    });
+    return true;
+  }
+  if (key === "h") {
+    options.onAction({ action: "toggle-hidden" });
+    return true;
+  }
+  if (key === "i") {
+    options.onAction({ action: "insert-paths" });
+    return true;
+  }
+  if (key === "c") {
+    options.onAction({ action: "clear-selection" });
+    return true;
+  }
+  return false;
+}
+
+const mousePresses = new WeakMap<
+  FilesScreenOptions,
+  { id: string; x: number; y: number; dragged: boolean }
+>();
+
+export function handleFilesMouse(
+  options: FilesScreenOptions,
+  surface: FilesScreenSurface,
+  event: TuiMouseEvent,
+): boolean {
+  if (event.type === "wheel") {
+    const delta = event.direction === "down" ? 1 : -1;
+    const field =
+      options.state.focusTarget === "preview" ? "previewScroll" : "treeScroll";
+    withState(options, {
+      [field]: Math.max(0, options.state[field] + delta),
+      wheelDetached: true,
+    });
+    return true;
+  }
+  if (event.button !== "left") return false;
+  if (event.type === "press") {
+    const box = hitTest(surface.hitBoxes, event.x, event.y);
+    if (!box) return false;
+    mousePresses.set(options, {
+      id: box.id,
+      x: event.x,
+      y: event.y,
+      dragged: false,
+    });
+    return true;
+  }
+  const press = mousePresses.get(options);
+  if (event.type === "move") {
+    if (!press) return false;
+    press.dragged ||= press.x !== event.x || press.y !== event.y;
+    return true;
+  }
+  if (event.type !== "release" || !press) return false;
+  mousePresses.delete(options);
+  const box = hitTest(surface.hitBoxes, event.x, event.y);
+  if (!press.dragged && box?.id === press.id && !box.disabled) box.activate();
+  return true;
 }
