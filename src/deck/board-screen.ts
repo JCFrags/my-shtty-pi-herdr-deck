@@ -99,7 +99,7 @@ export function renderBoardScreen(
     options.actions,
   );
   const body = narrow
-    ? stack(detailSurface, listSurface)
+    ? stack(listSurface, detailSurface)
     : composeColumns(
         listSurface,
         detailSurface,
@@ -171,6 +171,7 @@ function renderDetail(
   surface.addLine(selected.title);
   surface.addLine(selected.summary);
   surface.addLine(`State: ${selected.state}`);
+  for (const line of typedDetailLines(selected)) surface.addLine(line);
   if (selected.actions.actions.includes("answer"))
     surface.addButtons([
       {
@@ -190,6 +191,50 @@ function renderDetail(
     })),
   );
   return surface.finish();
+}
+
+function typedDetailLines(selected: BoardItem): string[] {
+  switch (selected.kind) {
+    case "todo":
+      return [
+        `Todo: ${selected.source.text}`,
+        `Wait: ${selected.source.waitReason ?? "none"}`,
+        `Provider: ${selected.sourceLabel}`,
+      ];
+    case "task":
+      return [
+        `Objective: ${selected.source.objective}`,
+        `Agent: ${selected.ownerAgentId ?? "unassigned"}`,
+        `Run: ${selected.relatedRunId ?? "none"}`,
+      ];
+    case "group":
+      return [
+        `Objective: ${selected.source.objective ?? "none"}`,
+        `Members: ${selected.source.agentIds?.length ?? 0}`,
+        `Tasks: ${selected.source.taskIds?.length ?? 0}`,
+      ];
+    case "broker-question":
+      return [
+        `Question: ${selected.source.prompt}`,
+        `Options: ${selected.source.options?.map((option) => option.label).join(", ") || "free text"}`,
+      ];
+    case "signal-question":
+      return [
+        `Question: ${String(selected.source.question ?? selected.source.title ?? selected.title)}`,
+        `Revision: ${selected.revision ?? "unknown"}`,
+      ];
+    case "signal-update":
+      return [
+        `Kind: ${String(selected.source.kind ?? "unknown")}`,
+        `Stage: ${String(selected.source.stage ?? "unknown")}`,
+        `Revision: ${selected.revision ?? "unknown"}`,
+      ];
+    case "agent-alert":
+      return [
+        `Agent: ${selected.source.displayName ?? selected.source.herdrName}`,
+        `Pane: ${selected.source.paneId ?? "none"}`,
+      ];
+  }
 }
 
 function actionLabel(action: string): string {

@@ -278,11 +278,54 @@ test("synthetic provider wait has no task actions and only waitReason clears Tod
   );
   const board = selectUnifiedBoardPresentation(value, "pane-1");
   const synthetic = board.attention.find(
-    (item) => item.uiId === "todo:provider-wait",
+    (item) => item.kind === "todo" && item.title === "Todo provider wait",
   );
   assert.deepEqual(synthetic?.actions.actions, []);
   const todo = board.work.find((item) => item.uiId === "todo:active");
   assert.equal(todo?.actions.actions.includes("clear-wait"), false);
+});
+
+test("status-only Todo waits stay visible without a false clear-wait action", () => {
+  const value = state();
+  const provider = value.providerProjections.get(root.id)!;
+  provider.todo.items.push({
+    id: "status-wait",
+    text: "Status wait",
+    status: "blocked",
+  });
+  const item = selectUnifiedBoardPresentation(value, "pane-1").attention.find(
+    (candidate) => candidate.uiId === "todo:status-wait",
+  );
+  if (!item) throw new Error("status-only wait was not presented");
+  assert.equal(item.actions.actions.includes("clear-wait"), false);
+  assert.equal(item.actions.actions.includes("mark-done"), true);
+});
+
+test("provider waits normalize, deduplicate, and do not duplicate item waits", () => {
+  const value = state();
+  const provider = value.providerProjections.get(root.id)!;
+  provider.todo.waitReason = "  duplicate\t wait ";
+  provider.todo.externalWaits = [
+    "duplicate wait",
+    "external\u202e wait",
+    " external  wait ",
+  ];
+  provider.todo.items.push({
+    id: "same-wait",
+    text: "Same wait",
+    status: "blocked",
+    waitReason: "duplicate wait",
+  });
+  const waits = selectUnifiedBoardPresentation(
+    value,
+    "pane-1",
+  ).attention.filter(
+    (item) => item.kind === "todo" && item.title === "Todo provider wait",
+  );
+  assert.equal(waits.length, 1);
+  assert.equal(waits[0]?.summary, "external wait");
+  assert.match(waits[0]?.entityId ?? "", /^provider-wait:[a-z0-9]+$/u);
+  assert.deepEqual(waits[0]?.actions.actions, []);
 });
 
 test("Board filters visibility only and selection falls back deterministically", () => {

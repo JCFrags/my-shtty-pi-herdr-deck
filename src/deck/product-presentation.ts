@@ -234,6 +234,22 @@ function normalizedStatus(value: string | undefined): string {
     .toLowerCase()
     .replace(/[ _-]+/g, " ");
 }
+function normalizedWaitReason(value: unknown): string {
+  return text(value, "")
+    .replace(/[\u202a-\u202e\u2066-\u2069]/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+function stableWaitId(reason: string): string {
+  let hash = 2166136261;
+  for (const character of reason) {
+    hash ^= character.codePointAt(0) ?? 0;
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
 export function isTerminalTaskState(state: TaskState): boolean {
   return TASK_TERMINAL.has(state);
 }
@@ -372,10 +388,14 @@ export function selectUnifiedBoardPresentation(
         section: waiting ? "attention" : "work",
         priority: waiting ? 20 : 60,
         sortTimestamp: "",
-        actions: {
-          primary: waiting ? "clear-wait" : "start",
-          actions: waiting ? ["clear-wait"] : ["start", "mark-done"],
-        },
+        actions: todo.waitReason
+          ? {
+              primary: "clear-wait",
+              actions: ["clear-wait", "mark-done"],
+            }
+          : waiting
+            ? { primary: "mark-done", actions: ["mark-done"] }
+            : { primary: "start", actions: ["start", "mark-done"] },
       }),
     );
   }
@@ -590,24 +610,29 @@ export function selectUnifiedBoardPresentation(
           },
         }),
       );
+  const itemWaitReasons = new Set(
+    (provider?.todo.items ?? [])
+      .map((item) => normalizedWaitReason(item.waitReason))
+      .filter(Boolean),
+  );
   const providerWaitReasons = [
-    ...(provider?.todo.waitReason ? [provider.todo.waitReason] : []),
+    provider?.todo.waitReason,
     ...(provider?.todo.externalWaits ?? []),
-  ];
+  ]
+    .map(normalizedWaitReason)
+    .filter(Boolean);
   const seenProviderWaits = new Set<string>();
-  for (const [index, reason] of providerWaitReasons.entries()) {
-    if (seenProviderWaits.has(reason)) continue;
+  for (const reason of providerWaitReasons) {
+    if (seenProviderWaits.has(reason) || itemWaitReasons.has(reason)) continue;
     seenProviderWaits.add(reason);
+    const id = `provider-wait:${stableWaitId(reason)}`;
     items.push(
       boardItem({
-        uiId:
-          index === 0
-            ? "todo:provider-wait"
-            : `todo:provider-wait:${index + 1}`,
-        entityId: index === 0 ? "provider-wait" : `provider-wait:${index + 1}`,
+        uiId: `todo:${id}`,
+        entityId: id,
         kind: "todo",
         source: {
-          id: index === 0 ? "provider-wait" : `provider-wait:${index + 1}`,
+          id,
           text: "Todo provider wait",
           waitReason: reason,
         },
