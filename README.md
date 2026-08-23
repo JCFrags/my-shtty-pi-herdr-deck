@@ -137,16 +137,16 @@ Do not set a broker socket, client secret, session key, token, terminal ID, or H
 
 ## Open Agent Board
 
-Inside a Pi pane managed by Herdr, run `/agent-board` to open the `pi.herdr.orchestrator` deck as a focused right split targeting that pane. The command uses Herdr's `HERDR_BIN_PATH` and `HERDR_PANE_ID` values and reports a clear notification when run outside Herdr. `/orchestrator-status` remains available.
+Inside a Pi pane managed by Herdr, run `/agent-board` to open the `pi.herdr.orchestrator` deck as a focused right split targeting that pane. `/pi-herd` is a compatibility alias for the same open-or-focus path. The command uses Herdr's `HERDR_BIN_PATH` and `HERDR_PANE_ID` values and reports a clear notification when run outside Herdr. `/orchestrator-status` remains available.
 
 Agent Board is a mouse-first right-side control surface. Its stable views are:
 
-- **Home** shows the connected adopted root and its current project work first. It does not lead with the global historical portfolio.
-- **Work** contains broker-owned Tasks, Results, and Groups beside the provider-owned Pi Todo summary.
-- **Files** can focus the adopted Pi pane. Run `/files` there because Pi 0.84.2 does not expose a safe extension API that opens this built-in view remotely.
+- **Board** combines Pi Todo work, orchestrator tasks and groups, broker questions, and Signals questions, updates, and recommendations.
+- **Files** shows the provider-backed repository tree and preview. Row, caret, and checkbox clicks have separate actions. Tree and preview scrolling are independent.
 - **Agents** keeps broker-owned lifecycle, model, thinking, prompt, ask, stop, and close controls.
-- **Inbox** keeps broker-owned blocking questions separate from provider-owned asynchronous Signals questions. Blocking questions keep `ask_user_question` semantics. Signals is the user-facing name for the provider formerly called Agent Board and Signalboard.
-- **More** contains settings and lower-frequency controls.
+- **Activity** combines retained results, decisions, updates, terminal tasks, groups, and agent lifecycle records.
+
+Press `,` or click **Settings** to open the temporary settings overlay. Settings is not a primary tab. Signals is the user-facing name for the provider formerly called Agent Board and Signalboard. Use `/signals` for its standalone UI. `/signalboard` is its compatibility alias.
 
 The installed Pi extension requests and watches provider summaries through these stable `pi.events` names:
 
