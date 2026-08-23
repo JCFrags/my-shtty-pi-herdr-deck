@@ -6,6 +6,13 @@ import type {
   DeckResult,
   DeckState,
 } from "./types.js";
+import { currentProviderProjection, selectAdoptedScope } from "./scope.js";
+import {
+  selectAgentInspectorRelation,
+  selectAgentListPresentation,
+  selectTaskDetailRelation,
+  selectTaskRowPresentation,
+} from "./selections.js";
 
 const clip = (s: string, width: number): string => {
   const safeWidth = Math.max(0, width);
@@ -93,82 +100,17 @@ export function getAgentThinkingChoices(agent: Agent | undefined): string[] {
     : [];
 }
 
-function questionForAgent(
-  agent: Agent,
-  state: DeckState,
-): DeckQuestion | undefined {
-  return [...state.questions.values()].find(
-    (question) =>
-      question.agentId === agent.id &&
-      !question.answered &&
-      question.state !== "answered",
-  );
-}
-
-export function currentProviderProjection(
-  state: DeckState,
-  targetPaneId?: string,
-) {
-  const projections = [...state.providerProjections.values()];
-  const candidates = projections.filter((projection) => {
-    const agent = state.agents.get(projection.ownerAgentId);
-    return Boolean(
-      agent &&
-      !["closed", "stopped"].includes(agent.state) &&
-      (!targetPaneId || agent.paneId === targetPaneId),
-    );
-  });
-  const ranked = candidates.sort((a, b) => {
-    const agentA = state.agents.get(a.ownerAgentId);
-    const agentB = state.agents.get(b.ownerAgentId);
-    const score = (projection: typeof a, agent: Agent | undefined): number =>
-      (agent && projection.piSessionId === agent.piSessionId ? 8 : 0) +
-      (agent && !agent.parentAgentId ? 4 : 0) +
-      (agent && agent.state !== "idle" ? 1 : 0);
-    const connectionOrder =
-      (agentB?.connectionGeneration ?? 0) - (agentA?.connectionGeneration ?? 0);
-    return connectionOrder || score(b, agentB) - score(a, agentA);
-  });
-  return ranked[0] ?? (targetPaneId ? undefined : projections[0]);
-}
+export { currentProviderProjection } from "./scope.js";
 
 function currentScope(
   state: DeckState,
   targetPaneId?: string,
 ): { agents: Agent[]; tasks: Task[] } {
-  const projection = currentProviderProjection(state, targetPaneId);
-  const targetedRoot = targetPaneId
-    ? [...state.agents.values()].find((agent) => agent.paneId === targetPaneId)
-    : undefined;
-  const rootAgentId = targetedRoot?.id ?? projection?.ownerAgentId;
-  if (!rootAgentId) return { agents: [], tasks: [] };
-  const included = new Set([rootAgentId]);
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const agent of state.agents.values())
-      if (
-        !included.has(agent.id) &&
-        agent.parentAgentId &&
-        included.has(agent.parentAgentId)
-      ) {
-        included.add(agent.id);
-        changed = true;
-      }
-  }
-  const agents = [...state.agents.values()].filter((agent) =>
-    included.has(agent.id),
-  );
-  const tasks = [...state.tasks.values()].filter((task) => {
-    const run = task.currentRunId
-      ? state.runs.get(task.currentRunId)
-      : undefined;
-    return Boolean(
-      (task.assignedAgentId && included.has(task.assignedAgentId)) ||
-      (run?.agentId && included.has(run.agentId)),
-    );
-  });
-  return { agents, tasks };
+  const scoped = selectAdoptedScope(state, targetPaneId).state;
+  return {
+    agents: [...scoped.agents.values()],
+    tasks: [...scoped.tasks.values()],
+  };
 }
 
 export interface AgentPortfolioCounts {
@@ -417,27 +359,18 @@ export function renderAgents(
   page = 0,
   pageSize = 12,
 ): string[] {
-  const all = [...state.agents.values()];
-  const active = new Set([
-    "provisioning",
-    "starting",
-    "working",
-    "blocked",
-    "stopping",
-  ]);
-  const idle = new Set(["idle"]);
-  const visible = all
-    .filter((agent) =>
-      filter === "active"
-        ? active.has(agent.state)
-        : filter === "idle"
-          ? idle.has(agent.state)
-          : !active.has(agent.state) && !idle.has(agent.state),
-    )
-    .sort((a, b) => b.id.localeCompare(a.id));
-  const pages = Math.max(1, Math.ceil(visible.length / pageSize));
-  const safePage = Math.min(Math.max(0, page), pages - 1);
-  const shown = visible.slice(safePage * pageSize, (safePage + 1) * pageSize);
+  const presentation = selectAgentListPresentation(
+    state.agents.values(),
+    filter,
+    page,
+    selectedId,
+    pageSize,
+  );
+  const visible = presentation.matching;
+  const pages = presentation.pageCount;
+  const safePage = presentation.safePage;
+  const shown = presentation.visible;
+  selectedId = presentation.selected?.id;
   const lines = [
     `AGENTS · ${filter.toUpperCase()}`,
     "Scope only · Active workers, retained idle workers, or terminal history. Use tabs to change view.",
@@ -527,12 +460,16 @@ export function renderTasks(
   filter?: string,
   selectedId?: string,
 ): string[] {
-  const tasks = [...state.tasks.values()].filter(
-    (task) => !filter || task.state === filter,
-  );
-  const terminal = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
-  const current = tasks.filter((task) => !terminal.has(task.state));
-  const history = tasks.filter((task) => terminal.has(task.state));
+  const filteredState = filter
+    ? {
+        ...state,
+        tasks: new Map(
+          [...state.tasks].filter(([, task]) => task.state === filter),
+        ),
+      }
+    : state;
+  const presentation = selectTaskRowPresentation(filteredState);
+  const tasks = [...filteredState.tasks.values()];
   const lines = [
     "TASKS · CURRENT",
     "State  ID                         title                         assignee/result",
@@ -547,18 +484,18 @@ export function renderTasks(
       `${marker}${stateIcon(task.state)} ${pad(task.state, 12)} ${pad(task.id, 27)} ${pad(task.title, 30)} ${assignee}${task.resultId ? ` result:${task.resultId}` : ""}`,
     );
   };
-  const orderedCurrent = current.sort((a, b) => a.id.localeCompare(b.id));
-  for (const task of orderedCurrent.slice(0, 10)) renderTask(task);
-  if (orderedCurrent.length > 10)
+  for (const task of presentation.visibleCurrent) renderTask(task);
+  if (presentation.current.length > 10)
     lines.push(
-      `↕ ${orderedCurrent.length - 10} more current tasks · use selection/navigation`,
+      `↕ ${presentation.current.length - 10} more current tasks · use selection/navigation`,
     );
-  if (history.length > 0) {
+  if (presentation.history.length > 0) {
     lines.push("", "HISTORY · TERMINAL TASKS (retained)");
-    const orderedHistory = history.sort((a, b) => a.id.localeCompare(b.id));
-    for (const task of orderedHistory.slice(0, 8)) renderTask(task);
-    if (orderedHistory.length > 8)
-      lines.push(`↕ ${orderedHistory.length - 8} more terminal tasks retained`);
+    for (const task of presentation.visibleHistory) renderTask(task);
+    if (presentation.history.length > 8)
+      lines.push(
+        `↕ ${presentation.history.length - 8} more terminal tasks retained`,
+      );
   }
   if (tasks.length === 0) lines.push("No tasks match the current filter.");
   return fitLines(lines, width);
@@ -570,14 +507,8 @@ export function renderAgentInspector(
   width: number,
 ): string[] {
   if (!agent) return fitLines(["AGENT DETAIL", "No agent selected."], width);
-  const run = agent.currentRunId
-    ? state.runs.get(agent.currentRunId)
-    : undefined;
-  const task = run
-    ? state.tasks.get(run.taskId)
-    : [...state.tasks.values()].find(
-        (item) => item.assignedAgentId === agent.id,
-      );
+  const relation = selectAgentInspectorRelation(agent, state);
+  const { run, task } = relation;
   const meta = record(agent);
   const requested = record(meta.requestedModel);
   const effective = record(meta.effectiveModel);
@@ -598,7 +529,7 @@ export function renderAgentInspector(
     "unavailable";
   const blocked =
     text(meta.blockedReason) ??
-    questionForAgent(agent, state)?.prompt ??
+    relation.question?.prompt ??
     (agent.state === "blocked" ? "unavailable" : "none");
   return fitLines(
     [
@@ -632,13 +563,7 @@ export function renderTaskDetail(
   width: number,
 ): string[] {
   if (!task) return fitLines(["TASK DETAIL", "No task selected."], width);
-  const run = task.currentRunId ? state.runs.get(task.currentRunId) : undefined;
-  const result = task.resultId
-    ? state.results.get(task.resultId)
-    : [...state.results.values()].find((item) => item.taskId === task.id);
-  const question = [...state.questions.values()].find(
-    (item) => item.taskId === task.id && !item.answered,
-  );
+  const { run, result, question } = selectTaskDetailRelation(task, state);
   return fitLines(
     [
       "TASK DETAIL",
