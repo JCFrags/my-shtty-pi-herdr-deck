@@ -148,6 +148,33 @@ Agent Board is a mouse-first right-side control surface. Its stable views are:
 
 Press `,` or click **Settings** to open the temporary settings overlay. Settings is not a primary tab. Signals is the user-facing name for the provider formerly called Agent Board and Signalboard. Use `/signals` for its standalone UI. `/signalboard` is its compatibility alias.
 
+`BrokerDeckApp` is the shell and dispatcher. Typed Board, Files, Agents, Activity, and overlay modules own screen rendering and terminal-cell geometry. One `OverlayState` owns Settings, Help, Agent More, confirmations, text input, and question responses. Modal input has priority over screen and global input. The shell header shows connection state, adopted scope, the canonical Needs Attention count, Settings, and Help.
+
+Board uses one canonical selected item. Typed action routing resolves that item at activation time. Broker and Signals questions use the question-response overlay. Signals answer requests keep exact option IDs and current revisions. Files keeps the exact provider-relative action path separate from safe display text and hitbox keys. At 78 columns or more, Files renders Tree and Preview in a 38/62 split. At narrower widths, it renders persistent Tree and Preview tabs. Provider refreshes are microtask-coalesced. Render dependencies compare the visible shell plus only the active screen or overlay.
+
+Representative plain output from the final renderer:
+
+```text
+AGENT BOARD  ONLINE  scope: project  attention: 2  [Settings] [Help]
+[BOARD 1] [Files 2] [Agents 3] [Activity 4]
+NEEDS ATTENTION              │ DETAIL · SIGNALS question
+> [SIGNALS] waiting Approve  │ Choose one response.
+CURRENT WORK                 │ [Submit Answer] [Cancel]
+  [TODO] running Build       │
+
+FILES · selected 2 · 1.2 KiB · ~300 tokens
+TREE (38%)                   │ PREVIEW (62%)
+▾ src                        │ path: src/index.ts
+  ☐ index.ts                 │ encoding: utf-8 · 24 lines
+  ☐ cli.ts                   │ 1  export function main() {
+[Insert paths] [Insert contents] [Clear selection] [Refresh] [Open standalone Files]
+
+[Tree] [Preview]
+TREE · narrow
+▾ src
+  ☐ index.ts
+```
+
 The installed Pi extension requests and watches provider summaries through these stable `pi.events` names:
 
 - `pi-agent-board:request-summary-v1`
@@ -304,4 +331,4 @@ The legacy deck uses a same-user Unix socket, explicit target selection, bounded
 
 ## Deferred scope
 
-The Files view is an entry seam for `/files`; it is not a duplicate file browser. It can focus the adopted Pi pane, but it cannot invoke Pi's built-in `/files` view through Pi 0.84.2. Version 0.1.0 does not provide direct file IPC, arbitrary shell execution, transcript mirroring, or raw terminal keystroke control.
+The Files view consumes the additive `/files` provider protocol. It does not mirror a terminal or use arbitrary shell execution. **Open standalone Files** focuses the adopted Pi pane and invokes the provider-supported standalone entrypoint when that capability is available. Version 0.1.0 does not provide transcript mirroring or raw terminal keystroke control.
