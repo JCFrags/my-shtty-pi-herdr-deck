@@ -21,7 +21,8 @@ import {
 } from "./views.js";
 import { selectAdoptedScope } from "./scope.js";
 
-export type ActivityAction = "copy-id" | "focus" | "archive" | "retry-delivery";
+export type ActivityAction =
+  "copy-id" | "focus" | "archive-update" | "retry-delivery";
 export interface SignalActivityDetail {
   kind: "signal-update" | "signal-decision" | "signal-history";
   id: string;
@@ -166,6 +167,31 @@ export interface ActivityWheelResult {
   handled: boolean;
 }
 
+export interface ActivityKeyResult {
+  state: ActivityScreenState;
+  handled: boolean;
+  selectedId?: string;
+}
+
+/** Keyboard navigation shares the same list selection contract as mouse rows. */
+export function handleActivityKey(
+  state: ActivityScreenState,
+  key: string,
+  itemIds: readonly string[],
+): ActivityKeyResult {
+  if (key !== "ArrowUp" && key !== "ArrowDown" && key !== "j" && key !== "k")
+    return { state, handled: false };
+  if (itemIds.length === 0) return { state, handled: true };
+  const current = Math.max(0, itemIds.indexOf(state.selectedId ?? ""));
+  const delta = key === "ArrowUp" || key === "k" ? -1 : 1;
+  const index = (current + delta + itemIds.length) % itemIds.length;
+  return {
+    state,
+    handled: true,
+    ...(itemIds[index] ? { selectedId: itemIds[index] } : {}),
+  };
+}
+
 const filters: readonly ActivityFilter[] = [
   "all",
   "results",
@@ -181,7 +207,7 @@ const sourceBadge = (item: ActivityItem): string => {
 const supportedActions = new Set<ActivityAction>([
   "copy-id",
   "focus",
-  "archive",
+  "archive-update",
   "retry-delivery",
 ]);
 const actionLabel = (action: ActivityAction): string =>
@@ -352,25 +378,37 @@ function renderPane(
   }
   const left = list.finish();
   const right = detail.finish();
-  const surface =
-    width < 90
-      ? {
-          lines: [...left.lines, "", ...right.lines],
-          hitBoxes: [
-            ...left.hitBoxes,
-            ...right.hitBoxes.map((box) => ({
-              ...box,
-              y: box.y + left.lines.length + 1,
-            })),
-          ],
-          regions: [],
-        }
-      : composeColumns(
-          left,
-          right,
-          Math.max(1, Math.floor(width * 0.42)),
-          Math.max(1, width - Math.floor(width * 0.42) - 1),
-        );
+  const leftWidth = Math.max(1, Math.floor(width * 0.42));
+  const wide = width >= 90;
+  const surface = wide
+    ? composeColumns(left, right, leftWidth, Math.max(1, width - leftWidth - 1))
+    : {
+        lines: [...left.lines, "", ...right.lines],
+        hitBoxes: [
+          ...left.hitBoxes,
+          ...right.hitBoxes.map((box) => ({
+            ...box,
+            y: box.y + left.lines.length + 1,
+          })),
+        ],
+        regions: [],
+      };
+  surface.regions.push(
+    {
+      id: "activity:list",
+      x: 0,
+      y: 0,
+      width: wide ? leftWidth : width,
+      height: left.lines.length,
+    },
+    {
+      id: "activity:detail",
+      x: wide ? leftWidth + 1 : 0,
+      y: wide ? 0 : left.lines.length + 1,
+      width: wide ? Math.max(1, width - leftWidth - 1) : width,
+      height: right.lines.length,
+    },
+  );
   return { surface, ...(selected ? { selected } : {}) };
 }
 

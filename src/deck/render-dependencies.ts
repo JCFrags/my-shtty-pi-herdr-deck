@@ -1,4 +1,5 @@
 import type { DeckNotification, DeckState } from "./types.js";
+import type { ShellHeaderPresentation } from "./screen-types.js";
 import {
   selectAdoptedScope,
   selectFilesPresentationAuthority,
@@ -20,7 +21,7 @@ export type { AgentBoardTab } from "./product-presentation.js";
 export type VisibleAgentFilter = "active" | "idle" | "history";
 
 export interface VisibleSurfaceContext {
-  tab: AgentBoardTab | string;
+  tab: AgentBoardTab;
   targetPaneId?: string;
   selectedAgentId?: string;
   agentFilter?: VisibleAgentFilter;
@@ -29,6 +30,8 @@ export interface VisibleSurfaceContext {
   boardFilter?: BoardFilter;
   activityFilter?: ActivityFilter;
   notifications?: readonly DeckNotification[];
+  /** Shell state is visible for every tab and therefore belongs in the gate. */
+  online?: boolean;
   overlay?:
     | "settings"
     | "help"
@@ -37,8 +40,6 @@ export interface VisibleSurfaceContext {
     | "text-input"
     | "question-response";
   overlayGuard?: unknown;
-  /** Allows old callers to compile; removed surface fields do not affect a model. */
-  [unusedCompatibilityField: string]: unknown;
 }
 
 function canonical(value: unknown): unknown {
@@ -212,15 +213,41 @@ function activityModel(
   };
 }
 
-export function visibleSurfaceModel(
+export function shellHeaderPresentation(
+  state: DeckState,
+  context: VisibleSurfaceContext,
+): ShellHeaderPresentation {
+  const scope = selectAdoptedScope(state, context.targetPaneId);
+  const root = scope.rootAgentId
+    ? state.agents.get(scope.rootAgentId)
+    : undefined;
+  const scopeLabel = root
+    ? (root.displayName ?? root.herdrName ?? root.id)
+    : context.targetPaneId
+      ? `pane ${context.targetPaneId}`
+      : "all panes";
+  const board = selectUnifiedBoardPresentation(
+    state,
+    context.targetPaneId,
+    undefined,
+    "all-current",
+  );
+  return {
+    productName: "AGENT BOARD",
+    scopeLabel,
+    // Count actionable attention. Malformed provider rows are not shell attention.
+    attentionCount: board.attention.filter(
+      (item) => item.actions.actions.length > 0,
+    ).length,
+    online: context.online === true,
+    selectedTab: context.tab,
+  };
+}
+
+function activeBodyModel(
   state: DeckState,
   context: VisibleSurfaceContext,
 ): unknown {
-  if (context.overlay)
-    return {
-      overlay: context.overlay,
-      guard: context.overlayGuard,
-    };
   if (context.tab === "files") {
     const filesAuthority = selectFilesPresentationAuthority(
       state,
@@ -234,8 +261,21 @@ export function visibleSurfaceModel(
   }
   if (context.tab === "board") return boardModel(state, context);
   if (context.tab === "activity") return activityModel(state, context);
-  if (context.tab === "agents") return agentsModel(state, context);
-  return {};
+  return agentsModel(state, context);
+}
+
+export function visibleSurfaceModel(
+  state: DeckState,
+  context: VisibleSurfaceContext,
+): unknown {
+  const shell = shellHeaderPresentation(state, context);
+  if (context.overlay)
+    return {
+      shell,
+      overlay: context.overlay,
+      guard: context.overlayGuard,
+    };
+  return { shell, body: activeBodyModel(state, context) };
 }
 
 export function visibleSurfaceSignature(

@@ -45,6 +45,7 @@ export interface FilesPreviewPresentation {
 
 export interface FilesPresentation {
   available: boolean;
+  canOpenStandalone: boolean;
   error?: string;
   cwd: string;
   currentPath: string;
@@ -167,6 +168,7 @@ export function filesLayout(width: number): FilesLayout {
 
 export function normalizeFilesPresentation(
   files: FilesProjection | undefined,
+  canOpenStandalone = false,
 ): FilesPresentation {
   const summary = record(files?.summary);
   const view = record(files?.view);
@@ -237,6 +239,7 @@ export function normalizeFilesPresentation(
   const tokens = integer(summary.selectedApproximateTokens);
   return {
     available: files?.available === true,
+    canOpenStandalone,
     ...(text(files?.error, 512)
       ? { error: safeFilesDisplay(text(files?.error, 512)) }
       : {}),
@@ -316,9 +319,7 @@ export function renderFilesScreen(
   const { presentation } = options;
   const layout = filesLayout(width);
   const root = new SurfaceBuilder(width);
-  root.addLine(
-    `FILES  ${presentation.available ? "● READY" : "○ UNAVAILABLE"}`,
-  );
+  root.addLine(`FILES  ${presentation.available ? "● READY" : "○ CONNECTING"}`);
   root.addLine(
     `${presentation.cwd || "Provider working directory unavailable"}  ${presentation.selectedCount} selected  filter: ${presentation.filter || "none"}  hidden: ${presentation.showHidden ? "on" : "off"}`,
   );
@@ -350,8 +351,9 @@ export function renderFilesScreen(
     const y = tree.lines.length;
     const indent = "  ".repeat(row.depth);
     const marker = row.selected ? "x" : row.partiallySelected ? "-" : " ";
-    const caret = isFolder(row) ? (row.expanded ? "v" : ">") : ".";
+    const caret = isFolder(row) ? (row.expanded ? "▾" : "▸") : "·";
     const selected = options.state.focusedPath === actionPath;
+    const rowX = Math.min(layout.treeWidth - 1, 7 + indent.length);
     tree.addRow(
       `${row.rowKey}:row`,
       `${selected ? ">" : " "} ${indent}${caret} [${marker}] ${row.name}${row.error ? ` ! ${row.error}` : ""}`,
@@ -363,7 +365,7 @@ export function renderFilesScreen(
         });
         if (!isFolder(row)) options.onAction({ action: "preview", actionPath });
       },
-      { width: layout.treeWidth },
+      { x: rowX, width: layout.treeWidth - rowX },
     );
     if (isFolder(row))
       tree.addHitBox({
@@ -502,7 +504,8 @@ export function renderFilesScreen(
     },
     {
       id: "files:action-open-standalone",
-      label: "Open standalone Files",
+      label: "Open standalone view",
+      disabled: !presentation.canOpenStandalone,
       activate: () => options.onAction({ action: "open-standalone" }),
     },
   ]);
@@ -593,11 +596,20 @@ export function handleFilesMouse(
   event: TuiMouseEvent,
 ): boolean {
   if (event.type === "wheel") {
+    const region = surface.regions.find(
+      (candidate) =>
+        event.x >= candidate.x &&
+        event.x < candidate.x + candidate.width &&
+        event.y >= candidate.y &&
+        event.y < candidate.y + candidate.height,
+    );
+    if (!region) return false;
     const delta = event.direction === "down" ? 1 : -1;
     const field =
-      options.state.focusTarget === "preview" ? "previewScroll" : "treeScroll";
+      region.id === "files:preview-region" ? "previewScroll" : "treeScroll";
     withState(options, {
       [field]: Math.max(0, options.state[field] + delta),
+      focusTarget: field === "previewScroll" ? "preview" : "tree",
       wheelDetached: true,
     });
     return true;

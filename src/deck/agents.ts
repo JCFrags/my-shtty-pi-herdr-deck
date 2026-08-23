@@ -8,9 +8,13 @@ import {
 } from "./selections.js";
 import type { DeckState } from "./types.js";
 
+export type AgentContractAction = DeckAction | "create-child-agent";
 export interface AgentActionContract {
-  authorize(action: DeckAction, target: ActionTarget): string | undefined;
-  activate(action: DeckAction, target: ActionTarget): void;
+  authorize(
+    action: AgentContractAction,
+    target: ActionTarget,
+  ): string | undefined;
+  activate(action: AgentContractAction, target: ActionTarget): void;
 }
 export interface AgentRenderInput {
   state: DeckState;
@@ -154,6 +158,7 @@ export function renderAgents(
   if (selected) {
     const relation = selectAgentInspectorRelation(selected, scoped);
     detail.addLine(`ID: ${selected.id} · generation ${selected.generation}`);
+    detail.addLine(`Identity: ${selected.id}`);
     detail.addLine(`Name: ${name(selected)}`);
     detail.addLine(`State: ${selected.state}`);
     detail.addLine(
@@ -217,7 +222,7 @@ export function openAgentMore(
     label,
     disabled:
       id === "create-child-agent"
-        ? Boolean(authorization?.authorize("prompt", target))
+        ? Boolean(authorization?.authorize("create-child-agent", target))
         : id !== "copyId" && Boolean(authorization?.authorize(id, target)),
     activate: () => undefined,
   }));
@@ -293,8 +298,8 @@ export function activateAgentMore(
   const agent = state.agents.get(presentation.guard.agentId)!;
   const target = targetFor(agent);
   if (item.id === "create-child-agent") {
-    if (input.authorize("prompt", target)) return false;
-    input.activate("prompt", target);
+    if (input.authorize("create-child-agent", target)) return false;
+    input.activate("create-child-agent", target);
   } else if (item.id === "copyId") {
     input.activate("copyId", target);
   } else {

@@ -11,18 +11,9 @@ import {
   currentProviderProjection,
   getAgentModelChoices,
   getAgentThinkingChoices,
-  renderAgentInspector,
-  renderAgents,
-  renderGroupDetail,
   renderNotifications,
-  renderResultDetail,
-  renderTaskDetail,
 } from "./views.js";
-import {
-  type HitBox,
-  PressReleaseTracker,
-  renderButton,
-} from "./components/controls.js";
+import { type HitBox, PressReleaseTracker } from "./components/controls.js";
 import type { Agent, Task } from "../state/types.js";
 import type { DeckState } from "./types.js";
 import { styleLines } from "./theme.js";
@@ -30,7 +21,10 @@ import type { PiCapabilitySnapshot } from "../pi/model-capabilities.js";
 import type { ModelPolicyConfig } from "../broker/model-policy.js";
 import type { DeckGroup, DeckQuestion } from "./types.js";
 import type { AgentBoardPendingQuestion } from "../shared/provider-projections.js";
-import { visibleSurfaceSignature } from "./render-dependencies.js";
+import {
+  shellHeaderPresentation,
+  visibleSurfaceSignature,
+} from "./render-dependencies.js";
 import {
   selectActivityPresentation,
   selectUnifiedBoardPresentation,
@@ -53,7 +47,28 @@ import {
   selectAgentListPresentation,
 } from "./selections.js";
 import { selectBoardPresentation } from "./board-presentation.js";
-import { normalizeFilesPresentation } from "./files-screen.js";
+import {
+  handleFilesKey,
+  handleFilesMouse,
+  normalizeFilesPresentation,
+  renderFilesScreen,
+  type FilesActionRequest,
+  type FilesScreenOptions,
+  type FilesScreenSurface,
+} from "./files-screen.js";
+import {
+  agentMoreGuard,
+  isAgentMoreGuardCurrent,
+  renderAgents,
+  type AgentActionContract,
+  type AgentContractAction,
+} from "./agents.js";
+import {
+  applyActivityWheel,
+  handleActivityKey,
+  renderActivity,
+  type ActivityAction,
+} from "./activity.js";
 import { renderBoardScreen } from "./board-screen.js";
 import {
   boundedOverlayText,
@@ -70,7 +85,7 @@ import { renderAgentMoreScreen } from "./screens/agent-more-screen.js";
 import { renderConfirmationScreen } from "./screens/confirmation-screen.js";
 import { renderTextInputScreen } from "./screens/text-input-screen.js";
 import { renderQuestionResponseScreen } from "./screens/question-response-screen.js";
-import { renderHeader, adoptedScopeLabel } from "./shell/header.js";
+import { renderHeader } from "./shell/header.js";
 import type { RenderedSurface } from "./screen-types.js";
 
 export interface BrokerDeckAppOptions {
@@ -90,12 +105,6 @@ type DeckTab = AgentBoardTab;
 
 const NAV_TABS: readonly DeckTab[] = ["board", "files", "agents", "activity"];
 
-function safeTerminalText(value: unknown): string {
-  return String(value ?? "")
-    .replace(/[\u0000-\u001f\u007f-\u009f]/gu, "�")
-    .replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu, "�");
-}
-
 export class BrokerDeckApp implements Component {
   readonly #client: BrokerClient;
   readonly #actions: DeckActions;
@@ -114,7 +123,6 @@ export class BrokerDeckApp implements Component {
   #selectedGroup: string | undefined;
   #selectedTask: string | undefined;
   #selectedProviderTodo: string | undefined;
-  #selectedResult: string | undefined;
   #selectedQuestion: string | undefined;
   #agentFilter: import("./views.js").AgentViewFilter = "active";
   #agentPage = 0;
@@ -125,15 +133,16 @@ export class BrokerDeckApp implements Component {
   #capabilities: PiCapabilitySnapshot | undefined;
   #modelPolicy: ModelPolicyConfig | undefined;
   #autoCloseCompletedTemporary = false;
-  #filesFilter = "";
-  #filesHidden = false;
-  #filesPath = "";
-  #filesScroll = 0;
-  #filesPreviewScroll = 0;
-  #filesWheelDetached = false;
-  #filesTreeRegion: { start: number; end: number } | undefined;
-  #filesPreviewRegion: { start: number; end: number } | undefined;
-  #filesPreviewPath: string | undefined;
+  #filesScreen: import("./screen-types.js").FilesScreenState = {
+    activePane: "tree",
+    treeScroll: 0,
+    previewScroll: 0,
+    focusTarget: "tree",
+    wheelDetached: false,
+  };
+  #filesSurface: FilesScreenSurface | undefined;
+  #filesOptions: FilesScreenOptions | undefined;
+  #filesSurfaceOffset = 0;
   #boardTab: "inbox" | "updates" | "decisions" | "history" = "inbox";
   #boardSelection: string | undefined;
   #unifiedBoardSelection: string | undefined;
@@ -143,6 +152,9 @@ export class BrokerDeckApp implements Component {
   #activitySelection: string | undefined;
   #activityFilter: ActivityFilter = "all";
   #activityScroll = 0;
+  #activityDetailScroll = 0;
+  #activitySurface: import("./screen-types.js").RenderedSurface | undefined;
+  #activitySurfaceOffset = 0;
   #renderSignature = "";
 
   constructor(options: BrokerDeckAppOptions) {
@@ -158,10 +170,19 @@ export class BrokerDeckApp implements Component {
     this.#renderSignature = this.visibleSignature(options.client.store.state);
     this.#unsubscribers.push(
       options.client.onStatus((status) => {
+        if (status === this.#status) return;
         this.#status = status;
+        const signature = this.visibleSignature();
+        if (signature === this.#renderSignature) return;
+        this.#renderSignature = signature;
         this.#requestRender();
       }),
       options.client.store.onChange((state) => {
+        if (
+          this.#overlay.kind === "agent-more" &&
+          !isAgentMoreGuardCurrent(state, this.#overlay.guard)
+        )
+          this.closeOverlay();
         const projection = currentProviderProjection(state, this.#targetPaneId);
         const previousMessage = this.#message;
         if (
@@ -196,7 +217,11 @@ export class BrokerDeckApp implements Component {
     const overlay = this.#overlay;
     const header = renderHeader(
       safeWidth,
-      this.headerPresentation(state),
+      shellHeaderPresentation(state, {
+        tab: this.#tab,
+        ...(this.#targetPaneId ? { targetPaneId: this.#targetPaneId } : {}),
+        online: this.#status === "connected",
+      }),
       overlay.kind === "none"
         ? {
             selectTab: (tab) => this.selectTab(tab),
@@ -268,20 +293,18 @@ export class BrokerDeckApp implements Component {
     else if (data === "n" && this.#tab === "agents") this.beginInput("create");
     else if (data === "/" && this.#tab === "files")
       this.beginInput("files-filter");
-    else if (data === "h" && this.#tab === "files") {
-      this.#filesHidden = !this.#filesHidden;
-      void this.runFiles("toggle-hidden");
-    } else if (data === "c" && this.#tab === "files")
-      void this.runFiles("clear-selection");
-    else if ((data === "\r" || data === "\n") && this.#tab === "files")
-      this.activateSelectedFile();
-    else if (data === "p" && this.#tab === "files")
-      void this.runFiles("preview", this.#filesPath);
-    else if (data === "i" && this.#tab === "files")
-      void this.runFiles("insert-paths");
-    else if (data === "b" && this.#tab === "files")
-      void this.runFiles("insert-contents");
-    else if (data === "f" && this.#tab === "agents") void this.run("focus");
+    else if (this.#tab === "files") {
+      const key =
+        data === "\u001b[A"
+          ? "ArrowUp"
+          : data === "\u001b[B"
+            ? "ArrowDown"
+            : data === "\r" || data === "\n"
+              ? "Enter"
+              : data;
+      if (!handleFilesKey(this.filesScreenOptions(), key) && data === "/")
+        this.beginInput("files-filter");
+    } else if (data === "f" && this.#tab === "agents") void this.run("focus");
     else if (data === "p" && this.#tab === "agents") this.beginInput("prompt");
     else if (data === "a" && this.#tab === "agents") this.beginInput("ask");
     else if (data === "a" && this.#tab === "board")
@@ -295,6 +318,20 @@ export class BrokerDeckApp implements Component {
     else if (data === "x" && this.#tab === "agents") this.confirmClose();
     else if (data === "m" && this.#tab === "agents") this.openAgentMore();
     else if (data === "t" && this.#tab === "agents") this.cycleThinking();
+    else if (
+      this.#tab === "activity" &&
+      (data === "\u001b[A" ||
+        data === "\u001b[B" ||
+        data === "k" ||
+        data === "j")
+    )
+      this.handleActivityKey(
+        data === "\u001b[A"
+          ? "ArrowUp"
+          : data === "\u001b[B"
+            ? "ArrowDown"
+            : data,
+      );
     else if (data === "\u001b[A" || data === "k") this.move(-1);
     else if (data === "\u001b[B" || data === "j") this.move(1);
     this.syncVisibleSignature();
@@ -324,33 +361,42 @@ export class BrokerDeckApp implements Component {
       if (handled) this.#requestRender();
       return true;
     }
+    if (this.#tab === "files" && this.#filesSurface) {
+      const localEvent =
+        event.type === "wheel"
+          ? { ...event, y: event.y - this.#filesSurfaceOffset }
+          : { ...event, y: event.y - this.#filesSurfaceOffset };
+      const handled = handleFilesMouse(
+        this.#filesOptions ?? this.filesScreenOptions(),
+        this.#filesSurface,
+        localEvent,
+      );
+      if (handled) {
+        this.syncVisibleSignature();
+        this.#requestRender();
+      }
+      return handled;
+    }
     if (event.type === "wheel") {
       const delta = event.direction === "down" ? 1 : -1;
-      if (
-        this.#tab === "files" &&
-        this.#filesPreviewRegion &&
-        event.y >= this.#filesPreviewRegion.start &&
-        event.y <= this.#filesPreviewRegion.end
-      )
-        this.#filesPreviewScroll = Math.max(
-          0,
-          this.#filesPreviewScroll + delta,
-        );
-      else if (
-        this.#tab === "files" &&
-        this.#filesTreeRegion &&
-        event.y >= this.#filesTreeRegion.start &&
-        event.y <= this.#filesTreeRegion.end
-      ) {
-        this.#filesWheelDetached = true;
-        this.#filesScroll = Math.max(0, this.#filesScroll + delta);
-      } else if (this.#tab === "files") return false;
-      else if (this.#tab === "board") {
+      if (this.#tab === "board") {
         this.#boardWheelDetached = true;
         this.#boardScroll = Math.max(0, this.#boardScroll + delta);
-      } else if (this.#tab === "activity")
-        this.#activityScroll = Math.max(0, this.#activityScroll + delta);
-      else this.move(delta);
+      } else if (this.#tab === "activity") {
+        const region = this.activityWheelRegion(event.x, event.y);
+        const result = applyActivityWheel(
+          this.activityScreenState(),
+          region,
+          event.direction === "down" ? "down" : "up",
+        );
+        this.#activityScroll = result.state.listScroll;
+        this.#activityDetailScroll = result.state.detailScroll;
+        if (result.handled) {
+          this.syncVisibleSignature();
+          this.#requestRender();
+        }
+        return result.handled;
+      } else this.move(delta);
       this.syncVisibleSignature();
       this.#requestRender();
       return true;
@@ -372,15 +418,10 @@ export class BrokerDeckApp implements Component {
     return visibleSurfaceSignature(state, {
       tab: this.#tab,
       ...(this.#targetPaneId ? { targetPaneId: this.#targetPaneId } : {}),
-      ...(this.#selectedTask ? { selectedTaskId: this.#selectedTask } : {}),
-      ...(this.#selectedResult
-        ? { selectedResultId: this.#selectedResult }
-        : {}),
-      ...(this.#selectedGroup ? { selectedGroupId: this.#selectedGroup } : {}),
       ...(this.#selectedAgent ? { selectedAgentId: this.#selectedAgent } : {}),
       agentFilter: this.#agentFilter,
       agentPage: this.#agentPage,
-      boardTab: this.#boardTab,
+      online: this.#status === "connected",
       boardFilter: this.#boardFilter,
       activityFilter: this.#activityFilter,
       ...(this.#tab === "activity" && this.#activitySelection
@@ -438,40 +479,6 @@ export class BrokerDeckApp implements Component {
   private closeOverlay(): void {
     this.#overlay = noOverlay();
     this.#tracker.reset();
-  }
-
-  private openAgentMore(): void {
-    const agent = this.selectedAgent();
-    if (!agent) return;
-    this.#overlay = {
-      kind: "agent-more",
-      guard: { agentId: agent.id, generation: agent.generation },
-      focus: "primary",
-      scroll: 0,
-      pending: false,
-    };
-    this.#tracker.reset();
-  }
-
-  private headerPresentation(state: DeckState) {
-    const scope = selectAdoptedScope(state, this.#targetPaneId);
-    const root = this.adoptedRootAgent();
-    const model = selectUnifiedBoardPresentation(
-      state,
-      this.#targetPaneId,
-      this.#unifiedBoardSelection,
-      "attention",
-    );
-    return {
-      productName: "AGENT BOARD" as const,
-      scopeLabel: adoptedScopeLabel(
-        root?.displayName ?? root?.herdrName,
-        scope.state.agents.size,
-      ),
-      attentionCount: model.counts.attention,
-      online: this.#status === "connected",
-      selectedTab: this.#tab,
-    };
   }
 
   private appendSurface(lines: string[], surface: RenderedSurface): void {
@@ -758,8 +765,7 @@ export class BrokerDeckApp implements Component {
     else this.closeOverlay();
     if (overlay.purpose === "create") void this.createAgent(value);
     else if (overlay.purpose === "files-filter") {
-      this.#filesFilter = value;
-      this.#filesScroll = 0;
+      this.#filesScreen = { ...this.#filesScreen, treeScroll: 0 };
       void this.runFiles("filter", value);
     } else if (overlay.purpose === "model-filter") {
       this.#modelFilter = value;
@@ -1000,107 +1006,86 @@ export class BrokerDeckApp implements Component {
     return;
   }
 
+  private agentActionContract(): AgentActionContract {
+    return {
+      authorize: (action: AgentContractAction, target) =>
+        action === "create-child-agent"
+          ? target.agent?.cwd
+            ? undefined
+            : "Agent project is unavailable."
+          : this.#actions.authorize(action, target),
+      activate: (action: AgentContractAction, target) => {
+        if (target.agent) this.#selectedAgent = target.agent.id;
+        if (action === "create-child-agent") this.beginInput("create");
+        else if (
+          action === "prompt" ||
+          action === "ask" ||
+          action === "steer" ||
+          action === "followUp"
+        )
+          this.beginInput(action);
+        else if (action === "stop") this.confirmAgentStop();
+        else if (action === "close") this.confirmClose();
+        else if (action === "setModel") this.cycleModel();
+        else if (action === "setThinking") this.cycleThinking();
+        else void this.run(action);
+      },
+    };
+  }
+
+  private openAgentMore(guard = agentMoreGuard(this.selectedAgent())): void {
+    if (!guard) return;
+    this.#overlay = {
+      kind: "agent-more",
+      guard,
+      focus: "primary",
+      scroll: 0,
+      pending: false,
+    };
+    this.#tracker.reset();
+  }
+
   private renderAgentsSurface(
     lines: string[],
     width: number,
     state: DeckState,
   ): void {
-    const agent = this.selectedAgent();
-    this.addControlRow(
-      lines,
-      (["active", "idle", "history"] as const).map((filter) => ({
-        id: `agents:filter:${filter}`,
-        label: this.#agentFilter === filter ? `[${filter}]` : filter,
-        activate: () => {
-          this.#agentFilter = filter;
-          this.#agentPage = 0;
-          this.#selectedAgent = undefined;
-        },
-      })),
-      width,
-    );
     const scoped = this.scopedWorkState(state);
-    const visible = this.visibleAgents(scoped);
-    const start = lines.length;
-    lines.push(
-      ...renderAgents(
-        scoped,
-        width,
-        agent?.id,
-        this.#agentFilter,
-        this.#agentPage,
-      ),
-      "",
-    );
-    for (const [index, item] of visible.entries()) {
-      const y = start + 4 + index * 2;
-      this.addHitBox(`agent:row:${item.id}`, y, width, () => {
-        this.#selectedAgent = item.id;
-      });
-    }
-    lines.push(...renderAgentInspector(agent, state, width), "");
-    this.addControlRow(
-      lines,
-      [
-        {
-          id: "agent:focus",
-          label: "Focus",
-          disabled: !agent?.paneId,
-          activate: () => void this.run("focus"),
-        },
-        {
-          id: "agent:prompt",
-          label: "Prompt",
-          disabled: !agent,
-          activate: () => this.beginInput("prompt"),
-        },
-        {
-          id: "agent:ask",
-          label: "Ask",
-          disabled: !agent,
-          activate: () => this.beginInput("ask"),
-        },
-        {
-          id: "agent:interrupt",
-          label: "Interrupt",
-          disabled: agent?.state !== "working",
-          activate: () => void this.run("interrupt"),
-        },
-        {
-          id: "agent:stop",
-          label: "Stop",
-          disabled: !agent,
-          activate: () => this.confirmAgentStop(),
-        },
-        {
-          id: "agent:steer",
-          label: "Steer",
-          disabled: !agent,
-          activate: () => this.beginInput("steer"),
-        },
-        {
-          id: "agent:follow",
-          label: "Follow-up",
-          disabled: !agent,
-          activate: () => this.beginInput("followUp"),
-        },
-        {
-          id: "agent:more",
-          label: "More…",
-          disabled: !agent,
-          activate: () => {
-            this.openAgentMore();
-          },
-        },
-      ],
+    const surface = renderAgents({
+      state: scoped,
+      screen: {
+        filter: this.#agentFilter,
+        requestedPage: this.#agentPage,
+        ...(this.#selectedAgent ? { selectedId: this.#selectedAgent } : {}),
+      },
       width,
-    );
+      actions: this.agentActionContract(),
+      onSelect: (id) => {
+        if (id.startsWith("filter:")) {
+          const filter = id.slice("filter:".length);
+          if (
+            filter === "active" ||
+            filter === "idle" ||
+            filter === "history"
+          ) {
+            this.#agentFilter = filter;
+            this.#agentPage = 0;
+            this.#selectedAgent = undefined;
+          }
+        } else this.#selectedAgent = id;
+      },
+      onOpenMore: (guard) => this.openAgentMore(guard),
+    });
+    if (surface.correctedState) {
+      this.#agentPage = surface.correctedState.requestedPage;
+      this.#selectedAgent = surface.correctedState.selectedId;
+    }
+    this.appendSurface(lines, surface);
   }
 
   private selectActivityItem(item: ActivityItem): void {
     this.#activitySelection = item.id;
-    if (item.kind === "result") this.#selectedResult = item.source.id;
-    else if (item.kind === "terminal-task") this.#selectedTask = item.source.id;
+    if (item.kind === "terminal-task") this.#selectedTask = item.source.id;
     else if (item.kind === "terminal-group")
       this.#selectedGroup = item.source.id;
     else if (item.kind === "terminal-agent")
@@ -1112,133 +1097,157 @@ export class BrokerDeckApp implements Component {
     width: number,
     state: DeckState,
   ): void {
+    const surface = renderActivity(
+      {
+        state,
+        ...(this.#targetPaneId ? { targetPaneId: this.#targetPaneId } : {}),
+        notifications: this.#client.store.notifications,
+        screen: this.activityScreenState(),
+        width,
+        height: Math.max(1, this.#getHeight() - lines.length),
+        onSelect: (id) => {
+          if (id.startsWith("filter:")) {
+            const filter = id.slice("filter:".length);
+            if (
+              ["all", "results", "signals", "agents", "errors"].includes(filter)
+            ) {
+              this.#activityFilter = filter as ActivityFilter;
+              this.#activityScroll = 0;
+            }
+          } else {
+            const item = selectActivityPresentation(
+              state,
+              this.#targetPaneId,
+              this.#activitySelection,
+              this.#activityFilter,
+              this.#client.store.notifications,
+            ).items.find((candidate) => candidate.id === id);
+            if (item) this.selectActivityItem(item);
+          }
+        },
+        actions: {
+          isAllowed: (item, action) =>
+            this.isActivityActionAllowed(item, action),
+          activate: (item, action) => this.activateActivityAction(item, action),
+        },
+      },
+      width,
+    );
+    if (surface.correctedState)
+      this.#activityScroll = surface.correctedState.listScroll;
+    this.#activitySurface = surface;
+    this.#activitySurfaceOffset = lines.length;
+    this.appendSurface(lines, surface);
+  }
+
+  private isActivityActionAllowed(
+    item: ActivityItem,
+    action: ActivityAction,
+  ): boolean {
+    if (action === "archive-update" || action === "retry-delivery")
+      return Boolean(this.adoptedRootAgent());
+    if (action === "focus")
+      return item.kind === "terminal-agent" && Boolean(item.source.paneId);
+    return true;
+  }
+
+  private activateActivityAction(
+    item: ActivityItem,
+    action: ActivityAction,
+  ): void {
+    this.selectActivityItem(item);
+    if (action === "archive-update" || action === "retry-delivery") {
+      const source = this.providerRecord(item.source);
+      const fields =
+        action === "archive-update"
+          ? {
+              updateId: item.entityId,
+              expectedRevision: Number(source.revision ?? 0),
+            }
+          : {
+              questionId: String(
+                source.questionId ?? source.id ?? item.entityId,
+              ),
+              ...(source.answerId ? { answerId: String(source.answerId) } : {}),
+              expectedRevision: Number(source.revision ?? 0),
+            };
+      void this.runBoardAction(action, fields);
+    } else if (action === "focus") void this.run("focus");
+    else void this.run("copyId");
+  }
+
+  private async runBoardAction(
+    action: string,
+    fields: Record<string, unknown>,
+  ): Promise<void> {
+    const agent = this.adoptedRootAgent();
+    if (!agent) return;
+    try {
+      await this.#actions.run("boardAction", {
+        agent,
+        boardAction: { action, fields },
+      });
+      this.#message = `Signals ${action} succeeded.`;
+    } catch (error) {
+      this.#message = error instanceof Error ? error.message : String(error);
+    }
+    this.#requestRender();
+  }
+
+  private activityWheelRegion(
+    x: number,
+    y: number,
+  ): "list" | "detail" | "outside" {
+    const surface = this.#activitySurface;
+    if (!surface) return "outside";
+    const localY = y - this.#activitySurfaceOffset;
+    const region = surface.regions.find(
+      (candidate) =>
+        x >= candidate.x &&
+        x < candidate.x + candidate.width &&
+        localY >= candidate.y &&
+        localY < candidate.y + candidate.height,
+    );
+    return region?.id === "activity:list"
+      ? "list"
+      : region?.id === "activity:detail"
+        ? "detail"
+        : "outside";
+  }
+
+  private handleActivityKey(key: string): void {
     const model = selectActivityPresentation(
-      state,
+      this.#client.store.state,
       this.#targetPaneId,
       this.#activitySelection,
       this.#activityFilter,
       this.#client.store.notifications,
     );
-    lines.push("ACTIVITY  Results · decisions · updates · groups · lifecycle");
-    this.addControlRow(
-      lines,
-      (["all", "results", "signals", "agents", "errors"] as const).map(
-        (filter) => ({
-          id: `activity:filter:${filter}`,
-          label: this.#activityFilter === filter ? `[${filter}]` : filter,
-          activate: () => {
-            this.#activityFilter = filter;
-            this.#activityScroll = 0;
-          },
-        }),
-      ),
-      width,
+    const result = handleActivityKey(
+      this.activityScreenState(),
+      key,
+      model.items.map((item) => item.id),
     );
-    lines.push(`${model.items.length} retained events`);
-    if (model.items.length === 0)
-      lines.push("✓ No historical activity is available.");
-    const rowBudget = Math.max(4, this.#getHeight() - lines.length - 8);
-    const selectedIndex = model.selected
-      ? model.items.findIndex((item) => item.id === model.selected?.id)
-      : -1;
-    if (selectedIndex >= 0) {
-      if (selectedIndex < this.#activityScroll)
-        this.#activityScroll = selectedIndex;
-      if (selectedIndex >= this.#activityScroll + rowBudget)
-        this.#activityScroll = selectedIndex - rowBudget + 1;
-    }
-    this.#activityScroll = Math.max(
-      0,
-      Math.min(
-        this.#activityScroll,
-        Math.max(0, model.items.length - rowBudget),
-      ),
-    );
-    for (const item of model.items.slice(
-      this.#activityScroll,
-      this.#activityScroll + rowBudget,
-    )) {
-      const y = lines.length;
-      lines.push(
-        `${item.id === model.selected?.id ? ">" : " "} [${item.status}] ${item.title}`,
+    if (result.selectedId) {
+      const item = model.items.find(
+        (candidate) => candidate.id === result.selectedId,
       );
-      this.addHitBox(`activity:item:${item.id}`, y, width, () =>
-        this.selectActivityItem(item),
-      );
-    }
-    if (model.items.length > rowBudget)
-      lines.push(
-        `  ↕ ${this.#activityScroll + 1}-${Math.min(model.items.length, this.#activityScroll + rowBudget)} of ${model.items.length}`,
-      );
-    if (model.selected) {
-      this.selectActivityItem(model.selected);
-      lines.push(
-        "",
-        `DETAIL  ${model.selected.kind.toUpperCase()} · ${model.selected.status}`,
-        model.selected.title,
-      );
-      if (model.selected.kind === "result")
-        lines.push(...renderResultDetail(model.selected.source, width));
-      else if (model.selected.kind === "terminal-task")
-        lines.push(
-          ...renderTaskDetail(
-            model.selected.source,
-            this.scopedWorkState(state),
-            width,
-          ),
-        );
-      else if (model.selected.kind === "terminal-group")
-        lines.push(...renderGroupDetail(model.selected.source, width));
-      else lines.push(model.selected.summary);
+      if (item) this.selectActivityItem(item);
     }
   }
 
-  private addHitBox(
-    id: string,
-    y: number,
-    width: number,
-    activate: () => void,
-    disabled = false,
-    x = 0,
-  ): void {
-    this.#hitBoxes.push({ id, x, y, width, height: 1, disabled, activate });
+  private activityScreenState() {
+    return {
+      filter: this.#activityFilter,
+      ...(this.#activitySelection
+        ? { selectedId: this.#activitySelection }
+        : {}),
+      listScroll: this.#activityScroll,
+      detailScroll: this.#activityDetailScroll,
+      wheelDetached: false,
+    } as const;
   }
 
-  private addControlRow(
-    lines: string[],
-    controls: Array<{
-      id: string;
-      label: string;
-      disabled?: boolean;
-      activate(): void;
-    }>,
-    width: number,
-  ): void {
-    let line = "";
-    let y = lines.length;
-    for (const control of controls) {
-      const rendered = renderButton(control.label, {
-        disabled: control.disabled === true,
-      });
-      if (line.length > 0 && line.length + 1 + rendered.length > width) {
-        lines.push(line);
-        line = "";
-        y = lines.length;
-      }
-      if (line.length > 0) line += " ";
-      const x = line.length;
-      line += rendered;
-      this.addHitBox(
-        control.id,
-        y,
-        Math.min(rendered.length, width),
-        control.activate,
-        control.disabled === true,
-        x,
-      );
-    }
-    lines.push(line.slice(0, width));
-  }
 
   private adoptedRootAgent(): Agent | undefined {
     return selectAdoptedRootAgent(this.#client.store.state, this.#targetPaneId);
@@ -1249,231 +1258,69 @@ export class BrokerDeckApp implements Component {
       ? (value as Record<string, unknown>)
       : {};
   }
-  private visibleFileRows(state: DeckState): Record<string, unknown>[] {
-    const files = currentProviderProjection(state, this.#targetPaneId)?.files;
-    const view = this.providerRecord(files?.view);
-    const rows = Array.isArray(view.rows)
-      ? view.rows.map((item) => this.providerRecord(item))
-      : [];
-    const filter = this.#filesFilter.toLowerCase();
-    return rows.filter(
-      (row) =>
-        !filter ||
-        String(row.name ?? row.path)
-          .toLowerCase()
-          .includes(filter),
+  private filesScreenOptions(): FilesScreenOptions {
+    const authority = selectFilesPresentationAuthority(
+      this.#client.store.state,
+      this.#targetPaneId,
     );
+    return {
+      presentation: normalizeFilesPresentation(
+        authority.provider?.files,
+        authority.canOpenStandalone,
+      ),
+      state: this.#filesScreen,
+      onStateChange: (next) => {
+        this.#filesScreen = next;
+      },
+      onAction: (request) => this.runFilesAction(request),
+    };
   }
-  private activateSelectedFile(): void {
-    if (!this.#filesPath) return;
-    const row = this.visibleFileRows(this.#client.store.state).find(
-      (item) => String(item.path ?? "") === this.#filesPath,
-    );
-    if (!row) return;
-    const folder = row.kind === "directory" || row.kind === "root";
-    if (folder)
-      void this.runFiles("expand", this.#filesPath, row.expanded !== true);
-    else
-      void this.runFiles("toggle-selection", this.#filesPath).then(() =>
-        this.runFiles("preview", this.#filesPath),
-      );
-  }
+
   private renderFilesProvider(
     lines: string[],
     width: number,
-    state: DeckState,
+    _state: DeckState,
   ): void {
-    const filesAuthority = selectFilesPresentationAuthority(
-      state,
-      this.#targetPaneId,
-    );
-    const files = filesAuthority.provider?.files;
-    const presentation = normalizeFilesPresentation(files);
-    const view: Record<string, unknown> = {
-      currentPath: presentation.currentPath,
-      filter: presentation.filter,
-      showHidden: presentation.showHidden,
-      ...(presentation.preview
-        ? {
-            previewPath: presentation.preview.path,
-            preview: presentation.preview,
-          }
-        : {}),
-    };
-    const summary: Record<string, unknown> = {
-      cwd: presentation.cwd,
-      currentPath: presentation.currentPath,
-      selectedCount: presentation.selectedCount,
-      showHidden: presentation.showHidden,
-      selectedKnownBytes: presentation.selectedKnownBytes,
-      selectedApproximateTokens: presentation.selectedApproximateTokens,
-      limits: presentation.limits,
-    };
-    const rows: Record<string, unknown>[] = presentation.rows.map((row) => ({
-      ...row,
-    }));
-    const cwd = presentation.cwd;
-    const currentPath = presentation.currentPath || ".";
-    lines.push(
-      "FILES",
-      `${files?.available ? "● READY" : "○ CONNECTING"}  ${cwd || "Waiting for the Pi Files provider…"}`,
-    );
-    lines.push(
-      `⌂ /${currentPath === "." ? "" : currentPath}   ${String(summary.selectedCount ?? 0)} selected   ${String(view.filter ?? "") ? `filter: ${String(view.filter)}` : "no filter"}   hidden ${summary.showHidden === true || view.showHidden === true ? "on" : "off"}   ${Number(summary.selectedApproximateTokens ?? 0)} approx tokens`,
-      "TREE",
-    );
-    const visible = rows;
-    const rowBudget = Math.max(3, this.#getHeight() - lines.length - 12);
-    const selectedIndex = visible.findIndex(
-      (row) => String(row.path ?? "") === this.#filesPath,
-    );
-    if (selectedIndex >= 0 && !this.#filesWheelDetached) {
-      if (selectedIndex < this.#filesScroll) this.#filesScroll = selectedIndex;
-      if (selectedIndex >= this.#filesScroll + rowBudget)
-        this.#filesScroll = selectedIndex - rowBudget + 1;
-    }
-    this.#filesScroll = Math.max(
-      0,
-      Math.min(this.#filesScroll, Math.max(0, visible.length - rowBudget)),
-    );
-    const treeStart = lines.length;
-    for (const row of visible.slice(
-      this.#filesScroll,
-      this.#filesScroll + rowBudget,
-    )) {
-      const path = String(row.path ?? "");
-      const selected = row.selected === true;
-      const marker = selected ? "x" : row.partiallySelected ? "−" : " ";
-      const folder = row.kind === "directory" || row.kind === "root";
-      const caret = folder ? (row.expanded ? "▾" : "▸") : "·";
-      const cursor = path === this.#filesPath ? ">" : " ";
-      const indent = "  ".repeat(Math.max(0, Number(row.depth ?? 0)));
-      const prefix = `${cursor} ${indent}${caret} [${marker}] `;
-      const y = lines.length;
-      lines.push(
-        `${prefix}${safeTerminalText(row.name ?? path)}${row.error ? `  ! ${safeTerminalText(row.error)}` : ""}`,
-      );
-      const caretX = 2 + indent.length;
-      const checkX = caretX + 2;
-      if (folder)
-        this.addHitBox(
-          `files:caret:${path}`,
-          y,
-          1,
-          () => {
-            this.#filesPath = path;
-            this.#filesWheelDetached = false;
-            void this.runFiles("expand", path, row.expanded !== true);
-          },
-          false,
-          caretX,
-        );
-      this.addHitBox(
-        `files:check:${path}`,
-        y,
-        3,
-        () => {
-          this.#filesPath = path;
-          this.#filesWheelDetached = false;
-          void this.runFiles("toggle-selection", path);
-        },
-        false,
-        checkX,
-      );
-      this.addHitBox(
-        `files:row:${path}`,
-        y,
-        Math.max(1, width - prefix.length),
-        () => {
-          this.#filesPath = path;
-          this.#filesWheelDetached = false;
-          if (!folder) {
-            this.#filesPreviewScroll = 0;
-            void this.runFiles("preview", path);
-          }
-        },
-        false,
-        prefix.length,
-      );
-    }
-    this.#filesTreeRegion = {
-      start: treeStart,
-      end: Math.max(treeStart, lines.length - 1),
-    };
-    if (visible.length > rowBudget)
-      lines.push(
-        `  ↕ ${this.#filesScroll + 1}-${Math.min(visible.length, this.#filesScroll + rowBudget)} of ${visible.length} · scroll or ↑↓ to move`,
-      );
-    const preview = this.providerRecord(view.preview);
-    this.#filesPreviewRegion = undefined;
-    if (Object.keys(preview).length) {
-      lines.push(
-        "",
-        `PREVIEW  ${String(view.previewPath ?? this.#filesPreviewPath ?? this.#filesPath)}`,
-      );
-      const previewStart = lines.length;
-      const previewLines = Array.isArray(preview.lines) ? preview.lines : [];
-      this.#filesPreviewScroll = Math.max(
-        0,
-        Math.min(
-          this.#filesPreviewScroll,
-          Math.max(0, previewLines.length - 8),
-        ),
-      );
-      for (const [offset, line] of previewLines
-        .slice(this.#filesPreviewScroll, this.#filesPreviewScroll + 8)
-        .entries())
-        lines.push(
-          `│ ${String(this.#filesPreviewScroll + offset + 1).padStart(4)} ${safeTerminalText(line)}`,
-        );
-      if (previewLines.length > 8)
-        lines.push(
-          `  ↕ preview ${this.#filesPreviewScroll + 1}-${Math.min(previewLines.length, this.#filesPreviewScroll + 8)} of ${previewLines.length}`,
-        );
-      if (preview.error) lines.push(`! ${safeTerminalText(preview.error)}`);
-      this.#filesPreviewRegion = {
-        start: previewStart,
-        end: Math.max(previewStart, lines.length - 1),
-      };
-    }
-    if (files?.error && !(files.available && rows.length > 0))
-      lines.push("", `! ${safeTerminalText(files.error)}`);
-    lines.push(
-      "",
-      `/ filter${String(view.filter ?? "") ? `: ${String(view.filter)}` : ""}  •  h hidden ${summary.showHidden === true || view.showHidden === true ? "on" : "off"}  •  Enter primary action`,
-    );
-    const selectedCount = Number(summary.selectedCount ?? 0);
-    this.addControlRow(
-      lines,
-      [
-        {
-          id: "files:insert-paths",
-          label: `Insert paths (${selectedCount})`,
-          disabled: selectedCount === 0,
-          activate: () => void this.runFiles("insert-paths"),
-        },
-        {
-          id: "files:insert-contents",
-          label: `Insert contents (${selectedCount})`,
-          disabled: selectedCount === 0,
-          activate: () => void this.runFiles("insert-contents"),
-        },
-        {
-          id: "files:clear",
-          label: "Clear selection",
-          disabled: selectedCount === 0,
-          activate: () => void this.runFiles("clear-selection"),
-        },
-        {
-          id: "files:open",
-          label: "Open standalone view",
-          disabled: !filesAuthority.canOpenStandalone,
-          activate: () => void this.runProvider("filesOpen", "files-open"),
-        },
-      ],
+    this.#filesOptions = this.filesScreenOptions();
+    const surface = renderFilesScreen(
+      this.#filesOptions,
       width,
+      Math.max(1, this.#getHeight() - lines.length),
     );
+    if (surface.correctedState) this.#filesScreen = surface.correctedState;
+    this.#filesSurface = surface;
+    this.#filesSurfaceOffset = lines.length;
+    this.appendSurface(lines, surface);
   }
+
+  private runFilesAction(request: FilesActionRequest): void {
+    switch (request.action) {
+      case "open-standalone":
+        this.runProvider("filesOpen", "files-open");
+        return;
+      case "set-filter":
+        void this.runFiles("filter", request.filter ?? "");
+        return;
+      case "expand":
+      case "toggle-selection":
+      case "preview":
+        if (request.actionPath !== undefined)
+          void this.runFiles(
+            request.action,
+            request.actionPath,
+            request.expanded,
+          );
+        return;
+      case "insert-paths":
+      case "insert-contents":
+      case "clear-selection":
+      case "refresh":
+      case "toggle-hidden":
+        void this.runFiles(request.action);
+        return;
+    }
+  }
+
   private async runFiles(
     action: string,
     value?: string,
@@ -1497,8 +1344,6 @@ export class BrokerDeckApp implements Component {
           ...(expanded !== undefined ? { expanded } : {}),
         },
       } as never);
-      this.#filesPreviewPath =
-        action === "preview" ? value : this.#filesPreviewPath;
       this.#message = `Files ${action} succeeded.`;
     } catch (error) {
       this.#message = error instanceof Error ? error.message : String(error);
@@ -1574,10 +1419,6 @@ export class BrokerDeckApp implements Component {
       this.#agentPage,
       this.#selectedAgent,
     );
-  }
-
-  private visibleAgents(state: DeckState): Agent[] {
-    return this.agentPresentation(state).visible;
   }
 
   private selectedAgent(): Agent | undefined {
@@ -1751,19 +1592,6 @@ export class BrokerDeckApp implements Component {
             (index + delta + model.items.length) % model.items.length
           ]!,
         );
-      }
-    } else {
-      const items = this.visibleFileRows(state);
-      if (items.length > 0) {
-        const index = items.findIndex(
-          (row) => String(row.path ?? "") === this.#filesPath,
-        );
-        const next =
-          index < 0
-            ? 0
-            : Math.max(0, Math.min(items.length - 1, index + delta));
-        this.#filesPath = String(items[next]?.path ?? "");
-        this.#filesWheelDetached = false;
       }
     }
     if (this.#overlay.kind === "confirm") this.closeOverlay();
@@ -2101,11 +1929,7 @@ export class BrokerDeckApp implements Component {
   }
 
   private async copySelectedId(): Promise<void> {
-    try {
-      await this.run("copyId");
-    } catch {
-      /* run reports the visible failure */
-    }
+    await this.run("copyId");
   }
 
   private confirmAgentStop(): void {
