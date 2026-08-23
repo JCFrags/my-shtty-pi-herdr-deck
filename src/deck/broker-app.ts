@@ -52,6 +52,7 @@ import {
 } from "./selections.js";
 import { selectBoardPresentation } from "./board-presentation.js";
 import { normalizeFilesPresentation } from "./files-screen.js";
+import { renderBoardScreen } from "./board-screen.js";
 
 export interface BrokerDeckAppOptions {
   client: BrokerClient;
@@ -761,175 +762,54 @@ export class BrokerDeckApp implements Component {
       this.#unifiedBoardSelection,
       this.#boardFilter,
     );
-    lines.push(
-      `BOARD  ${model.counts.work} current · ${model.counts.attention} need attention · ${model.counts.recentSignals} recent Signals`,
-    );
-    this.addControlRow(
-      lines,
-      (["attention", "active", "all-current"] as const).map((filter) => ({
-        id: `board:filter:${filter}`,
-        label: this.#boardFilter === filter ? `[${filter}]` : filter,
-        activate: () => {
+    const surface = renderBoardScreen({
+      width,
+      height: Math.max(1, this.#getHeight() - lines.length),
+      state: {
+        filter: this.#boardFilter,
+        ...(this.#unifiedBoardSelection
+          ? { selectedId: this.#unifiedBoardSelection }
+          : {}),
+        listScroll: this.#boardScroll,
+        detailScroll: 0,
+        wheelDetached: false,
+      },
+      model,
+      actions: {
+        select: (item) => this.selectBoardItem(item),
+        filter: (filter) => {
           this.#boardFilter = filter;
           this.#boardScroll = 0;
         },
-      })),
-      width,
-    );
-    const rowBudget = Math.max(4, this.#getHeight() - lines.length - 12);
-    const selectedIndex = model.selected
-      ? model.visible.findIndex((item) => item.id === model.selected?.id)
-      : -1;
-    if (selectedIndex >= 0) {
-      if (selectedIndex < this.#boardScroll) this.#boardScroll = selectedIndex;
-      if (selectedIndex >= this.#boardScroll + rowBudget)
-        this.#boardScroll = selectedIndex - rowBudget + 1;
-    }
-    this.#boardScroll = Math.max(
-      0,
-      Math.min(
-        this.#boardScroll,
-        Math.max(0, model.visible.length - rowBudget),
-      ),
-    );
-    let priorSection: BoardItem["section"] | undefined;
-    for (const item of model.visible.slice(
-      this.#boardScroll,
-      this.#boardScroll + rowBudget,
-    )) {
-      if (item.section !== priorSection) {
-        lines.push(
-          item.section === "attention"
-            ? "NEEDS ATTENTION"
-            : item.section === "work"
-              ? "CURRENT WORK"
-              : "RECENT SIGNALS",
-        );
-        priorSection = item.section;
-      }
-      this.renderBoardItems(lines, width, [item]);
-    }
-    if (model.visible.length === 0) lines.push("✓ No items match this filter.");
-    if (model.visible.length > rowBudget)
-      lines.push(
-        `  ↕ ${this.#boardScroll + 1}-${Math.min(model.visible.length, this.#boardScroll + rowBudget)} of ${model.visible.length}`,
-      );
-    const selected = model.selected;
-    if (!selected) return;
-    this.selectBoardItem(selected);
-    lines.push(
-      "",
-      `DETAIL  ${selected.kind.toUpperCase()} · ${selected.status}`,
-      selected.title,
-    );
-    if (selected.kind === "task")
-      lines.push(
-        ...renderTaskDetail(
-          selected.source,
-          this.scopedWorkState(state),
-          width,
-        ),
-      );
-    else if (selected.kind === "group")
-      lines.push(...renderGroupDetail(selected.source, width));
-    else if (selected.kind === "broker-question")
-      lines.push(`Question ${selected.source.id}: ${selected.source.prompt}`);
-    else if (selected.kind.startsWith("signal-")) {
-      const projection = currentProviderProjection(
-        state,
-        this.#targetPaneId,
-      )?.agentBoard;
-      const tab =
-        selected.kind === "signal-question"
-          ? "inbox"
-          : selected.kind === "signal-update"
-            ? "updates"
-            : "decisions";
-      const presentation = selectBoardPresentation(
-        projection,
-        tab,
-        this.#boardSelection,
-      );
-      if (Object.keys(presentation.detail).length > 0)
-        lines.push(...this.renderBoardDetail(presentation.detail, width));
-    }
-    this.addControlRow(
-      lines,
-      [
-        {
-          id: "board:start",
-          label: "Start",
-          disabled: selected.kind !== "todo",
-          activate: () => void this.runProvider("todoStart", "todo-start"),
-        },
-        {
-          id: "board:done",
-          label: "Mark done",
-          disabled: selected.kind !== "todo",
-          activate: () => void this.runProvider("todoDone", "todo-done"),
-        },
-        {
-          id: "board:answer",
-          label: "Answer",
-          disabled: !["broker-question", "signal-question"].includes(
-            selected.kind,
+        answer: (item) =>
+          this.beginInput(
+            item.kind === "signal-question" ? "board-answer" : "answer",
           ),
-          activate: () =>
-            this.beginInput(
-              selected.kind === "signal-question" ? "board-answer" : "answer",
-            ),
+        run: (item, action) => {
+          if (item.kind === "todo" && action === "start")
+            void this.runProvider("todoStart", "todo-start");
+          else if (item.kind === "todo" && action === "mark-done")
+            void this.runProvider("todoDone", "todo-done");
+          else if (item.kind === "task" && action === "cancel-task")
+            this.confirmTaskCancel();
+          else if (item.kind === "group" && action === "wait")
+            void this.run("groupWait");
+          else if (item.kind === "group" && action === "stop")
+            this.confirmGroup("groupStop");
+          else if (item.kind === "group" && action === "close")
+            this.confirmGroup("groupClose");
+          else if (item.kind.startsWith("signal-")) void this.runBoard(action);
         },
-        {
-          id: "board:recommendation",
-          label: "Use recommendation",
-          disabled:
-            selected.kind !== "signal-question" ||
-            !selected.actions.actions.includes("use-recommendation"),
-          activate: () => void this.runBoard("accept-recommendation"),
-        },
-        {
-          id: "board:cancel",
-          label: "Cancel task",
-          disabled: selected.kind !== "task",
-          activate: () => this.confirmTaskCancel(),
-        },
-        {
-          id: "board:wait",
-          label: "Wait group",
-          disabled: selected.kind !== "group",
-          activate: () => void this.run("groupWait"),
-        },
-        {
-          id: "board:stop",
-          label: "Stop group",
-          disabled: selected.kind !== "group",
-          activate: () => this.confirmGroup("groupStop"),
-        },
-        {
-          id: "board:close",
-          label: "Close group",
-          disabled: selected.kind !== "group",
-          activate: () => this.confirmGroup("groupClose"),
-        },
-      ],
-      width,
+      },
+    });
+    if (surface.correctedState)
+      this.#boardScroll = surface.correctedState.listScroll;
+    const offset = lines.length;
+    lines.push(...surface.lines);
+    this.#hitBoxes.push(
+      ...surface.hitBoxes.map((box) => ({ ...box, y: box.y + offset })),
     );
-  }
-
-  private renderBoardItems(
-    lines: string[],
-    width: number,
-    items: BoardItem[],
-  ): void {
-    if (items.length === 0) lines.push("  ✓ Clear");
-    for (const item of items) {
-      const y = lines.length;
-      const selected = item.id === this.#unifiedBoardSelection;
-      lines.push(`${selected ? ">" : " "} [${item.status}] ${item.title}`);
-      this.addHitBox(`board:item:${item.id}`, y, width, () =>
-        this.selectBoardItem(item),
-      );
-    }
+    return;
   }
 
   private renderAgentsSurface(
@@ -1407,63 +1287,6 @@ export class BrokerDeckApp implements Component {
       width,
     );
   }
-  private renderBoardDetail(
-    detail: Record<string, unknown>,
-    width: number,
-  ): string[] {
-    const projection = this.providerRecord(detail.projection ?? detail);
-    const item = this.providerRecord(
-      projection.item ?? detail.item ?? detail.decision ?? projection,
-    );
-    const lines: string[] = ["DETAIL"];
-    const add = (label: string, value: unknown): void => {
-      if (typeof value === "string" && value.length > 0)
-        lines.push(
-          `${label}  ${value.slice(0, Math.max(20, width - label.length - 2))}`,
-        );
-    };
-    add("ID", item.displayId ?? item.id ?? detail.displayId ?? detail.id);
-    add(
-      "Status",
-      detail.statusLabel ?? item.status ?? item.kind ?? detail.terminalKind,
-    );
-    add(
-      "Title",
-      item.title ?? item.question ?? detail.title ?? detail.question,
-    );
-    add("Why", item.reason ?? projection.reason ?? detail.reason);
-    add("Detail", item.detail ?? detail.detail);
-    add(
-      "Recommendation",
-      item.recommendation ?? projection.recommendation ?? detail.recommendation,
-    );
-    add("Stage", item.stage ?? detail.stage);
-    const progress = this.providerRecord(item.progress ?? detail.progress);
-    if (Number.isFinite(progress.current) && Number.isFinite(progress.total))
-      lines.push(
-        `Progress  ${progress.current}/${progress.total}${typeof progress.unit === "string" ? ` ${progress.unit}` : ""}`,
-      );
-    const attachments = Array.isArray(item.attachments)
-      ? item.attachments
-      : Array.isArray(detail.attachments)
-        ? detail.attachments
-        : [];
-    for (const raw of attachments.slice(0, 5)) {
-      const attachment = this.providerRecord(raw);
-      add(
-        "Attachment",
-        `${String(attachment.label ?? attachment.kind ?? "item")} — ${String(attachment.path ?? attachment.url ?? attachment.reference ?? attachment.text ?? "")}`,
-      );
-    }
-    add(
-      "Terminal",
-      detail.terminalAt
-        ? `${String(detail.terminalKind ?? "terminal")} at ${detail.terminalAt}`
-        : undefined,
-    );
-    return lines;
-  }
-
   private async runFiles(
     action: string,
     value?: string,
@@ -1496,8 +1319,6 @@ export class BrokerDeckApp implements Component {
     this.#requestRender();
   }
   private async runBoard(action: string): Promise<void> {
-    if (action === "accept-recommendation" && this.#boardTab !== "decisions")
-      return;
     const agent = this.adoptedRootAgent();
     const projection = currentProviderProjection(
       this.#client.store.state,
@@ -2127,14 +1948,6 @@ export class BrokerDeckApp implements Component {
     this.#tracker.reset();
   }
 
-  private async copySelectedId(): Promise<void> {
-    try {
-      await this.run("copyId");
-    } catch {
-      /* run reports the visible failure */
-    }
-  }
-
   private confirmGroup(action: "groupStop" | "groupClose"): void {
     const group = this.selectedGroup(
       this.scopedWorkState(this.#client.store.state),
@@ -2149,6 +1962,14 @@ export class BrokerDeckApp implements Component {
       summary: `${action === "groupStop" ? "Stop" : "Close"} ${group.name ?? group.id}?`,
     };
     this.#tracker.reset();
+  }
+
+  private async copySelectedId(): Promise<void> {
+    try {
+      await this.run("copyId");
+    } catch {
+      /* run reports the visible failure */
+    }
   }
 
   private confirmAgentStop(): void {

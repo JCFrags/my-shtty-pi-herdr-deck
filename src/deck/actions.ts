@@ -1,6 +1,14 @@
 import type { BrokerClient } from "./broker-client.js";
 import type { Agent, Task } from "../state/types.js";
 import type { DeckQuestion } from "./types.js";
+import {
+  buildBrokerQuestionAnswer,
+  buildSignalsQuestionAnswer,
+} from "./question-response.js";
+import {
+  normalizeBrokerQuestion,
+  normalizeSignalsQuestion,
+} from "./product-presentation.js";
 
 export type DeckAction =
   | "focus"
@@ -170,9 +178,12 @@ export class DeckActions {
         const answer =
           typeof value === "object" && value !== null && "optionId" in value
             ? (value as QuestionAnswer)
-            : this.answerFromText(
-                target.question,
-                typeof value === "string" ? value : "",
+            : buildBrokerQuestionAnswer(
+                normalizeBrokerQuestion(target.question!),
+                {
+                  selectedOptionIds: [],
+                  text: typeof value === "string" ? value : "",
+                },
               );
         return this.client.answer(
           target.questionId ?? target.question!.id,
@@ -226,9 +237,7 @@ export class DeckActions {
           questionId: target.boardQuestion?.questionId ?? target.question!.id,
           expectedRevision: target.boardQuestion?.revision ?? 0,
           source: "manual",
-          ...(typeof value === "object"
-            ? { value }
-            : { value: { kind: "text", text: value ?? "" } }),
+          value: this.signalsAnswer(target, value),
         });
       case "cancelTask":
         return this.client.request("task.cancel", {
@@ -354,23 +363,20 @@ export class DeckActions {
     };
   }
 
-  private answerFromText(
-    question: DeckQuestion | undefined,
-    value: string,
-  ): QuestionAnswer {
-    const option = question?.options?.find(
-      (item) =>
-        item.id === value ||
-        item.label.toLocaleLowerCase() === value.toLocaleLowerCase(),
-    );
-    if (option) return { optionId: option.id, text: null };
-    if (
-      question &&
-      question.allowFreeform !== true &&
-      (question.options?.length ?? 0) > 0
-    )
-      throw new Error("Answer with one listed option ID or label.");
-    if (!value) throw new Error("Answer text is required.");
-    return { optionId: null, text: value };
+  private signalsAnswer(target: ActionTarget, value: unknown): unknown {
+    const board = target.boardQuestion;
+    if (!board) throw new Error("Select a Signals question first.");
+    if (value && typeof value === "object" && "kind" in value) return value;
+    const question = normalizeSignalsQuestion({
+      questionId: board.questionId,
+      revision: board.revision,
+      question: "",
+      response: board.response as never,
+      recommendedOptionIds: [],
+    });
+    return buildSignalsQuestionAnswer(question, {
+      selectedOptionIds: [],
+      text: typeof value === "string" ? value : "",
+    });
   }
 }
