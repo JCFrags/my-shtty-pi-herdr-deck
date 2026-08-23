@@ -8,12 +8,13 @@ import type {
 } from "./screen-types.js";
 import { hitTest } from "./components/controls.js";
 
-export type FilesRowKind = "root" | "directory" | "file" | "symlink" | "other";
+export type FilesRowKind =
+  "root" | "directory" | "file" | "symlink" | "other" | "info";
 
 /** A row keeps the provider path untouched for commands and separate values for UI use. */
 export interface FilesRowPresentation {
   /** Exact provider path. Never use this value as terminal text or a DOM/id value. */
-  actionPath: string;
+  actionPath?: string;
   /** Backward-compatible safe path display. */
   path: string;
   /** Terminal-safe path/name values. */
@@ -27,11 +28,13 @@ export interface FilesRowPresentation {
   partiallySelected: boolean;
   expanded: boolean;
   error?: string;
+  /** Provider informational rows are inert and carry only this message. */
+  message?: string;
 }
 
 export interface FilesPreviewPresentation {
-  /** Exact provider path for preview requests. */
-  actionPath: string;
+  /** Exact provider path for preview requests, absent when invalid. */
+  actionPath?: string;
   /** Backward-compatible safe display path. */
   path: string;
   displayPath: string;
@@ -70,6 +73,8 @@ export type FilesAction =
   | "insert-paths"
   | "insert-contents"
   | "clear-selection"
+  | "refresh"
+  | "open-standalone"
   | "toggle-hidden"
   | "set-filter";
 
@@ -77,6 +82,8 @@ export interface FilesActionRequest {
   action: FilesAction;
   /** Exact provider path for row actions. Absent for screen actions. */
   actionPath?: string;
+  /** Directory state requested by an expand action. */
+  expanded?: boolean;
   /** Present for set-filter. The provider remains the source of truth. */
   filter?: string;
 }
@@ -110,6 +117,20 @@ function text(value: unknown, limit = 4096): string {
   return typeof value === "string" ? value.slice(0, limit) : "";
 }
 
+function rawText(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+/** Accept only relative provider identities. Display sanitization is separate. */
+export function isValidFilesActionPath(actionPath: string): boolean {
+  if (!actionPath || actionPath.includes("\u0000")) return false;
+  if (actionPath.startsWith("/") || actionPath.startsWith("\\")) return false;
+  if (/^[A-Za-z]:/u.test(actionPath)) return false;
+  return actionPath
+    .split("/")
+    .every((segment) => segment.length > 0 && segment !== "..");
+}
+
 function integer(value: unknown): number | undefined {
   return Number.isSafeInteger(value) && Number(value) >= 0
     ? Number(value)
@@ -117,10 +138,11 @@ function integer(value: unknown): number | undefined {
 }
 
 function rowKey(actionPath: string): string {
-  let encoded = "";
-  for (const character of actionPath)
-    encoded += character.codePointAt(0)?.toString(16) ?? "0";
-  return `files-row-${encoded || "root"}`;
+  // Delimit each code point and include its count: ["ab", "c"] cannot collide with ["a", "bc"].
+  const encoded = Array.from(actionPath)
+    .map((character) => character.codePointAt(0)?.toString(16) ?? "0")
+    .join("-");
+  return `files-row-${Array.from(actionPath).length}:${encoded || "root"}`;
 }
 
 export function filesLayout(width: number): FilesLayout {
@@ -149,12 +171,31 @@ export function normalizeFilesPresentation(
   const summary = record(files?.summary);
   const view = record(files?.view);
   const rawRows = Array.isArray(view.rows) ? view.rows.slice(0, 256) : [];
-  const rows = rawRows.flatMap((value): FilesRowPresentation[] => {
+  const rows = rawRows.flatMap((value, index): FilesRowPresentation[] => {
     const source = record(value);
-    const actionPath = text(source.actionPath ?? source.path, 4096);
+    const rowType = text(source.rowType, 32).toLowerCase();
+    const message = rawText(source.message);
+    if (rowType === "info" || rowType === "information") {
+      if (!message) return [];
+      return [
+        {
+          path: "",
+          displayPath: "",
+          name: safeFilesDisplay(message, 4096),
+          rowKey: `files-info-${index}`,
+          kind: "info",
+          depth: 0,
+          selected: false,
+          partiallySelected: false,
+          expanded: false,
+          message: safeFilesDisplay(message, 4096),
+        },
+      ];
+    }
+    const actionPath = rawText(source.actionPath ?? source.path);
     const kind = source.kind;
     if (
-      !actionPath ||
+      !isValidFilesActionPath(actionPath) ||
       !["root", "directory", "file", "symlink", "other"].includes(String(kind))
     )
       return [];
@@ -178,13 +219,15 @@ export function normalizeFilesPresentation(
     ];
   });
   const preview = record(view.preview);
-  const previewActionPath = text(
+  const previewRawActionPath = rawText(
     view.previewActionPath ??
       view.previewPath ??
       preview.actionPath ??
       record(preview.metadata).relativePath,
-    4096,
   );
+  const previewActionPath = isValidFilesActionPath(previewRawActionPath)
+    ? previewRawActionPath
+    : "";
   const previewLines = Array.isArray(preview.lines)
     ? preview.lines
         .slice(0, 5000)
@@ -298,22 +341,27 @@ export function renderFilesScreen(
     Math.max(0, visibleRows.length - rowBudget),
   );
   for (const row of visibleRows.slice(treeScroll, treeScroll + rowBudget)) {
+    if (row.kind === "info") {
+      tree.addLine(`  ${row.message ?? row.name}`);
+      continue;
+    }
+    const actionPath = row.actionPath;
+    if (actionPath === undefined) continue;
     const y = tree.lines.length;
     const indent = "  ".repeat(row.depth);
     const marker = row.selected ? "x" : row.partiallySelected ? "-" : " ";
     const caret = isFolder(row) ? (row.expanded ? "v" : ">") : ".";
-    const selected = options.state.focusedPath === row.actionPath;
+    const selected = options.state.focusedPath === actionPath;
     tree.addRow(
       `${row.rowKey}:row`,
       `${selected ? ">" : " "} ${indent}${caret} [${marker}] ${row.name}${row.error ? ` ! ${row.error}` : ""}`,
       () => {
         withState(options, {
-          focusedPath: row.actionPath,
+          focusedPath: actionPath,
           focusTarget: "tree",
           wheelDetached: false,
         });
-        if (!isFolder(row))
-          options.onAction({ action: "preview", actionPath: row.actionPath });
+        if (!isFolder(row)) options.onAction({ action: "preview", actionPath });
       },
       { width: layout.treeWidth },
     );
@@ -326,7 +374,11 @@ export function renderFilesScreen(
         height: 1,
         disabled: false,
         activate: () =>
-          options.onAction({ action: "expand", actionPath: row.actionPath }),
+          options.onAction({
+            action: "expand",
+            actionPath,
+            expanded: !row.expanded,
+          }),
       });
     tree.addHitBox({
       id: `${row.rowKey}:select`,
@@ -338,7 +390,7 @@ export function renderFilesScreen(
       activate: () =>
         options.onAction({
           action: "toggle-selection",
-          actionPath: row.actionPath,
+          actionPath,
         }),
     });
   }
@@ -443,6 +495,16 @@ export function renderFilesScreen(
       disabled: presentation.selectedCount === 0,
       activate: () => options.onAction({ action: "clear-selection" }),
     },
+    {
+      id: "files:action-refresh",
+      label: "Refresh",
+      activate: () => options.onAction({ action: "refresh" }),
+    },
+    {
+      id: "files:action-open-standalone",
+      label: "Open standalone Files",
+      activate: () => options.onAction({ action: "open-standalone" }),
+    },
   ]);
   const correctedState =
     treeScroll === options.state.treeScroll
@@ -466,7 +528,7 @@ export function handleFilesKey(
   );
   const move = (delta: number): void => {
     const row = rows[Math.max(0, Math.min(rows.length - 1, current + delta))];
-    if (row)
+    if (row?.actionPath !== undefined)
       withState(options, {
         focusedPath: row.actionPath,
         focusTarget: "tree",
@@ -482,14 +544,15 @@ export function handleFilesKey(
     return true;
   }
   const row = rows[current];
-  if (key === "Enter" && row) {
+  if (key === "Enter" && row?.actionPath !== undefined) {
     options.onAction({
       action: isFolder(row) ? "expand" : "preview",
       actionPath: row.actionPath,
+      ...(isFolder(row) ? { expanded: !row.expanded } : {}),
     });
     return true;
   }
-  if ((key === " " || key === "Space") && row) {
+  if ((key === " " || key === "Space") && row?.actionPath !== undefined) {
     options.onAction({
       action: "toggle-selection",
       actionPath: row.actionPath,
@@ -506,6 +569,14 @@ export function handleFilesKey(
   }
   if (key === "c") {
     options.onAction({ action: "clear-selection" });
+    return true;
+  }
+  if (key === "r") {
+    options.onAction({ action: "refresh" });
+    return true;
+  }
+  if (key === "o") {
+    options.onAction({ action: "open-standalone" });
     return true;
   }
   return false;
