@@ -122,9 +122,7 @@ const guards: Record<DeckAction, Guard> = {
   boardView: (target) =>
     target.agent ? undefined : "Provider owner is unavailable.",
   boardAction: (target) =>
-    target.agent && target.boardAction
-      ? undefined
-      : "Select an Agent Board action.",
+    target.agent && target.boardAction ? undefined : "Select a Signals action.",
 };
 
 export class DeckActions {
@@ -156,7 +154,7 @@ export class DeckActions {
           reason:
             typeof value === "string" && value
               ? value
-              : "Stopped from Pi Herdr Deck.",
+              : "Stopped from Agent Board.",
           force: false,
         });
       case "close":
@@ -165,7 +163,7 @@ export class DeckActions {
           reason:
             typeof value === "string" && value
               ? value
-              : "Closed from Pi Herdr Deck.",
+              : "Closed from Agent Board.",
           confirm: true,
         });
       case "answer": {
@@ -238,7 +236,7 @@ export class DeckActions {
           reason:
             typeof value === "string" && value
               ? value
-              : "Cancelled from Pi Herdr Deck.",
+              : "Cancelled from Agent Board.",
           cascade: false,
         });
       case "groupWait":
@@ -254,7 +252,7 @@ export class DeckActions {
           reason:
             typeof value === "string" && value
               ? value
-              : "Stopped from Pi Herdr Deck.",
+              : "Stopped from Agent Board.",
           force: false,
         });
       case "groupClose":
@@ -263,7 +261,7 @@ export class DeckActions {
           reason:
             typeof value === "string" && value
               ? value
-              : "Closed from Pi Herdr Deck.",
+              : "Closed from Agent Board.",
           confirm: true,
         });
       case "prompt":

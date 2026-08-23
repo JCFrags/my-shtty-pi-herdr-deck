@@ -52,7 +52,7 @@ for (const expected of [
   'platforms = ["linux"]',
   'command = ["npm", "run", "build"]',
   'id = "deck"',
-  'title = "Pi Herd"',
+  'title = "Agent Board"',
 ])
   assert.ok(manifest.includes(expected), `manifest is missing ${expected}`);
 const packed = spawnSync(

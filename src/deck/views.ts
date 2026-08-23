@@ -179,7 +179,7 @@ export function renderHome(
       ? `Workers expected ${activeTasks.length} · working ${workingAgents.length} · blocked ${blockedAgents.length} · idle retained ${portfolio.idleRetained}`
       : "Current adopted Pi scope is unavailable.",
     provider
-      ? `Providers · Agent Board ${provider.agentBoard.available ? `${provider.agentBoard.openCount} pending` : "unavailable"} · Todo ${provider.todo.available ? `${provider.todo.completed}/${provider.todo.total} done` : "unavailable"}`
+      ? `Providers · Signals ${provider.agentBoard.available ? `${provider.agentBoard.openCount} pending` : "unavailable"} · Todo ${provider.todo.available ? `${provider.todo.completed}/${provider.todo.total} done` : "unavailable"}`
       : "Providers unavailable · select an adopted Pi scope.",
     "",
     "NEXT ACTIONS · 1 Work  4 Inbox  5 More",

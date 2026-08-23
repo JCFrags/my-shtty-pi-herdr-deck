@@ -788,11 +788,6 @@ test("Board answer keyboard action follows the visible provider tab", () => {
     requestRender: () => undefined,
     getHeight: () => 40,
   });
-  app.handleInput("5");
-  clickLabel(app, "Updates");
-  app.handleInput("a");
-  assert.doesNotMatch(app.render(120).join("\n"), /BOARD-ANSWER:/);
-  clickLabel(app, "Inbox");
   app.handleInput("a");
   assert.match(app.render(120).join("\n"), /BOARD-ANSWER:/);
   app.dispose();
@@ -816,7 +811,7 @@ test("BrokerDeckApp tracks fallback Files standalone availability only", () => {
     requestRender: () => renders++,
     getHeight: () => 40,
   });
-  app.handleInput("3");
+  app.handleInput("2");
   assert.ok(
     app
       .render(120)
@@ -933,7 +928,7 @@ test("BrokerDeckApp leaves Files unbound when no-target authority is ambiguous",
     requestRender: () => undefined,
     getHeight: () => 40,
   });
-  app.handleInput("3");
+  app.handleInput("2");
   const output = app.render(120).join("\n");
   assert.match(output, /○ CONNECTING/);
   assert.ok(
@@ -972,7 +967,7 @@ test("BrokerDeckApp uses the first displayed agent for inspector and dependencie
     requestRender: () => renders++,
     getHeight: () => 40,
   });
-  app.handleInput("4");
+  app.handleInput("3");
   const output = app.render(120).join("\n");
   assert.match(output, />.*Zulu/);
   assert.match(output, /Identity: z-agent/);
@@ -1022,7 +1017,7 @@ test("BrokerDeckApp clamps an invalid agent page after scope shrink", () => {
     requestRender: () => renders++,
     getHeight: () => 50,
   });
-  app.handleInput("4");
+  app.handleInput("3");
   for (let index = 0; index < 12; index++) app.handleInput("j");
   const baseline = renders;
   client.store.replace({
@@ -1042,7 +1037,7 @@ test("BrokerDeckApp action targets match scoped displayed entities", () => {
   const provider = projection({ ownerAgentId: "z-agent" });
   const scopedTask = {
     id: "z-task",
-    title: "Scoped",
+    title: "Scoped task",
     state: "running",
     assignedAgentId: "z-agent",
   } as never;
@@ -1054,7 +1049,7 @@ test("BrokerDeckApp action targets match scoped displayed entities", () => {
   } as never;
   const scopedGroup = {
     id: "z-group",
-    name: "Scoped",
+    name: "Scoped group",
     state: "open",
     agentIds: ["z-agent"],
   };
@@ -1082,21 +1077,20 @@ test("BrokerDeckApp action targets match scoped displayed entities", () => {
     getHeight: () => 40,
     onActionTarget: (action, target) => captured.push({ action, target }),
   });
-  app.handleInput("2");
-  clickLabel(app, "Tasks");
+  clickLabel(app, "Scoped task");
   clickLabel(app, "Cancel task");
   clickLabel(app, "Cancel task");
   assert.equal(
     captured.find((item) => item.action === "cancelTask")?.target.task.id,
     "z-task",
   );
-  clickLabel(app, "Groups");
-  clickLabel(app, "Wait");
+  clickLabel(app, "Scoped group");
+  clickLabel(app, "Wait group");
   assert.equal(
     captured.find((item) => item.action === "groupWait")?.target.group.id,
     "z-group",
   );
-  app.handleInput("4");
+  app.handleInput("3");
   clickLabel(app, "Focus");
   assert.equal(
     captured.find((item) => item.action === "focus")?.target.agent.id,
@@ -1134,8 +1128,6 @@ test("BrokerDeckApp tracks the implicitly selected scoped task detail", () => {
     requestRender: () => renders++,
     getHeight: () => 40,
   });
-  app.handleInput("2");
-  clickLabel(app, "Tasks");
   const baseline = renders;
   client.store.replace({
     ...snapshot(),
@@ -1183,8 +1175,6 @@ test("BrokerDeckApp wheel movement synchronizes the selected-task baseline", () 
     requestRender: () => renders++,
     getHeight: () => 40,
   });
-  app.handleInput("2");
-  clickLabel(app, "Tasks");
   app.handleMouse({
     type: "wheel",
     direction: "down",
@@ -1224,7 +1214,7 @@ test("BrokerDeckApp render counter gates Files changes and tab switching", () =>
     requestRender: () => renders++,
     getHeight: () => 30,
   });
-  app.handleInput("3");
+  app.handleInput("2");
   const baseline = renders;
   client.store.replace(
     snapshot(
@@ -1260,7 +1250,179 @@ test("BrokerDeckApp render counter gates Files changes and tab switching", () =>
     ),
   );
   assert.equal(renders, baseline + 1);
-  app.handleInput("2");
+  app.handleInput("1");
   assert.ok(renders > baseline + 1);
+  app.dispose();
+});
+
+test("Files mouse regions keep preview, selection, and expansion distinct", async () => {
+  const files = {
+    available: true,
+    summary: { cwd: "/repo", selectedCount: 0 },
+    view: {
+      currentPath: ".",
+      rows: [
+        {
+          path: "src",
+          name: "src",
+          kind: "directory",
+          depth: 0,
+          expanded: false,
+        },
+        {
+          path: "src/app.ts",
+          name: "app.ts",
+          kind: "file",
+          depth: 1,
+          selected: false,
+        },
+      ],
+      preview: {
+        lines: Array.from({ length: 12 }, (_, index) => `line ${index + 1}`),
+      },
+    },
+  };
+  const client = new BrokerClient({
+    socketPath: "/tmp/files-mouse-regions.sock",
+    secret: "test",
+  });
+  client.store.replace(snapshot(projection({ files })));
+  const requests: Array<{ method: string; params: any }> = [];
+  (client as any).request = async (method: string, params: unknown) => {
+    requests.push({ method, params });
+    return {};
+  };
+  const app = new BrokerDeckApp({
+    client,
+    targetPaneId: "pane-1",
+    requestRender: () => undefined,
+    getHeight: () => 30,
+  });
+  app.handleInput("2");
+  const click = (x: number, y: number) => {
+    for (const type of ["press", "release"] as const)
+      app.handleMouse({
+        type,
+        button: "left",
+        x,
+        y,
+        shift: false,
+        alt: false,
+        ctrl: false,
+      });
+  };
+
+  let lines = app.render(120);
+  const fileY = lines.findIndex((line) => line.includes("app.ts"));
+  assert.ok(fileY >= 0);
+  click(lines[fileY]!.indexOf("app.ts"), fileY);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.at(-1)?.params.action, "preview");
+  assert.equal(requests.at(-1)?.params.path, "src/app.ts");
+
+  lines = app.render(120);
+  const selectedFileY = lines.findIndex((line) => line.includes("app.ts"));
+  click(lines[selectedFileY]!.indexOf("[ ") + 1, selectedFileY);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.at(-1)?.params.action, "toggle-selection");
+  assert.equal(requests.at(-1)?.params.path, "src/app.ts");
+
+  lines = app.render(120);
+  const folderY = lines.findIndex(
+    (line) => line.includes("src") && line.includes("▸"),
+  );
+  click(lines[folderY]!.indexOf("▸"), folderY);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.at(-1)?.params.action, "expand");
+  assert.equal(requests.at(-1)?.params.path, "src");
+
+  lines = app.render(120);
+  const previewY = lines.findIndex((line) => line.includes("line 1"));
+  app.handleMouse({
+    type: "wheel",
+    direction: "down",
+    x: 2,
+    y: previewY,
+    shift: false,
+    alt: false,
+    ctrl: false,
+  });
+  const scrolled = app.render(120).join("\n");
+  assert.match(scrolled, /line 2/);
+  assert.doesNotMatch(scrolled, /\nline 1\n/);
+  assert.match(scrolled, /app\.ts/);
+  app.dispose();
+});
+
+test("Board combines Signals questions, updates, and recommendations", () => {
+  const board = {
+    available: true,
+    openCount: 1,
+    items: [{ id: "q1", title: "Question" }],
+    view: {
+      view: {
+        tabCounts: { inbox: 1, updates: 1, decisions: 1 },
+        tabs: {
+          inbox: {
+            rows: [{ id: "q1", title: "Question", userAnswerable: true }],
+          },
+          updates: { rows: [{ id: "u1", title: "Progress update" }] },
+          decisions: { rows: [{ id: "d1", title: "Use recommendation" }] },
+        },
+      },
+    },
+  };
+  const client = new BrokerClient({
+    socketPath: "/tmp/board-combined-signals.sock",
+    secret: "test",
+  });
+  client.store.replace(snapshot(projection({ agentBoard: board })));
+  const app = new BrokerDeckApp({
+    client,
+    targetPaneId: "pane-1",
+    requestRender: () => undefined,
+    getHeight: () => 40,
+  });
+  let output = app.render(120).join("\n");
+  assert.match(output, /Question/);
+  assert.match(output, /Progress update/);
+  assert.match(output, /Use recommendation/);
+  clickLabel(app, "Progress update");
+  output = app.render(120).join("\n");
+  assert.match(output, /DETAIL  SIGNAL-UPDATE/);
+  assert.ok(output.includes(renderButton("Answer", { disabled: true })));
+  app.dispose();
+});
+
+test("Activity keeps keyboard-selected history inside its visible viewport", () => {
+  const owner = agent();
+  const results = Array.from({ length: 16 }, (_, index) => ({
+    id: `result-${String(index).padStart(2, "0")}`,
+    taskId: `task-${String(index).padStart(2, "0")}`,
+    status: "accepted",
+    summary: `Historical result ${index}`,
+  })) as never[];
+  const tasks = Array.from({ length: 16 }, (_, index) => ({
+    id: `task-${String(index).padStart(2, "0")}`,
+    title: `Completed task ${index}`,
+    state: "completed",
+    assignedAgentId: owner.id,
+  })) as never[];
+  const client = new BrokerClient({
+    socketPath: "/tmp/activity-scroll.sock",
+    secret: "test",
+  });
+  client.store.replace({ ...snapshot(), agents: [owner], tasks, results });
+  const app = new BrokerDeckApp({
+    client,
+    targetPaneId: "pane-1",
+    requestRender: () => undefined,
+    getHeight: () => 18,
+  });
+  app.handleInput("4");
+  for (let index = 0; index < 12; index++) app.handleInput("j");
+  const output = app.render(120).join("\n");
+  assert.match(output, /> \[accepted\] Historical result 12/);
+  assert.match(output, /↕ \d+-\d+ of 16/);
   app.dispose();
 });

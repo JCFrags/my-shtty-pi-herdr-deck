@@ -1,6 +1,6 @@
-# Pi Herd Orchestrator
+# Agent Board
 
-`pi-herdr-orchestrator` is a Linux package for Pi and a managed-pane plugin for Herdr. It provides a local broker, Pi lifecycle integration, task and workflow control, result and question handling, a scheduler, and the Pi Herd control pane.
+`pi-herdr-orchestrator` is a Linux package for Pi and a managed-pane plugin for Herdr. It provides a local broker, Pi lifecycle integration, task and workflow control, result and question handling, a scheduler, and the Agent Board control pane.
 
 This release is for reviewed local use. It does not publish an npm package or create a public release.
 
@@ -25,7 +25,7 @@ The Pi control deck also requires component mouse events, per-tool expansion sta
 | Primary Pi status command | `/orchestrator-status`                       |
 | Herdr plugin ID           | `pi.herdr.orchestrator`                      |
 | Managed pane entrypoint   | `deck`                                       |
-| Managed pane title        | `Pi Herd`                                    |
+| Managed pane title        | `Agent Board`                                |
 | Managed pane command      | `./bin/pi-herdr-orchestrator deck`           |
 | Startup hook command      | `./bin/pi-herdr-orchestrator broker startup` |
 | Minimum Herdr             | `0.8.2`                                      |
@@ -102,7 +102,7 @@ PACKAGE_ROOT=$(pwd)
 herdr plugin link "$PACKAGE_ROOT"
 ```
 
-The manifest links plugin `pi.herdr.orchestrator`. It declares entrypoint `deck`, title `Pi Herd`, and pane command `./bin/pi-herdr-orchestrator deck`. Its one-shot startup command is `./bin/pi-herdr-orchestrator broker startup`. Herdr resolves both relative commands from the linked package root.
+The manifest links plugin `pi.herdr.orchestrator`. It declares entrypoint `deck`, title `Agent Board`, and pane command `./bin/pi-herdr-orchestrator deck`. Its one-shot startup command is `./bin/pi-herdr-orchestrator broker startup`. Herdr resolves both relative commands from the linked package root.
 
 Linking or enabling the plugin does not run its startup hook. Use the authorized Herdr maintenance procedure to start or restart Herdr after the link. Herdr runs the hook after restore and socket readiness. The hook receives the authoritative binary path, starts or reuses one broker, writes no secret to standard output or standard error, and exits. This restart is an installation step. It is not a manual broker service, secret, or binary-path step.
 
@@ -135,17 +135,17 @@ Open a new Pi session inside Herdr after startup verification. Pi loads `./dist/
 
 Do not set a broker socket, client secret, session key, token, terminal ID, or Herdr binary path for normal installed use. Ordinary Pi panes do not need the binary value. The broker never searches `PATH` for Herdr.
 
-## Open Pi Herd
+## Open Agent Board
 
-Inside a Pi pane managed by Herdr, run `/pi-herd` to open the `pi.herdr.orchestrator` deck as a focused right split targeting that pane. The command uses Herdr's `HERDR_BIN_PATH` and `HERDR_PANE_ID` values and reports a clear notification when run outside Herdr. `/orchestrator-status` remains available.
+Inside a Pi pane managed by Herdr, run `/agent-board` to open the `pi.herdr.orchestrator` deck as a focused right split targeting that pane. The command uses Herdr's `HERDR_BIN_PATH` and `HERDR_PANE_ID` values and reports a clear notification when run outside Herdr. `/orchestrator-status` remains available.
 
-Pi Herd is a mouse-first right-side control surface. Its stable views are:
+Agent Board is a mouse-first right-side control surface. Its stable views are:
 
 - **Home** shows the connected adopted root and its current project work first. It does not lead with the global historical portfolio.
 - **Work** contains broker-owned Tasks, Results, and Groups beside the provider-owned Pi Todo summary.
 - **Files** can focus the adopted Pi pane. Run `/files` there because Pi 0.84.2 does not expose a safe extension API that opens this built-in view remotely.
 - **Agents** keeps broker-owned lifecycle, model, thinking, prompt, ask, stop, and close controls.
-- **Inbox** keeps broker-owned blocking questions separate from provider-owned asynchronous Agent Board questions. Blocking questions keep `ask_user_question` semantics. Agent Board is the user-facing name for Pi Signal Board.
+- **Inbox** keeps broker-owned blocking questions separate from provider-owned asynchronous Signals questions. Blocking questions keep `ask_user_question` semantics. Signals is the user-facing name for the provider formerly called Agent Board and Signalboard.
 - **More** contains settings and lower-frequency controls.
 
 The installed Pi extension requests and watches provider summaries through these stable `pi.events` names:
@@ -180,7 +180,7 @@ herdr plugin pane open \
   --focus
 ```
 
-Herdr supplies the plugin context. Pi Herd checks the selected pane against live agent data. It does not silently attach to an arbitrary pane when identity is missing or ambiguous. The deck uses the same canonical session resolver and starts or reuses the same broker. You do not need to start a service before you open it.
+Herdr supplies the plugin context. Agent Board checks the selected pane against live agent data. It does not silently attach to an arbitrary pane when identity is missing or ambiguous. The deck uses the same canonical session resolver and starts or reuses the same broker. You do not need to start a service before you open it.
 
 ## Verify
 
@@ -190,7 +190,7 @@ In the target Pi pane, run:
 /orchestrator-status
 ```
 
-The command reports the orchestrator extension and broker state. The managed pane title is `Pi Herd`.
+The command reports the orchestrator extension and broker state. The managed pane title is `Agent Board`.
 
 For command-line checks, run these commands in a Herdr pane:
 

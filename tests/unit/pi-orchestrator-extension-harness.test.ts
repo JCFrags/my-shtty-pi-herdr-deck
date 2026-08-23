@@ -13,6 +13,10 @@ function apiFor(harness: ReturnType<typeof createFakePiHarness>) {
     Array<(event: unknown, context: unknown) => void | Promise<void>>
   >();
   const tools: unknown[] = [];
+  const commands: Array<{
+    name: string;
+    command: { handler: (...args: any[]) => unknown };
+  }> = [];
   const toolWaiters = new Map<
     number,
     {
@@ -28,7 +32,12 @@ function apiFor(harness: ReturnType<typeof createFakePiHarness>) {
     ) => {
       handlers.set(name, [...(handlers.get(name) ?? []), handler]);
     },
-    registerCommand: () => undefined,
+    registerCommand: (
+      name: string,
+      command: { handler: (...args: any[]) => unknown },
+    ) => {
+      commands.push({ name, command });
+    },
     registerTool: (tool: unknown) => {
       tools.push(tool);
       const waiter = toolWaiters.get(tools.length);
@@ -53,7 +62,7 @@ function apiFor(harness: ReturnType<typeof createFakePiHarness>) {
       toolWaiters.set(expected, { resolve, timer });
     });
   };
-  return { api, handlers, tools, waitForToolRegistration };
+  return { api, handlers, tools, commands, waitForToolRegistration };
 }
 async function emit(
   h: ReturnType<typeof apiFor>,
@@ -355,6 +364,14 @@ test("orchestrator extension reload transfers runtime credential and registers t
     (first.tools as Array<{ name: string }>).map((tool) => tool.name).sort(),
     ["orchestrator_ask", "orchestrator_result"],
   );
+  assert.deepEqual(
+    first.commands.map((item) => item.name),
+    ["agent-board", "pi-herd", "orchestrator-status"],
+  );
+  assert.equal(
+    first.commands[0]?.command.handler,
+    first.commands[1]?.command.handler,
+  );
   await emit(first, "session_start", firstHarness.context);
   assert.deepEqual(firstHarness.activeTools.sort(), [
     "orchestrator_ask",
@@ -393,6 +410,15 @@ test("orchestrator extension reload transfers runtime credential and registers t
   assert.equal(registrationCount, 2);
   assert.equal(first.tools.length, 2);
   assert.equal(second.tools.length, 2);
+  assert.deepEqual(
+    second.commands.map((item) => item.name),
+    ["agent-board", "pi-herd", "orchestrator-status"],
+  );
+  assert.equal(
+    second.commands[0]?.command.handler,
+    second.commands[1]?.command.handler,
+  );
+  assert.equal(new Set(second.commands.map((item) => item.name)).size, 3);
   assert.equal(
     new Set((second.tools as Array<{ name: string }>).map((tool) => tool.name))
       .size,

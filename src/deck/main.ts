@@ -24,7 +24,7 @@ interface TuiRuntimeModule {
 }
 
 export const DECK_TUI_COMPATIBILITY_MESSAGE =
-  "Pi Herdr Deck requires Pi TUI with TuiAltScreen and ProcessTerminal.";
+  "Agent Board requires Pi TUI with TuiAltScreen and ProcessTerminal.";
 
 export function hasDeckTuiApi(value: unknown): value is TuiRuntimeModule {
   if (typeof value !== "object" || value === null) return false;
@@ -73,7 +73,7 @@ export async function main(): Promise<void> {
   const tui = new tuiModule.TuiAltScreen(terminal, true, undefined, {
     mouse: false,
   });
-  terminal.setTitle("Pi Herdr Deck");
+  terminal.setTitle("Agent Board");
   tui.start();
   const requestRender = (): void => tui.requestRender();
   let client: BrokerClient | undefined;
@@ -115,7 +115,7 @@ export async function main(): Promise<void> {
       process.once("SIGHUP", resolve);
     });
   } catch (error) {
-    process.stderr.write(`Pi Herdr Deck: ${conciseError(error)}\n`);
+    process.stderr.write(`Agent Board: ${conciseError(error)}\n`);
     process.exitCode = 1;
   } finally {
     mouseRouter?.close();

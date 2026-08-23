@@ -4,20 +4,14 @@ import { DeckActions, type DeckAction } from "./actions.js";
 import {
   currentBlockingQuestions,
   currentProviderProjection,
-  agentPortfolioCounts,
   getAgentModelChoices,
   getAgentThinkingChoices,
   renderAgentInspector,
   renderAgents,
   renderGroupDetail,
-  renderGroups,
-  renderHome,
   renderNotifications,
   renderResultDetail,
   renderTaskDetail,
-  renderTasks,
-  renderTodoSummary,
-  renderTodoDetail,
 } from "./views.js";
 import {
   type HitBox,
@@ -29,13 +23,19 @@ import type { DeckState } from "./types.js";
 import { styleLines } from "./theme.js";
 import type { PiCapabilitySnapshot } from "../pi/model-capabilities.js";
 import type { ModelPolicyConfig } from "../broker/model-policy.js";
-import type { DeckGroup, DeckQuestion, DeckResult } from "./types.js";
+import type { DeckGroup, DeckQuestion } from "./types.js";
 import type { AgentBoardPendingQuestion } from "../shared/provider-projections.js";
 import {
   visibleSurfaceSignature,
-  type VisibleDeckTab,
   type VisibleWorkView,
 } from "./render-dependencies.js";
+import {
+  selectActivityPresentation,
+  selectUnifiedBoardPresentation,
+  type ActivityItem,
+  type AgentBoardTab,
+  type BoardItem,
+} from "./product-presentation.js";
 import {
   selectAdoptedRootAgent,
   selectAdoptedScope,
@@ -56,7 +56,7 @@ export interface BrokerDeckAppOptions {
   onClose?(): void;
   onRenderDecision?(decision: {
     rendered: boolean;
-    tab: VisibleDeckTab;
+    tab: AgentBoardTab;
     workView: VisibleWorkView;
   }): void;
   onActionTarget?(
@@ -65,7 +65,7 @@ export interface BrokerDeckAppOptions {
   ): void;
 }
 
-type DeckTab = VisibleDeckTab;
+type DeckTab = AgentBoardTab;
 type WorkView = VisibleWorkView;
 type InputMode =
   | "prompt"
@@ -79,14 +79,7 @@ type InputMode =
   | "files-filter"
   | "model-filter";
 
-const NAV_TABS: readonly DeckTab[] = [
-  "home",
-  "work",
-  "files",
-  "agents",
-  "inbox",
-  "more",
-];
+const NAV_TABS: readonly DeckTab[] = ["board", "files", "agents", "activity"];
 
 export class BrokerDeckApp implements Component {
   readonly #client: BrokerClient;
@@ -100,7 +93,7 @@ export class BrokerDeckApp implements Component {
   readonly #unsubscribers: Array<() => void> = [];
   readonly #tracker = new PressReleaseTracker();
   #status: BrokerStatus;
-  #tab: DeckTab = "home";
+  #tab: DeckTab = "board";
   #workView: WorkView = "todo";
   #hitBoxes: HitBox[] = [];
   #selectedAgent: string | undefined;
@@ -112,7 +105,6 @@ export class BrokerDeckApp implements Component {
   #agentFilter: import("./views.js").AgentViewFilter = "active";
   #agentPage = 0;
   #modelFilter = "";
-  #boardSelections = new Map<string, Set<string>>();
   #providerPending = new Set<string>();
   #message = "";
   #inputMode: InputMode | undefined;
@@ -126,9 +118,17 @@ export class BrokerDeckApp implements Component {
   #filesHidden = false;
   #filesPath = "";
   #filesScroll = 0;
+  #filesPreviewScroll = 0;
+  #filesTreeRegion: { start: number; end: number } | undefined;
+  #filesPreviewRegion: { start: number; end: number } | undefined;
   #filesPreviewPath: string | undefined;
   #boardTab: "inbox" | "updates" | "decisions" | "history" = "inbox";
   #boardSelection: string | undefined;
+  #unifiedBoardSelection: string | undefined;
+  #activitySelection: string | undefined;
+  #activityScroll = 0;
+  #settingsOpen = false;
+  #helpOpen = false;
   #renderSignature = "";
 
   constructor(options: BrokerDeckAppOptions) {
@@ -185,445 +185,52 @@ export class BrokerDeckApp implements Component {
     const state = this.#client.store.state;
     this.#hitBoxes = [];
     const lines = [
-      `PI HERD  ${this.#status === "connected" ? "● ONLINE" : "○ OFFLINE"}`,
+      `AGENT BOARD  ${this.#status === "connected" ? "● ONLINE" : "○ OFFLINE"}`,
     ];
     const tabNames: Record<DeckTab, string> = {
-      home: "Home",
-      work: "Work",
+      board: "Board",
       files: "Files",
       agents: "Agents",
-      inbox: "Board",
-      more: "Settings",
+      activity: "Activity",
     };
     this.addControlRow(
       lines,
-      NAV_TABS.map((tab, index) => ({
-        id: `tab:${tab}`,
-        label: `${this.#tab === tab ? tabNames[tab].toUpperCase() : tabNames[tab]} ${index + 1}`,
-        activate: () => this.selectTab(tab),
-      })),
+      [
+        ...NAV_TABS.map((tab, index) => ({
+          id: `tab:${tab}`,
+          label: `${this.#tab === tab ? tabNames[tab].toUpperCase() : tabNames[tab]} ${index + 1}`,
+          activate: () => this.selectTab(tab),
+        })),
+        {
+          id: "header:settings",
+          label: "Settings ,",
+          activate: () => this.toggleSettings(),
+        },
+        {
+          id: "header:help",
+          label: "Help ?",
+          activate: () => this.toggleHelp(),
+        },
+      ],
       safeWidth,
     );
     lines.push(
       "────────────────────────────────────────────────────────────────────────────────",
-      "↑↓ move  •  click to select  •  r refresh  •  q close",
+      "↑↓ move  •  click controls  •  r refresh  •  , settings  •  ? help  •  q close",
       ...(this.#message ? [`◆ ${this.#message}`] : []),
       "",
     );
 
-    if (this.#tab === "home")
-      lines.push(...renderHome(state, safeWidth, this.#targetPaneId));
-    else if (this.#tab === "files") {
+    if (this.#settingsOpen) this.renderSettingsSurface(lines, safeWidth);
+    else if (this.#helpOpen) this.renderHelpSurface(lines);
+    else if (this.#tab === "board")
+      this.renderUnifiedBoard(lines, safeWidth, state);
+    else if (this.#tab === "files")
       this.renderFilesProvider(lines, safeWidth, state);
-    } else if (this.#tab === "work") {
-      this.addControlRow(
-        lines,
-        (["todo", "tasks", "results", "groups", "history"] as WorkView[]).map(
-          (view) => ({
-            id: `work:${view}`,
-            label:
-              this.#workView === view ? view.toUpperCase() : this.title(view),
-            activate: () => {
-              this.#workView = view;
-              this.#closeConfirmation = undefined;
-              this.syncVisibleSignature();
-            },
-          }),
-        ),
-        safeWidth,
-      );
-      const todoItems =
-        currentProviderProjection(state, this.#targetPaneId)?.todo.items ?? [];
-      const selectedTodo = this.selectedProviderTodo(todoItems);
-      if (this.#workView === "todo") {
-        const todoStart = lines.length;
-        lines.push(
-          "",
-          ...renderTodoSummary(
-            state,
-            safeWidth,
-            this.#targetPaneId,
-            selectedTodo?.id,
-          ),
-          "",
-        );
-        this.addEntityHitBoxes(
-          lines,
-          todoStart,
-          todoItems,
-          (item) => item.text,
-          (id) => {
-            this.#selectedProviderTodo = id;
-          },
-        );
-        lines.push(
-          ...renderTodoDetail(
-            state,
-            safeWidth,
-            this.#targetPaneId,
-            selectedTodo?.id,
-          ),
-          "",
-        );
-        this.addControlRow(
-          lines,
-          [
-            {
-              id: "todo:start",
-              label: "Start",
-              disabled:
-                !selectedTodo ||
-                !this.todoAvailable() ||
-                this.#providerPending.has("todo-start"),
-              activate: () => void this.runProvider("todoStart", "todo-start"),
-            },
-            {
-              id: "todo:done",
-              label: "Mark done",
-              disabled:
-                !selectedTodo ||
-                !this.todoAvailable() ||
-                this.#providerPending.has("todo-done"),
-              activate: () => void this.runProvider("todoDone", "todo-done"),
-            },
-            {
-              id: "todo:clear-wait",
-              label: "Clear external wait",
-              disabled:
-                !selectedTodo?.waitReason ||
-                !this.todoAvailable() ||
-                this.#providerPending.has("todo-clear-wait"),
-              activate: () =>
-                void this.runProvider("todoClearWait", "todo-clear-wait"),
-            },
-          ],
-          safeWidth,
-        );
-      } else if (this.#workView === "tasks") {
-        const scoped = this.scopedWorkState(state);
-        const task = this.selectedTask(scoped);
-        lines.push("ORCHESTRATOR TASKS · Broker-owned · Adopted scope");
-        const start = lines.length;
-        lines.push(...renderTasks(scoped, safeWidth, undefined, task?.id), "");
-        this.addEntityHitBoxes(
-          lines,
-          start,
-          [...scoped.tasks.values()],
-          (item) => item.id,
-          (id) => {
-            this.#selectedTask = id;
-          },
-        );
-        lines.push(...renderTaskDetail(task, scoped, safeWidth));
-        this.addControlRow(
-          lines,
-          [
-            {
-              id: "task:cancel",
-              label: "Cancel task",
-              disabled: !task,
-              activate: () => this.confirmTaskCancel(),
-            },
-          ],
-          safeWidth,
-        );
-      } else if (this.#workView === "results") {
-        const scoped = this.scopedWorkState(state);
-        const results = [...scoped.results.values()].sort((a, b) =>
-          a.id.localeCompare(b.id),
-        );
-        lines.push("ORCHESTRATOR RESULTS · Broker-owned", "RESULTS");
-        const result = this.selectedResult(scoped);
-        for (const item of results) {
-          const y = lines.length;
-          lines.push(
-            `${result?.id === item.id ? ">" : " "} ${item.id} · ${item.status} · ${item.summary ?? "No summary"}`,
-          );
-          this.addHitBox(`result:${item.id}`, y, safeWidth, () => {
-            this.#selectedResult = item.id;
-          });
-        }
-        if (results.length === 0) lines.push("No results are visible.");
-        lines.push("", ...renderResultDetail(result, safeWidth));
-      } else if (this.#workView === "groups") {
-        const scoped = this.scopedWorkState(state);
-        const group = this.selectedGroup(scoped);
-        lines.push("ORCHESTRATOR GROUPS · Broker-owned · Adopted scope");
-        const start = lines.length;
-        lines.push(...renderGroups(scoped, safeWidth, group?.id), "");
-        this.addEntityHitBoxes(
-          lines,
-          start,
-          [...scoped.groups.values()],
-          (item) => item.id,
-          (id) => {
-            this.#selectedGroup = id;
-          },
-        );
-        lines.push(...renderGroupDetail(group, safeWidth));
-        this.addControlRow(
-          lines,
-          [
-            {
-              id: "group:wait",
-              label: "Wait",
-              disabled: !group,
-              activate: () => void this.run("groupWait"),
-            },
-            {
-              id: "group:stop",
-              label: "Stop",
-              disabled: !group,
-              activate: () => this.confirmGroup("groupStop"),
-            },
-            {
-              id: "group:close",
-              label: "Close",
-              disabled: !group,
-              activate: () => this.confirmGroup("groupClose"),
-            },
-          ],
-          safeWidth,
-        );
-      } else {
-        const scoped = this.scopedWorkState(state);
-        lines.push(
-          "HISTORY · TERMINAL TASKS AND RESULTS · Retained broker history",
-        );
-        lines.push(...renderTasks(scoped, safeWidth), "");
-        for (const result of [...scoped.results.values()])
-          lines.push(
-            `${result.id} · ${result.status} · ${result.summary ?? "No summary"}`,
-          );
-      }
-    } else if (this.#tab === "agents") {
-      const agent = this.selectedAgent();
-      this.addControlRow(
-        lines,
-        (["active", "idle", "history"] as const).map((filter) => ({
-          id: `agents:filter:${filter}`,
-          label: this.#agentFilter === filter ? `[${filter}]` : filter,
-          activate: () => {
-            this.#agentFilter = filter;
-            this.#agentPage = 0;
-            this.#selectedAgent = undefined;
-          },
-        })),
-        safeWidth,
-      );
-      const scopedAgentsState = this.scopedWorkState(state);
-      const visibleAgents = this.visibleAgents(scopedAgentsState);
-      const start = lines.length;
-      lines.push(
-        ...renderAgents(
-          scopedAgentsState,
-          safeWidth,
-          agent?.id,
-          this.#agentFilter,
-          this.#agentPage,
-        ),
-        "",
-      );
-      this.addEntityHitBoxes(
-        lines,
-        start,
-        visibleAgents,
-        (item) => item.displayName ?? item.herdrName ?? item.id,
-        (id) => {
-          this.#selectedAgent = id;
-        },
-      );
-      lines.push(...renderAgentInspector(agent, state, safeWidth), "");
-      lines.push(
-        `Agent controls: ${agent ? `selected ${agent.state}; working-only actions require working state; focus requires a pane; model changes apply only to running agent.` : "select an agent from the current filter."}`,
-      );
-      this.addControlRow(
-        lines,
-        [
-          {
-            id: "agent:focus",
-            label: "Focus",
-            disabled:
-              this.#actions.authorize(
-                "focus",
-                this.target() as import("./actions.js").ActionTarget,
-              ) !== undefined,
-            activate: () => void this.run("focus"),
-          },
-          {
-            id: "agent:prompt",
-            label: "Prompt",
-            disabled:
-              this.#actions.authorize(
-                "prompt",
-                this.target() as import("./actions.js").ActionTarget,
-              ) !== undefined,
-            activate: () => this.beginInput("prompt"),
-          },
-          {
-            id: "agent:ask",
-            label: "Ask",
-            disabled:
-              this.#actions.authorize(
-                "ask",
-                this.target() as import("./actions.js").ActionTarget,
-              ) !== undefined,
-            activate: () => this.beginInput("ask"),
-          },
-          {
-            id: "agent:interrupt",
-            label: "Interrupt",
-            disabled:
-              this.#actions.authorize(
-                "interrupt",
-                this.target() as import("./actions.js").ActionTarget,
-              ) !== undefined || this.selectedAgent()?.state !== "working",
-            activate: () => void this.run("interrupt"),
-          },
-          {
-            id: "agent:stop",
-            label: "Stop",
-            disabled:
-              this.#actions.authorize(
-                "stop",
-                this.target() as import("./actions.js").ActionTarget,
-              ) !== undefined,
-            activate: () => void this.run("stop"),
-          },
-          {
-            id: "agent:close",
-            label: "Close",
-            disabled:
-              this.#actions.authorize(
-                "close",
-                this.target() as import("./actions.js").ActionTarget,
-              ) !== undefined,
-            activate: () => this.confirmClose(),
-          },
-        ],
-        safeWidth,
-      );
-      this.addControlRow(
-        lines,
-        [
-          {
-            id: "agent:steer",
-            label: "Steer",
-            disabled:
-              this.#actions.authorize(
-                "steer",
-                this.target() as import("./actions.js").ActionTarget,
-              ) !== undefined,
-            activate: () => this.beginInput("steer"),
-          },
-          {
-            id: "agent:follow-up",
-            label: "Follow-up",
-            disabled:
-              this.#actions.authorize(
-                "followUp",
-                this.target() as import("./actions.js").ActionTarget,
-              ) !== undefined,
-            activate: () => this.beginInput("followUp"),
-          },
-          {
-            id: "agent:compact",
-            label: "Compact",
-            disabled:
-              this.#actions.authorize(
-                "compact",
-                this.target() as import("./actions.js").ActionTarget,
-              ) !== undefined || this.selectedAgent()?.state !== "idle",
-            activate: () => void this.run("compact"),
-          },
-          {
-            id: "agent:restart",
-            label: "Restart",
-            disabled:
-              this.#actions.authorize(
-                "restart",
-                this.target() as import("./actions.js").ActionTarget,
-              ) !== undefined ||
-              ["closed", "stopped"].includes(this.selectedAgent()?.state ?? ""),
-            activate: () => void this.run("restart"),
-          },
-          {
-            id: "agent:worktree",
-            label: "Open worktree",
-            disabled:
-              this.#actions.authorize(
-                "openWorktree",
-                this.target() as import("./actions.js").ActionTarget,
-              ) !== undefined,
-            activate: () => void this.run("openWorktree"),
-          },
-          {
-            id: "agent:copy-id",
-            label: "Copy ID",
-            disabled:
-              this.#actions.authorize(
-                "copyId",
-                this.target() as import("./actions.js").ActionTarget,
-              ) !== undefined,
-            activate: () => void this.copySelectedId(),
-          },
-          {
-            id: "agent:model",
-            label: "Running model",
-            disabled: getAgentModelChoices(this.selectedAgent()).length === 0,
-            activate: () => this.cycleModel(),
-          },
-          {
-            id: "agent:thinking",
-            label: "Running thinking",
-            disabled:
-              getAgentThinkingChoices(this.selectedAgent()).length === 0,
-            activate: () => this.cycleThinking(),
-          },
-          {
-            id: "agent:create",
-            label: "Create agent (default)",
-            disabled: !this.selectedAgent()?.cwd,
-            activate: () => this.beginInput("create"),
-          },
-        ],
-        safeWidth,
-      );
-    } else if (this.#tab === "inbox") {
-      this.renderBoardProvider(lines, safeWidth, state);
-    } else {
-      lines.push("MORE", "Settings and lower-frequency controls", "");
-      this.addControlRow(
-        lines,
-        [
-          {
-            id: "more:refresh",
-            label: "Refresh",
-            activate: () => void this.run("refresh"),
-          },
-          {
-            id: "more:default",
-            label: "Set model default",
-            activate: () => this.beginInput("default"),
-          },
-          {
-            id: "more:auto-close",
-            label: "Toggle auto-close",
-            activate: () => void this.toggleAutoClose(),
-          },
-        ],
-        safeWidth,
-      );
-      lines.push("", ...this.renderSettings(safeWidth));
-    }
+    else if (this.#tab === "agents")
+      this.renderAgentsSurface(lines, safeWidth, state);
+    else this.renderActivitySurface(lines, safeWidth, state);
 
-    if (this.#tab === "home") {
-      const portfolio = agentPortfolioCounts(state.agents.values());
-      lines.push(
-        "",
-        `ALL HISTORY  ${portfolio.active} live · ${portfolio.idleRetained} retained · ${portfolio.archivedCompleted} archived`,
-      );
-    }
     if (this.#inputMode) {
       lines.push(`${this.#inputMode.toUpperCase()}: ${this.#input}█`);
       if (this.#inputMode === "create") {
@@ -637,7 +244,7 @@ export class BrokerDeckApp implements Component {
         );
       lines.push("Enter submits. Escape cancels. Backspace edits.");
     }
-    if (this.#tab === "home" && this.#client.store.notifications.length > 0)
+    if (this.#tab === "board" && this.#client.store.notifications.length > 0)
       lines.push(
         "",
         ...renderNotifications(
@@ -659,24 +266,29 @@ export class BrokerDeckApp implements Component {
 
   handleInput(data: string): void {
     if (this.#inputMode) {
-      // Navigation remains global while editing. Selecting a tab cancels the
-      // tab-local editor instead of typing the tab number into it.
-      if (data >= "1" && data <= "6") {
+      if (data >= "1" && data <= "4") {
         this.selectTab(NAV_TABS[Number(data) - 1]!);
-        this.#requestRender();
         return;
       }
       this.handleEditorInput(data);
       this.#requestRender();
       return;
     }
-    if (data === "q" || data === "\u0003" || data === "\u001b") {
+    if (data === "\u001b" && (this.#settingsOpen || this.#helpOpen)) {
+      this.#settingsOpen = false;
+      this.#helpOpen = false;
+    } else if (data === "q" || data === "\u0003" || data === "\u001b") {
       this.#onClose();
       return;
-    }
-    if (data >= "1" && data <= "6") this.selectTab(NAV_TABS[Number(data) - 1]!);
-    else if (data === "r")
-      void (this.#tab === "more" ? this.loadSettings() : this.run("refresh"));
+    } else if (data >= "1" && data <= "4")
+      this.selectTab(NAV_TABS[Number(data) - 1]!);
+    else if (data === ",") this.toggleSettings();
+    else if (data === "?") this.toggleHelp();
+    else if (this.#settingsOpen && data === "/")
+      this.beginInput("model-filter");
+    else if (this.#settingsOpen && data === "d") this.beginInput("default");
+    else if (this.#settingsOpen && data === "o") void this.toggleAutoClose();
+    else if (data === "r") void this.run("refresh");
     else if (data === "n" && this.#tab === "agents") this.beginInput("create");
     else if (data === "/" && this.#tab === "files")
       this.beginInput("files-filter");
@@ -693,25 +305,13 @@ export class BrokerDeckApp implements Component {
       void this.runFiles("insert-paths");
     else if (data === "b" && this.#tab === "files")
       void this.runFiles("insert-contents");
-    else if (data === "/" && this.#tab === "more")
-      this.beginInput("model-filter");
-    else if (data === "d" && this.#tab === "more") this.beginInput("default");
-    else if (data === "o" && this.#tab === "more") void this.toggleAutoClose();
     else if (data === "f" && this.#tab === "agents") void this.run("focus");
     else if (data === "p" && this.#tab === "agents") this.beginInput("prompt");
     else if (data === "a" && this.#tab === "agents") this.beginInput("ask");
-    else if (
-      data === "a" &&
-      this.#tab === "inbox" &&
-      this.#boardTab === "inbox"
-    )
+    else if (data === "a" && this.#tab === "board")
       this.beginInput(this.selectedBoardQuestion() ? "board-answer" : "answer");
-    else if (data === "y" && this.#tab === "inbox")
+    else if (data === "y" && this.#tab === "board")
       void this.runBoard("accept-recommendation");
-    else if (data === "d" && this.#tab === "inbox")
-      void this.runBoard("dismiss-question");
-    else if (data === "r" && this.#tab === "inbox")
-      void this.runBoard("retry-delivery");
     else if (data === "i" && this.#tab === "agents") void this.run("interrupt");
     else if (data === "s" && this.#tab === "agents") void this.run("stop");
     else if (data === "x" && this.#tab === "agents") this.confirmClose();
@@ -725,7 +325,20 @@ export class BrokerDeckApp implements Component {
 
   handleMouse(event: TuiMouseEvent): boolean {
     if (event.type === "wheel") {
-      this.move(event.direction === "down" ? 1 : -1);
+      const delta = event.direction === "down" ? 1 : -1;
+      if (
+        this.#tab === "files" &&
+        this.#filesPreviewRegion &&
+        event.y >= this.#filesPreviewRegion.start &&
+        event.y <= this.#filesPreviewRegion.end
+      )
+        this.#filesPreviewScroll = Math.max(
+          0,
+          this.#filesPreviewScroll + delta,
+        );
+      else if (this.#tab === "files" && this.#filesTreeRegion)
+        this.#filesScroll = Math.max(0, this.#filesScroll + delta);
+      else this.move(delta);
       this.syncVisibleSignature();
       this.#requestRender();
       return true;
@@ -742,10 +355,6 @@ export class BrokerDeckApp implements Component {
     this.#requestRender();
   }
 
-  private title(value: string): string {
-    return `${value[0]?.toUpperCase() ?? ""}${value.slice(1)}`;
-  }
-
   private visibleSignature(state = this.#client.store.state): string {
     return visibleSurfaceSignature(state, {
       tab: this.#tab,
@@ -760,9 +369,11 @@ export class BrokerDeckApp implements Component {
       agentFilter: this.#agentFilter,
       agentPage: this.#agentPage,
       boardTab: this.#boardTab,
-      ...(this.#boardSelection
-        ? { boardSelectionId: this.#boardSelection }
-        : {}),
+      ...(this.#tab === "activity" && this.#activitySelection
+        ? { boardSelectionId: this.#activitySelection }
+        : this.#unifiedBoardSelection
+          ? { boardSelectionId: this.#unifiedBoardSelection }
+          : {}),
       notifications: this.#client.store.notifications,
     });
   }
@@ -772,24 +383,432 @@ export class BrokerDeckApp implements Component {
   }
 
   private selectTab(tab: DeckTab): void {
-    // Input belongs to the tab that opened it. Never carry it into another tab.
     this.#inputMode = undefined;
     this.#input = "";
+    this.#settingsOpen = false;
+    this.#helpOpen = false;
     this.#tab = tab;
-    if (tab === "work") {
-      this.#workView = "todo";
-      this.#selectedTask = undefined;
-      this.#selectedResult = undefined;
-      this.#selectedGroup = undefined;
-    }
     this.#closeConfirmation = undefined;
     this.#tracker.reset();
     this.syncVisibleSignature();
-    if (tab === "more") {
-      this.#settingsScroll = 0;
-      void this.loadSettings();
-    }
     this.#requestRender();
+  }
+
+  private toggleSettings(): void {
+    this.#settingsOpen = !this.#settingsOpen;
+    this.#helpOpen = false;
+    this.#settingsScroll = 0;
+    if (this.#settingsOpen) void this.loadSettings();
+    this.syncVisibleSignature();
+    this.#requestRender();
+  }
+
+  private toggleHelp(): void {
+    this.#helpOpen = !this.#helpOpen;
+    this.#settingsOpen = false;
+    this.#requestRender();
+  }
+
+  private renderSettingsSurface(lines: string[], width: number): void {
+    lines.push("SETTINGS  Escape or , closes", "");
+    this.addControlRow(
+      lines,
+      [
+        {
+          id: "settings:default",
+          label: "Set model default",
+          activate: () => this.beginInput("default"),
+        },
+        {
+          id: "settings:auto-close",
+          label: "Toggle auto-close",
+          activate: () => void this.toggleAutoClose(),
+        },
+        {
+          id: "settings:close",
+          label: "Close",
+          activate: () => this.toggleSettings(),
+        },
+      ],
+      width,
+    );
+    lines.push("", ...this.renderSettings(width));
+  }
+
+  private renderHelpSurface(lines: string[]): void {
+    lines.push(
+      "HELP  Escape or ? closes",
+      "1 Board  2 Files  3 Agents  4 Activity",
+      "Board combines current work, questions, Signals updates, and recommendations.",
+      "Files: row previews; caret expands; checkbox selects; each pane scrolls independently.",
+      "Agents: f focus, p prompt, a ask, i interrupt, s stop, x close.",
+      "Activity contains results, decisions, updates, groups, tasks, and lifecycle history.",
+    );
+  }
+
+  private selectBoardItem(item: BoardItem): void {
+    this.#unifiedBoardSelection = item.id;
+    if (item.kind === "todo") this.#selectedProviderTodo = item.source.id;
+    else if (item.kind === "task") this.#selectedTask = item.source.id;
+    else if (item.kind === "group") this.#selectedGroup = item.source.id;
+    else if (item.kind === "broker-question")
+      this.#selectedQuestion = item.source.id;
+    else {
+      const separator = item.id.indexOf(":");
+      this.#boardSelection = item.id.slice(separator + 1);
+    }
+  }
+
+  private renderUnifiedBoard(
+    lines: string[],
+    width: number,
+    state: DeckState,
+  ): void {
+    const model = selectUnifiedBoardPresentation(
+      state,
+      this.#targetPaneId,
+      this.#unifiedBoardSelection,
+    );
+    lines.push(
+      `BOARD  ${model.counts.work} current · ${model.counts.attention} need attention`,
+      "CURRENT WORK  Pi Todo and orchestrator work",
+    );
+    this.renderBoardItems(lines, width, model.work);
+    lines.push("", "ATTENTION  Broker questions and SIGNALS");
+    this.renderBoardItems(lines, width, model.attention);
+    const selected = model.selected;
+    if (!selected) return;
+    this.selectBoardItem(selected);
+    lines.push(
+      "",
+      `DETAIL  ${selected.kind.toUpperCase()} · ${selected.status}`,
+      selected.title,
+    );
+    if (selected.kind === "task")
+      lines.push(
+        ...renderTaskDetail(
+          selected.source,
+          this.scopedWorkState(state),
+          width,
+        ),
+      );
+    else if (selected.kind === "group")
+      lines.push(...renderGroupDetail(selected.source, width));
+    else if (selected.kind === "broker-question")
+      lines.push(`Question ${selected.source.id}: ${selected.source.prompt}`);
+    else if (selected.kind.startsWith("signal-")) {
+      const projection = currentProviderProjection(
+        state,
+        this.#targetPaneId,
+      )?.agentBoard;
+      const tab =
+        selected.kind === "signal-question"
+          ? "inbox"
+          : selected.kind === "signal-update"
+            ? "updates"
+            : "decisions";
+      const presentation = selectBoardPresentation(
+        projection,
+        tab,
+        this.#boardSelection,
+      );
+      if (Object.keys(presentation.detail).length > 0)
+        lines.push(...this.renderBoardDetail(presentation.detail, width));
+    }
+    this.addControlRow(
+      lines,
+      [
+        {
+          id: "board:start",
+          label: "Start",
+          disabled: selected.kind !== "todo",
+          activate: () => void this.runProvider("todoStart", "todo-start"),
+        },
+        {
+          id: "board:done",
+          label: "Mark done",
+          disabled: selected.kind !== "todo",
+          activate: () => void this.runProvider("todoDone", "todo-done"),
+        },
+        {
+          id: "board:answer",
+          label: "Answer",
+          disabled: !["broker-question", "signal-question"].includes(
+            selected.kind,
+          ),
+          activate: () =>
+            this.beginInput(
+              selected.kind === "signal-question" ? "board-answer" : "answer",
+            ),
+        },
+        {
+          id: "board:cancel",
+          label: "Cancel task",
+          disabled: selected.kind !== "task",
+          activate: () => this.confirmTaskCancel(),
+        },
+        {
+          id: "board:wait",
+          label: "Wait group",
+          disabled: selected.kind !== "group",
+          activate: () => void this.run("groupWait"),
+        },
+        {
+          id: "board:stop",
+          label: "Stop group",
+          disabled: selected.kind !== "group",
+          activate: () => this.confirmGroup("groupStop"),
+        },
+        {
+          id: "board:close",
+          label: "Close group",
+          disabled: selected.kind !== "group",
+          activate: () => this.confirmGroup("groupClose"),
+        },
+      ],
+      width,
+    );
+  }
+
+  private renderBoardItems(
+    lines: string[],
+    width: number,
+    items: BoardItem[],
+  ): void {
+    if (items.length === 0) lines.push("  ✓ Clear");
+    for (const item of items) {
+      const y = lines.length;
+      const selected = item.id === this.#unifiedBoardSelection;
+      lines.push(`${selected ? ">" : " "} [${item.status}] ${item.title}`);
+      this.addHitBox(`board:item:${item.id}`, y, width, () =>
+        this.selectBoardItem(item),
+      );
+    }
+  }
+
+  private renderAgentsSurface(
+    lines: string[],
+    width: number,
+    state: DeckState,
+  ): void {
+    const agent = this.selectedAgent();
+    this.addControlRow(
+      lines,
+      (["active", "idle", "history"] as const).map((filter) => ({
+        id: `agents:filter:${filter}`,
+        label: this.#agentFilter === filter ? `[${filter}]` : filter,
+        activate: () => {
+          this.#agentFilter = filter;
+          this.#agentPage = 0;
+          this.#selectedAgent = undefined;
+        },
+      })),
+      width,
+    );
+    const scoped = this.scopedWorkState(state);
+    const visible = this.visibleAgents(scoped);
+    const start = lines.length;
+    lines.push(
+      ...renderAgents(
+        scoped,
+        width,
+        agent?.id,
+        this.#agentFilter,
+        this.#agentPage,
+      ),
+      "",
+    );
+    this.addEntityHitBoxes(
+      lines,
+      start,
+      visible,
+      (item) => item.displayName ?? item.herdrName ?? item.id,
+      (id) => {
+        this.#selectedAgent = id;
+      },
+    );
+    lines.push(...renderAgentInspector(agent, state, width), "");
+    this.addControlRow(
+      lines,
+      [
+        {
+          id: "agent:focus",
+          label: "Focus",
+          disabled: !agent?.paneId,
+          activate: () => void this.run("focus"),
+        },
+        {
+          id: "agent:prompt",
+          label: "Prompt",
+          disabled: !agent,
+          activate: () => this.beginInput("prompt"),
+        },
+        {
+          id: "agent:ask",
+          label: "Ask",
+          disabled: !agent,
+          activate: () => this.beginInput("ask"),
+        },
+        {
+          id: "agent:interrupt",
+          label: "Interrupt",
+          disabled: agent?.state !== "working",
+          activate: () => void this.run("interrupt"),
+        },
+        {
+          id: "agent:stop",
+          label: "Stop",
+          disabled: !agent,
+          activate: () => void this.run("stop"),
+        },
+        {
+          id: "agent:close",
+          label: "Close",
+          disabled: !agent,
+          activate: () => this.confirmClose(),
+        },
+        {
+          id: "agent:create",
+          label: "Create",
+          disabled: !agent?.cwd,
+          activate: () => this.beginInput("create"),
+        },
+      ],
+      width,
+    );
+    this.addControlRow(
+      lines,
+      [
+        {
+          id: "agent:steer",
+          label: "Steer",
+          disabled: !agent,
+          activate: () => this.beginInput("steer"),
+        },
+        {
+          id: "agent:follow",
+          label: "Follow-up",
+          disabled: !agent,
+          activate: () => this.beginInput("followUp"),
+        },
+        {
+          id: "agent:compact",
+          label: "Compact",
+          disabled: agent?.state !== "idle",
+          activate: () => void this.run("compact"),
+        },
+        {
+          id: "agent:restart",
+          label: "Restart",
+          disabled: !agent || ["closed", "stopped"].includes(agent.state),
+          activate: () => void this.run("restart"),
+        },
+        {
+          id: "agent:worktree",
+          label: "Worktree",
+          disabled: !agent?.cwd,
+          activate: () => void this.run("openWorktree"),
+        },
+        {
+          id: "agent:copy",
+          label: "Copy ID",
+          disabled: !agent,
+          activate: () => void this.copySelectedId(),
+        },
+        {
+          id: "agent:model",
+          label: "Model",
+          disabled: getAgentModelChoices(agent).length === 0,
+          activate: () => this.cycleModel(),
+        },
+        {
+          id: "agent:thinking",
+          label: "Thinking",
+          disabled: getAgentThinkingChoices(agent).length === 0,
+          activate: () => this.cycleThinking(),
+        },
+      ],
+      width,
+    );
+  }
+
+  private selectActivityItem(item: ActivityItem): void {
+    this.#activitySelection = item.id;
+    if (item.kind === "result") this.#selectedResult = item.source.id;
+    else if (item.kind === "task") this.#selectedTask = item.source.id;
+    else if (item.kind === "group") this.#selectedGroup = item.source.id;
+    else if (item.kind === "agent") this.#selectedAgent = item.source.id;
+  }
+
+  private renderActivitySurface(
+    lines: string[],
+    width: number,
+    state: DeckState,
+  ): void {
+    const model = selectActivityPresentation(
+      state,
+      this.#targetPaneId,
+      this.#activitySelection,
+    );
+    lines.push(
+      "ACTIVITY  Results · decisions · updates · groups · lifecycle",
+      `${model.items.length} retained events`,
+    );
+    if (model.items.length === 0)
+      lines.push("✓ No historical activity is available.");
+    const rowBudget = Math.max(4, this.#getHeight() - lines.length - 8);
+    const selectedIndex = model.selected
+      ? model.items.findIndex((item) => item.id === model.selected?.id)
+      : -1;
+    if (selectedIndex >= 0) {
+      if (selectedIndex < this.#activityScroll)
+        this.#activityScroll = selectedIndex;
+      if (selectedIndex >= this.#activityScroll + rowBudget)
+        this.#activityScroll = selectedIndex - rowBudget + 1;
+    }
+    this.#activityScroll = Math.max(
+      0,
+      Math.min(
+        this.#activityScroll,
+        Math.max(0, model.items.length - rowBudget),
+      ),
+    );
+    for (const item of model.items.slice(
+      this.#activityScroll,
+      this.#activityScroll + rowBudget,
+    )) {
+      const y = lines.length;
+      lines.push(
+        `${item.id === model.selected?.id ? ">" : " "} [${item.status}] ${item.title}`,
+      );
+      this.addHitBox(`activity:item:${item.id}`, y, width, () =>
+        this.selectActivityItem(item),
+      );
+    }
+    if (model.items.length > rowBudget)
+      lines.push(
+        `  ↕ ${this.#activityScroll + 1}-${Math.min(model.items.length, this.#activityScroll + rowBudget)} of ${model.items.length}`,
+      );
+    if (model.selected) {
+      this.selectActivityItem(model.selected);
+      lines.push(
+        "",
+        `DETAIL  ${model.selected.kind.toUpperCase()} · ${model.selected.status}`,
+        model.selected.title,
+      );
+      if (model.selected.kind === "result")
+        lines.push(...renderResultDetail(model.selected.source, width));
+      else if (model.selected.kind === "task")
+        lines.push(
+          ...renderTaskDetail(
+            model.selected.source,
+            this.scopedWorkState(state),
+            width,
+          ),
+        );
+      else if (model.selected.kind === "group")
+        lines.push(...renderGroupDetail(model.selected.source, width));
+    }
   }
 
   private addHitBox(
@@ -980,44 +999,101 @@ export class BrokerDeckApp implements Component {
       0,
       Math.min(this.#filesScroll, Math.max(0, visible.length - rowBudget)),
     );
+    const treeStart = lines.length;
     for (const row of visible.slice(
       this.#filesScroll,
       this.#filesScroll + rowBudget,
     )) {
       const path = String(row.path ?? "");
       const selected = row.selected === true;
-      const marker = selected ? "●" : row.partiallySelected ? "◐" : "○";
+      const marker = selected ? "x" : row.partiallySelected ? "−" : " ";
       const folder = row.kind === "directory" || row.kind === "root";
       const caret = folder ? (row.expanded ? "▾" : "▸") : "·";
       const cursor = path === this.#filesPath ? ">" : " ";
+      const indent = "  ".repeat(Math.max(0, Number(row.depth ?? 0)));
+      const prefix = `${cursor} ${indent}${caret} [${marker}] `;
       const y = lines.length;
       lines.push(
-        `${cursor} ${marker} ${"  ".repeat(Math.max(0, Number(row.depth ?? 0)))}${caret} ${String(row.name ?? path)}${row.error ? `  ! ${String(row.error)}` : ""}`,
+        `${prefix}${String(row.name ?? path)}${row.error ? `  ! ${String(row.error)}` : ""}`,
       );
-      this.addHitBox(`files:row:${path}`, y, width, () => {
-        this.#filesPath = path;
-        if (folder) void this.runFiles("expand", path);
-        else
-          void this.runFiles("toggle-selection", path).then(() =>
-            this.runFiles("preview", path),
-          );
-      });
+      const caretX = 2 + indent.length;
+      const checkX = caretX + 2;
+      if (folder)
+        this.addHitBox(
+          `files:caret:${path}`,
+          y,
+          1,
+          () => {
+            this.#filesPath = path;
+            void this.runFiles("expand", path);
+          },
+          false,
+          caretX,
+        );
+      this.addHitBox(
+        `files:check:${path}`,
+        y,
+        3,
+        () => {
+          this.#filesPath = path;
+          void this.runFiles("toggle-selection", path);
+        },
+        false,
+        checkX,
+      );
+      this.addHitBox(
+        `files:row:${path}`,
+        y,
+        Math.max(1, width - prefix.length),
+        () => {
+          this.#filesPath = path;
+          if (!folder) {
+            this.#filesPreviewScroll = 0;
+            void this.runFiles("preview", path);
+          }
+        },
+        false,
+        prefix.length,
+      );
     }
+    this.#filesTreeRegion = {
+      start: treeStart,
+      end: Math.max(treeStart, lines.length - 1),
+    };
     if (visible.length > rowBudget)
       lines.push(
         `  ↕ ${this.#filesScroll + 1}-${Math.min(visible.length, this.#filesScroll + rowBudget)} of ${visible.length} · scroll or ↑↓ to move`,
       );
     const preview = this.providerRecord(view.preview);
+    this.#filesPreviewRegion = undefined;
     if (Object.keys(preview).length) {
       lines.push(
         "",
         `PREVIEW  ${String(this.#filesPreviewPath ?? this.#filesPath)}`,
       );
-      for (const line of Array.isArray(preview.lines)
-        ? preview.lines.slice(0, 8)
-        : [])
+      const previewStart = lines.length;
+      const previewLines = Array.isArray(preview.lines) ? preview.lines : [];
+      this.#filesPreviewScroll = Math.max(
+        0,
+        Math.min(
+          this.#filesPreviewScroll,
+          Math.max(0, previewLines.length - 8),
+        ),
+      );
+      for (const line of previewLines.slice(
+        this.#filesPreviewScroll,
+        this.#filesPreviewScroll + 8,
+      ))
         lines.push(`│ ${String(line)}`);
+      if (previewLines.length > 8)
+        lines.push(
+          `  ↕ preview ${this.#filesPreviewScroll + 1}-${Math.min(previewLines.length, this.#filesPreviewScroll + 8)} of ${previewLines.length}`,
+        );
       if (preview.error) lines.push(`! ${String(preview.error)}`);
+      this.#filesPreviewRegion = {
+        start: previewStart,
+        end: Math.max(previewStart, lines.length - 1),
+      };
     }
     if (files?.error && !(files.available && rows.length > 0))
       lines.push("", `! ${files.error}`);
@@ -1056,146 +1132,6 @@ export class BrokerDeckApp implements Component {
       ],
       width,
     );
-  }
-  private renderBoardProvider(
-    lines: string[],
-    width: number,
-    state: DeckState,
-  ): void {
-    const boardProjection = currentProviderProjection(
-      state,
-      this.#targetPaneId,
-    )?.agentBoard;
-    const presentation = selectBoardPresentation(
-      boardProjection,
-      this.#boardTab,
-      this.#boardSelection,
-    );
-    const counts = presentation.tabCounts;
-    lines.push(
-      "AGENT BOARD",
-      boardProjection?.available
-        ? `● READY  ${Number(counts.inbox ?? boardProjection.openCount ?? 0)} questions need attention`
-        : "○ CONNECTING  Waiting for the active Pi Agent Board provider",
-    );
-    this.addControlRow(
-      lines,
-      (["inbox", "updates", "decisions", "history"] as const).map(
-        (tabName) => ({
-          id: `board:tab:${tabName}`,
-          label: `${this.#boardTab === tabName ? "● " : ""}${this.title(tabName)} ${Number(counts[tabName] ?? 0)}`,
-          activate: () => {
-            this.#boardTab = tabName;
-            this.#boardSelection = undefined;
-          },
-        }),
-      ),
-      width,
-    );
-
-    const rows = presentation.rows;
-    const empty = presentation.empty;
-    if (rows.length === 0) {
-      lines.push(
-        boardProjection?.available
-          ? `✓ ${String(empty.title ?? "This section is clear.")}`
-          : "Waiting for provider data…",
-      );
-      if (typeof empty.detail === "string") lines.push(empty.detail);
-    }
-    for (const row of rows) {
-      const id = String(row.id ?? row.entityId ?? "");
-      const selected = id === presentation.selectedId;
-      const y = lines.length;
-      lines.push(
-        `${selected ? ">" : " "} [${String(row.statusLabel ?? row.state ?? "OPEN")}] ${String(row.displayId ?? id)}  ${String(row.title ?? row.question ?? "").slice(0, Math.max(20, width - 28))}`,
-      );
-      this.addHitBox(`board:row:${id}`, y, width, () => {
-        this.#boardSelection = id;
-      });
-    }
-
-    const selectedRow = presentation.selectedRow;
-    const detail = presentation.detail;
-    if (Object.keys(detail).length > 0)
-      lines.push("", ...this.renderBoardDetail(detail, width));
-
-    const question =
-      this.#boardTab === "inbox" ? this.selectedBoardQuestion() : undefined;
-    if (question && question.response.options.length > 0) {
-      lines.push("", "RESPONSE");
-      for (const option of question.response.options) {
-        const selected =
-          this.#boardSelections.get(question.questionId)?.has(option.id) ===
-          true;
-        const y = lines.length;
-        lines.push(
-          `${selected ? "[x]" : "[ ]"} ${option.label}${option.description ? ` — ${option.description}` : ""}`,
-        );
-        this.addHitBox(
-          `board:option:${option.id}`,
-          y,
-          width,
-          () => this.toggleBoardOption(question.questionId, option.id),
-          this.#providerPending.has("board-answer"),
-        );
-      }
-    }
-
-    const userAnswerable = presentation.userAnswerable;
-    const dismissible = presentation.dismissible;
-    const retryable = presentation.retryableDelivery;
-    const updateKind = presentation.updateKind;
-    if (selectedRow)
-      this.addControlRow(
-        lines,
-        [
-          {
-            id: "board:answer",
-            label: "Answer",
-            disabled:
-              !userAnswerable ||
-              !question ||
-              this.#providerPending.has("board-answer"),
-            activate: () =>
-              question?.response.kind === "text" ||
-              question?.response.kind.includes("_or_text")
-                ? this.beginInput("board-answer")
-                : this.submitBoardAnswer(),
-          },
-          {
-            id: "board:accept",
-            label: "Use recommendation",
-            disabled:
-              !userAnswerable ||
-              !question ||
-              (question.recommendedOptionIds.length === 0 &&
-                !question.recommendedText),
-            activate: () => void this.runBoard("accept-recommendation"),
-          },
-          {
-            id: "board:dismiss",
-            label: "Dismiss",
-            disabled: !dismissible,
-            activate: () => void this.runBoard("dismiss-question"),
-          },
-          {
-            id: "board:retry",
-            label: "Retry delivery",
-            disabled: !retryable,
-            activate: () => void this.runBoard("retry-delivery"),
-          },
-          {
-            id: "board:archive",
-            label: "Archive",
-            disabled:
-              this.#boardTab !== "updates" ||
-              !["completed", "failed"].includes(updateKind),
-            activate: () => void this.runBoard("archive-update"),
-          },
-        ],
-        width,
-      );
   }
   private renderBoardDetail(
     detail: Record<string, unknown>,
@@ -1313,7 +1249,7 @@ export class BrokerDeckApp implements Component {
           ? {
               answerId,
               outcome: "applied",
-              summary: "Acknowledged from Pi Herd Deck.",
+              summary: "Acknowledged from Agent Board.",
             }
           : action === "retry-delivery"
             ? {
@@ -1330,7 +1266,7 @@ export class BrokerDeckApp implements Component {
         agent,
         boardAction: { action, fields },
       } as never);
-      this.#message = `Agent Board ${action} succeeded.`;
+      this.#message = `Signals ${action} succeeded.`;
     } catch (error) {
       this.#message = error instanceof Error ? error.message : String(error);
     }
@@ -1358,6 +1294,13 @@ export class BrokerDeckApp implements Component {
   private selectedAgent(): Agent | undefined {
     return this.agentPresentation().selected;
   }
+  private selected<T extends { id: string }>(
+    items: T[],
+    id: string | undefined,
+  ): T | undefined {
+    return effectiveSelection(items, id);
+  }
+
   private selectedGroup(
     state: DeckState = this.#client.store.state,
   ): DeckGroup | undefined {
@@ -1375,11 +1318,6 @@ export class BrokerDeckApp implements Component {
     )?.todo.items ?? [],
   ) {
     return this.selected(items, this.#selectedProviderTodo);
-  }
-  private selectedResult(
-    state: DeckState = this.#client.store.state,
-  ): DeckResult | undefined {
-    return this.selected([...state.results.values()], this.#selectedResult);
   }
   private selectedQuestion(): DeckQuestion | undefined {
     return this.selected(
@@ -1478,91 +1416,57 @@ export class BrokerDeckApp implements Component {
     };
   }
 
-  private todoAvailable(): boolean {
-    return (
-      currentProviderProjection(this.#client.store.state, this.#targetPaneId)
-        ?.todo.available === true
-    );
-  }
-
-  private toggleBoardOption(questionId: string, optionId: string): void {
-    const question = this.selectedBoardQuestion();
-    if (!question || this.#providerPending.has("board-answer")) return;
-    const set = this.#boardSelections.get(questionId) ?? new Set<string>();
-    if (
-      question.response.kind === "single" ||
-      question.response.kind === "single_or_text"
-    )
-      set.clear();
-    if (set.has(optionId)) set.delete(optionId);
-    else set.add(optionId);
-    this.#boardSelections.set(questionId, set);
-    this.#requestRender();
-  }
-
-  private submitBoardAnswer(): void {
-    const question = this.selectedBoardQuestion();
-    if (!question) return;
-    const selected = [
-      ...(this.#boardSelections.get(question.questionId) ?? []),
-    ];
-    if (selected.length === 0) {
-      this.#message = "Choose an Agent Board option or enter text.";
-      this.#requestRender();
-      return;
-    }
-    const kind = question.response.kind;
-    const value =
-      kind === "multiple" || kind === "multiple_or_text"
-        ? { kind: "multiple", optionIds: selected }
-        : { kind: "single", optionId: selected[0] };
-    this.runProvider("agentBoardAnswer", "board-answer", value);
-  }
-  private selected<T extends { id: string }>(
-    items: T[],
-    id: string | undefined,
-  ): T | undefined {
-    return effectiveSelection(items, id);
-  }
-
   private move(delta: number): void {
     const state = this.#client.store.state;
-    if (this.#tab === "agents") {
+    if (this.#settingsOpen) {
+      this.#settingsScroll = Math.max(
+        0,
+        Math.min(
+          Math.max(0, (this.#capabilities?.models.length ?? 0) - 1),
+          this.#settingsScroll + delta,
+        ),
+      );
+    } else if (this.#tab === "agents") {
       const moved = moveAgentListSelection(
         this.agentPresentation(state),
         delta,
       );
       this.#selectedAgent = moved.selectedId;
       this.#agentPage = moved.page;
-    } else if (this.#tab === "work" && this.#workView === "groups") {
-      const scoped = this.scopedWorkState(state);
-      this.#selectedGroup = this.nextId(
-        [...scoped.groups.values()],
-        this.selectedGroup(scoped)?.id,
-        delta,
+    } else if (this.#tab === "board") {
+      const model = selectUnifiedBoardPresentation(
+        state,
+        this.#targetPaneId,
+        this.#unifiedBoardSelection,
       );
-    } else if (this.#tab === "work" && this.#workView === "todo") {
-      const items =
-        currentProviderProjection(state, this.#targetPaneId)?.todo.items ?? [];
-      this.#selectedProviderTodo = this.nextId(
-        items,
-        this.selectedProviderTodo(items)?.id,
-        delta,
+      const items = [...model.attention, ...model.work];
+      if (items.length > 0) {
+        const index = Math.max(
+          0,
+          items.findIndex((item) => item.id === model.selected?.id),
+        );
+        this.selectBoardItem(
+          items[(index + delta + items.length) % items.length]!,
+        );
+      }
+    } else if (this.#tab === "activity") {
+      const model = selectActivityPresentation(
+        state,
+        this.#targetPaneId,
+        this.#activitySelection,
       );
-    } else if (this.#tab === "work" && this.#workView === "tasks")
-      this.#selectedTask = this.nextId(
-        [...this.scopedWorkState(state).tasks.values()],
-        this.selectedTask(this.scopedWorkState(state))?.id,
-        delta,
-      );
-    else if (this.#tab === "work" && this.#workView === "results") {
-      const scoped = this.scopedWorkState(state);
-      this.#selectedResult = this.nextId(
-        [...scoped.results.values()],
-        this.selectedResult(scoped)?.id,
-        delta,
-      );
-    } else if (this.#tab === "files") {
+      if (model.items.length > 0) {
+        const index = Math.max(
+          0,
+          model.items.findIndex((item) => item.id === model.selected?.id),
+        );
+        this.selectActivityItem(
+          model.items[
+            (index + delta + model.items.length) % model.items.length
+          ]!,
+        );
+      }
+    } else {
       const items = this.visibleFileRows(state);
       if (items.length > 0) {
         const index = items.findIndex(
@@ -1574,60 +1478,21 @@ export class BrokerDeckApp implements Component {
             : Math.max(0, Math.min(items.length - 1, index + delta));
         this.#filesPath = String(items[next]?.path ?? "");
       }
-    } else if (this.#tab === "inbox") {
-      const projection = currentProviderProjection(
-        state,
-        this.#targetPaneId,
-      )?.agentBoard;
-      const presentation = selectBoardPresentation(
-        projection,
-        this.#boardTab,
-        this.#boardSelection,
-      );
-      const rows = presentation.rows;
-      if (rows.length > 0) {
-        const index = rows.findIndex(
-          (row) =>
-            String(row.id ?? row.entityId ?? "") === presentation.selectedId,
-        );
-        const next =
-          rows[index < 0 ? 0 : (index + delta + rows.length) % rows.length];
-        this.#boardSelection = String(next?.id ?? next?.entityId ?? "");
-      }
-    } else if (this.#tab === "more")
-      this.#settingsScroll = Math.max(
-        0,
-        Math.min(
-          Math.max(0, (this.#capabilities?.models.length ?? 0) - 1),
-          this.#settingsScroll + delta,
-        ),
-      );
+    }
     this.#closeConfirmation = undefined;
-  }
-
-  private nextId<T extends { id: string }>(
-    items: T[],
-    current: string | undefined,
-    delta: number,
-  ): string | undefined {
-    const sorted = items.sort((a, b) => a.id.localeCompare(b.id));
-    if (sorted.length === 0) return undefined;
-    const found = sorted.findIndex((item) => item.id === current);
-    const index = found < 0 ? 0 : found;
-    return sorted[(index + delta + sorted.length) % sorted.length]?.id;
   }
 
   private target() {
     const agent =
-      this.#tab === "work" || this.#tab === "files"
+      this.#tab === "board" || this.#tab === "files"
         ? this.adoptedRootAgent()
         : (this.selectedAgent() ?? this.adoptedRootAgent());
     const scoped = this.scopedWorkState(this.#client.store.state);
     const task =
-      this.#tab === "work" ? this.selectedTask(scoped) : this.selectedTask();
+      this.#tab === "board" ? this.selectedTask(scoped) : this.selectedTask();
     const question = this.selectedQuestion();
     const group =
-      this.#tab === "work" ? this.selectedGroup(scoped) : this.selectedGroup();
+      this.#tab === "board" ? this.selectedGroup(scoped) : this.selectedGroup();
     return {
       ...(agent
         ? {
@@ -1700,7 +1565,7 @@ export class BrokerDeckApp implements Component {
   private beginInput(mode: InputMode): void {
     const target = this.target() as import("./actions.js").ActionTarget;
     if (mode === "board-answer" && !this.selectedBoardQuestion()) {
-      this.#message = "Select an Agent Board question first.";
+      this.#message = "Select a Signals question first.";
       return;
     }
     if (mode === "create" && !target.agent) {

@@ -13,9 +13,15 @@ import {
   taskRowDependency,
 } from "./selections.js";
 import { selectBoardPresentation } from "./board-presentation.js";
+import {
+  selectActivityPresentation,
+  selectUnifiedBoardPresentation,
+  type AgentBoardTab,
+} from "./product-presentation.js";
 
-export type VisibleDeckTab =
-  "home" | "work" | "files" | "agents" | "inbox" | "more";
+export type { AgentBoardTab } from "./product-presentation.js";
+/** Legacy context names remain accepted by pure dependency tests only. */
+export type VisibleDeckTab = AgentBoardTab | "home" | "work" | "inbox" | "more";
 export type VisibleWorkView =
   "todo" | "tasks" | "results" | "groups" | "history";
 export type VisibleAgentFilter = "active" | "idle" | "history";
@@ -268,6 +274,81 @@ function homeModel(state: DeckState, context: VisibleSurfaceContext): unknown {
   };
 }
 
+function boardItemRow(item: {
+  kind: string;
+  id: string;
+  title: string;
+  status: string;
+  waitReason?: string;
+}) {
+  return {
+    kind: item.kind,
+    id: item.id,
+    title: item.title,
+    status: item.status,
+    ...(item.waitReason ? { waitReason: item.waitReason } : {}),
+  };
+}
+
+function unifiedBoardModel(
+  state: DeckState,
+  context: VisibleSurfaceContext,
+): unknown {
+  const presentation = selectUnifiedBoardPresentation(
+    state,
+    context.targetPaneId,
+    context.boardSelectionId,
+  );
+  const selected = presentation.selected;
+  let detail: unknown;
+  if (selected?.kind === "task")
+    detail = selectedRelated(
+      selectAdoptedScope(state, context.targetPaneId).state,
+      selected.source.id,
+    );
+  else if (selected?.kind.startsWith("signal-")) {
+    const tab =
+      selected.kind === "signal-question"
+        ? "inbox"
+        : selected.kind === "signal-update"
+          ? "updates"
+          : "decisions";
+    detail = selectBoardPresentation(
+      presentation.provider?.agentBoard,
+      tab,
+      selected.id.slice(selected.id.indexOf(":") + 1),
+    ).detail;
+  } else if (selected) detail = brokerEntity(selected.source);
+  return {
+    work: presentation.work.map(boardItemRow),
+    attention: presentation.attention.map(boardItemRow),
+    selected: selected ? boardItemRow(selected) : undefined,
+    detail,
+    counts: presentation.counts,
+  };
+}
+
+function activityModel(
+  state: DeckState,
+  context: VisibleSurfaceContext,
+): unknown {
+  const presentation = selectActivityPresentation(
+    state,
+    context.targetPaneId,
+    context.boardSelectionId,
+  );
+  return {
+    items: presentation.items.map(boardItemRow),
+    selected: presentation.selected
+      ? {
+          ...boardItemRow(presentation.selected),
+          detail: brokerEntity(presentation.selected.source),
+        }
+      : undefined,
+    counts: presentation.counts,
+  };
+}
+
 export function visibleSurfaceModel(
   state: DeckState,
   context: VisibleSurfaceContext,
@@ -283,8 +364,11 @@ export function visibleSurfaceModel(
       files: filesAuthority.provider?.files,
     };
   }
-  if (context.tab === "work") return workModel(state, context);
+  if (context.tab === "board") return unifiedBoardModel(state, context);
+  if (context.tab === "activity") return activityModel(state, context);
   if (context.tab === "agents") return agentsModel(state, context);
+  // Legacy pure contexts keep their old behavior for one compatibility cycle.
+  if (context.tab === "work") return workModel(state, context);
   if (context.tab === "inbox") return boardModel(state, context);
   if (context.tab === "home") return homeModel(state, context);
   return {};

@@ -189,7 +189,7 @@ test("unified views expose current work, files, and separate question semantics"
   assert.match(home, /CURRENT SCOPE/);
   assert.match(home, /ACTIVE WORK/);
   assert.match(home, /orchestrator question/);
-  assert.match(home, /Providers · Agent Board 1 pending · Todo 1\/2 done/);
+  assert.match(home, /Providers · Signals 1 pending · Todo 1\/2 done/);
   assert.doesNotMatch(home, /Historical noise/);
   assert.match(home, /Scope totals · 1 active · 0 idle retained · 0 history/);
   assert.match(
@@ -366,7 +366,7 @@ test("switching tabs cancels the active DEFAULT input", () => {
     requestRender: () => undefined,
     getHeight: () => 40,
   });
-  app.handleInput("6");
+  app.handleInput(",");
   app.handleInput("d");
   assert.match(app.render(120).join("\\n"), /DEFAULT:/);
   app.handleInput("1");
