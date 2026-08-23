@@ -39,6 +39,8 @@ import {
   type AgentBoardTab,
   type BoardFilter,
   type BoardItem,
+  normalizeBrokerQuestion,
+  normalizeSignalsQuestion,
 } from "./product-presentation.js";
 import {
   selectAdoptedRootAgent,
@@ -53,6 +55,23 @@ import {
 import { selectBoardPresentation } from "./board-presentation.js";
 import { normalizeFilesPresentation } from "./files-screen.js";
 import { renderBoardScreen } from "./board-screen.js";
+import {
+  boundedOverlayText,
+  noOverlay,
+  questionResponseValid,
+  toggleQuestionOption,
+  applyQuestionRecommendation,
+  type OverlayState,
+  type TextInputPurpose,
+} from "./overlay-screen.js";
+import { renderSettingsScreen } from "./screens/settings-screen.js";
+import { renderHelpScreen } from "./screens/help-screen.js";
+import { renderAgentMoreScreen } from "./screens/agent-more-screen.js";
+import { renderConfirmationScreen } from "./screens/confirmation-screen.js";
+import { renderTextInputScreen } from "./screens/text-input-screen.js";
+import { renderQuestionResponseScreen } from "./screens/question-response-screen.js";
+import { renderHeader, adoptedScopeLabel } from "./shell/header.js";
+import type { RenderedSurface } from "./screen-types.js";
 
 export interface BrokerDeckAppOptions {
   client: BrokerClient;
@@ -68,24 +87,6 @@ export interface BrokerDeckAppOptions {
 }
 
 type DeckTab = AgentBoardTab;
-interface ConfirmationState {
-  action: "cancelTask" | "groupStop" | "groupClose" | "close" | "stop";
-  targetId: string;
-  summary: string;
-  generation?: number;
-}
-
-type InputMode =
-  | "prompt"
-  | "ask"
-  | "steer"
-  | "followUp"
-  | "answer"
-  | "board-answer"
-  | "create"
-  | "default"
-  | "files-filter"
-  | "model-filter";
 
 const NAV_TABS: readonly DeckTab[] = ["board", "files", "agents", "activity"];
 
@@ -120,13 +121,10 @@ export class BrokerDeckApp implements Component {
   #modelFilter = "";
   #providerPending = new Set<string>();
   #message = "";
-  #inputMode: InputMode | undefined;
-  #input = "";
-  #confirmation: ConfirmationState | undefined;
+  #overlay: OverlayState = noOverlay();
   #capabilities: PiCapabilitySnapshot | undefined;
   #modelPolicy: ModelPolicyConfig | undefined;
   #autoCloseCompletedTemporary = false;
-  #settingsScroll = 0;
   #filesFilter = "";
   #filesHidden = false;
   #filesPath = "";
@@ -145,9 +143,6 @@ export class BrokerDeckApp implements Component {
   #activitySelection: string | undefined;
   #activityFilter: ActivityFilter = "all";
   #activityScroll = 0;
-  #settingsOpen = false;
-  #helpOpen = false;
-  #agentMoreOpen = false;
   #renderSignature = "";
 
   constructor(options: BrokerDeckAppOptions) {
@@ -198,48 +193,28 @@ export class BrokerDeckApp implements Component {
   render(width: number): string[] {
     const safeWidth = Math.max(1, width);
     const state = this.#client.store.state;
-    this.#hitBoxes = [];
-    const lines = [
-      `AGENT BOARD  ${this.#status === "connected" ? "● ONLINE" : "○ OFFLINE"}`,
-    ];
-    const tabNames: Record<DeckTab, string> = {
-      board: "Board",
-      files: "Files",
-      agents: "Agents",
-      activity: "Activity",
-    };
-    this.addControlRow(
-      lines,
-      [
-        ...NAV_TABS.map((tab, index) => ({
-          id: `tab:${tab}`,
-          label: `${this.#tab === tab ? tabNames[tab].toUpperCase() : tabNames[tab]} ${index + 1}`,
-          activate: () => this.selectTab(tab),
-        })),
-        {
-          id: "header:settings",
-          label: "Settings ,",
-          activate: () => this.toggleSettings(),
-        },
-        {
-          id: "header:help",
-          label: "Help ?",
-          activate: () => this.toggleHelp(),
-        },
-      ],
+    const overlay = this.#overlay;
+    const header = renderHeader(
       safeWidth,
+      this.headerPresentation(state),
+      overlay.kind === "none"
+        ? {
+            selectTab: (tab) => this.selectTab(tab),
+            toggleSettings: () => this.toggleSettings(),
+            toggleHelp: () => this.toggleHelp(),
+          }
+        : undefined,
     );
-    lines.push(
+    this.#hitBoxes = [...header.hitBoxes];
+    const lines = [
+      ...header.lines,
       "────────────────────────────────────────────────────────────────────────────────",
       "↑↓ move  •  click controls  •  r refresh  •  , settings  •  ? help  •  q close",
       ...(this.#message ? [`◆ ${this.#message}`] : []),
       "",
-    );
-
-    if (this.#confirmation) this.renderConfirmationSurface(lines, safeWidth);
-    else if (this.#settingsOpen) this.renderSettingsSurface(lines, safeWidth);
-    else if (this.#helpOpen) this.renderHelpSurface(lines);
-    else if (this.#agentMoreOpen) this.renderAgentMoreSurface(lines, safeWidth);
+    ];
+    if (overlay.kind !== "none")
+      this.appendSurface(lines, this.renderOverlay(overlay, safeWidth));
     else if (this.#tab === "board")
       this.renderUnifiedBoard(lines, safeWidth, state);
     else if (this.#tab === "files")
@@ -247,21 +222,11 @@ export class BrokerDeckApp implements Component {
     else if (this.#tab === "agents")
       this.renderAgentsSurface(lines, safeWidth, state);
     else this.renderActivitySurface(lines, safeWidth, state);
-
-    if (this.#inputMode) {
-      lines.push(`${this.#inputMode.toUpperCase()}: ${this.#input}█`);
-      if (this.#inputMode === "create") {
-        lines.push(
-          "Format: title|objective|profile|provider|model|thinking|lifecycle.",
-        );
-        lines.push("Lifecycle is temporary, reusable, retained, or pinned.");
-      } else if (this.#inputMode === "default")
-        lines.push(
-          "Format: global||provider|model|thinking, role|profile|provider|model|thinking, or project|cwd|provider|model|thinking.",
-        );
-      lines.push("Enter submits. Escape cancels. Backspace edits.");
-    }
-    if (this.#tab === "board" && this.#client.store.notifications.length > 0)
+    if (
+      overlay.kind === "none" &&
+      this.#tab === "board" &&
+      this.#client.store.notifications.length > 0
+    )
       lines.push(
         "",
         ...renderNotifications(
@@ -271,43 +236,20 @@ export class BrokerDeckApp implements Component {
       );
     const height = Math.max(1, this.#getHeight());
     while (lines.length < height) lines.push("");
-    const laidOut = lines
-      .slice(0, height)
-      .map((line) =>
-        visibleWidth(line) <= safeWidth
-          ? line
-          : `${truncateToWidth(line, Math.max(0, safeWidth - 1))}…`,
-      );
-    return styleLines(laidOut);
+    return styleLines(
+      lines
+        .slice(0, height)
+        .map((line) =>
+          visibleWidth(line) <= safeWidth
+            ? line
+            : `${truncateToWidth(line, Math.max(0, safeWidth - 1))}…`,
+        ),
+    );
   }
 
   handleInput(data: string): void {
-    if (this.#inputMode) {
-      this.handleEditorInput(data);
-      this.#requestRender();
-      return;
-    }
-    if (this.#confirmation) {
-      if (data === "\u001b" || data === "n") this.#confirmation = undefined;
-      else if (data === "y" || data === "\r" || data === "\n")
-        void this.submitConfirmation();
-      this.syncVisibleSignature();
-      this.#requestRender();
-      return;
-    }
-    if (this.#settingsOpen || this.#helpOpen || this.#agentMoreOpen) {
-      if (
-        data === "\u001b" ||
-        (this.#settingsOpen && data === ",") ||
-        (this.#helpOpen && data === "?")
-      ) {
-        this.#settingsOpen = false;
-        this.#helpOpen = false;
-        this.#agentMoreOpen = false;
-      } else if (this.#settingsOpen && data === "/")
-        this.beginInput("model-filter");
-      else if (this.#settingsOpen && data === "d") this.beginInput("default");
-      else if (this.#settingsOpen && data === "o") void this.toggleAutoClose();
+    if (this.#overlay.kind !== "none") {
+      this.handleOverlayInput(data);
       this.syncVisibleSignature();
       this.#requestRender();
       return;
@@ -343,16 +285,16 @@ export class BrokerDeckApp implements Component {
     else if (data === "p" && this.#tab === "agents") this.beginInput("prompt");
     else if (data === "a" && this.#tab === "agents") this.beginInput("ask");
     else if (data === "a" && this.#tab === "board")
-      this.beginInput(this.selectedBoardQuestion() ? "board-answer" : "answer");
+      this.beginQuestionResponse(
+        this.selectedBoardQuestion() ? "board-answer" : "answer",
+      );
     else if (data === "y" && this.#tab === "board")
       void this.runBoard("accept-recommendation");
     else if (data === "i" && this.#tab === "agents") void this.run("interrupt");
     else if (data === "s" && this.#tab === "agents") this.confirmAgentStop();
     else if (data === "x" && this.#tab === "agents") this.confirmClose();
-    else if (data === "m" && this.#tab === "agents") {
-      this.#agentMoreOpen = true;
-      this.#tracker.reset();
-    } else if (data === "t" && this.#tab === "agents") this.cycleThinking();
+    else if (data === "m" && this.#tab === "agents") this.openAgentMore();
+    else if (data === "t" && this.#tab === "agents") this.cycleThinking();
     else if (data === "\u001b[A" || data === "k") this.move(-1);
     else if (data === "\u001b[B" || data === "j") this.move(1);
     this.syncVisibleSignature();
@@ -360,38 +302,28 @@ export class BrokerDeckApp implements Component {
   }
 
   handleMouse(event: TuiMouseEvent): boolean {
-    if (this.#confirmation) {
-      if (event.type === "wheel") return true;
-      const handled = this.#tracker.handle(
-        event,
-        this.#hitBoxes.filter((box) => box.id.startsWith("confirm:")),
-      );
-      if (handled) this.#requestRender();
-      return true;
-    }
-    if (this.#settingsOpen || this.#helpOpen || this.#agentMoreOpen) {
+    if (this.#overlay.kind !== "none") {
       if (event.type === "wheel") {
-        if (this.#settingsOpen)
-          this.#settingsScroll = Math.max(
+        this.#overlay = {
+          ...this.#overlay,
+          scroll: Math.max(
             0,
-            this.#settingsScroll + (event.direction === "down" ? 1 : -1),
-          );
+            (this.#overlay.scroll ?? 0) + (event.direction === "down" ? 1 : -1),
+          ),
+        };
         this.#requestRender();
         return true;
       }
-      const prefix = this.#settingsOpen
-        ? "settings:"
-        : this.#helpOpen
-          ? "help:"
-          : "agent-more:";
-      const overlayBoxes = this.#hitBoxes.filter((box) =>
-        box.id.startsWith(prefix),
-      );
-      const handled = this.#tracker.handle(event, overlayBoxes);
+      const handled = this.#tracker.handle(event, this.#hitBoxes);
+      if (
+        !handled &&
+        event.type === "release" &&
+        ["settings", "help", "agent-more"].includes(this.#overlay.kind)
+      )
+        this.closeOverlay();
       if (handled) this.#requestRender();
       return true;
     }
-    if (this.#inputMode) return true;
     if (event.type === "wheel") {
       const delta = event.direction === "down" ? 1 : -1;
       if (
@@ -436,6 +368,7 @@ export class BrokerDeckApp implements Component {
   }
 
   private visibleSignature(state = this.#client.store.state): string {
+    const overlay = this.#overlay;
     return visibleSurfaceSignature(state, {
       tab: this.#tab,
       ...(this.#targetPaneId ? { targetPaneId: this.#targetPaneId } : {}),
@@ -456,37 +389,9 @@ export class BrokerDeckApp implements Component {
           ? { boardSelectionId: this.#unifiedBoardSelection }
           : {}),
       notifications: this.#client.store.notifications,
-      ...(this.#confirmation
-        ? {
-            overlay: "confirm" as const,
-            overlayGuard: this.#confirmation,
-          }
-        : this.#inputMode
-          ? {
-              overlay:
-                this.#inputMode === "answer" ||
-                this.#inputMode === "board-answer"
-                  ? ("question-response" as const)
-                  : ("text-input" as const),
-              overlayGuard: {
-                mode: this.#inputMode,
-                selectedQuestion: this.#selectedQuestion,
-                selectedBoardQuestion: this.#boardSelection,
-              },
-            }
-          : this.#settingsOpen
-            ? { overlay: "settings" as const }
-            : this.#helpOpen
-              ? { overlay: "help" as const }
-              : this.#agentMoreOpen
-                ? {
-                    overlay: "agent-more" as const,
-                    overlayGuard: {
-                      agentId: this.#selectedAgent,
-                      generation: this.selectedAgent()?.generation,
-                    },
-                  }
-                : {}),
+      ...(overlay.kind !== "none"
+        ? { overlay: overlay.kind, overlayGuard: overlay }
+        : {}),
     });
   }
 
@@ -495,123 +400,459 @@ export class BrokerDeckApp implements Component {
   }
 
   private selectTab(tab: DeckTab): void {
-    this.#inputMode = undefined;
-    this.#input = "";
-    this.#settingsOpen = false;
-    this.#helpOpen = false;
-    this.#agentMoreOpen = false;
     this.#tab = tab;
-    this.#confirmation = undefined;
+    this.closeOverlay();
     this.#tracker.reset();
     this.syncVisibleSignature();
     this.#requestRender();
   }
 
   private toggleSettings(): void {
-    this.#settingsOpen = !this.#settingsOpen;
-    this.#helpOpen = false;
-    this.#settingsScroll = 0;
-    if (this.#settingsOpen) void this.loadSettings();
+    if (this.#overlay.kind === "settings") this.closeOverlay();
+    else {
+      this.#overlay = {
+        kind: "settings",
+        focus: "primary",
+        scroll: 0,
+        pending: false,
+      };
+      void this.loadSettings();
+    }
     this.syncVisibleSignature();
     this.#requestRender();
   }
 
   private toggleHelp(): void {
-    this.#helpOpen = !this.#helpOpen;
-    this.#settingsOpen = false;
+    if (this.#overlay.kind === "help") this.closeOverlay();
+    else
+      this.#overlay = {
+        kind: "help",
+        focus: "close",
+        scroll: 0,
+        pending: false,
+      };
     this.syncVisibleSignature();
     this.#requestRender();
   }
 
-  private renderSettingsSurface(lines: string[], width: number): void {
-    lines.push("SETTINGS  Escape or , closes", "");
-    this.addControlRow(
-      lines,
-      [
-        {
-          id: "settings:default",
-          label: "Set model default",
-          activate: () => this.beginInput("default"),
-        },
-        {
-          id: "settings:auto-close",
-          label: "Toggle auto-close",
-          activate: () => void this.toggleAutoClose(),
-        },
-        {
-          id: "settings:close",
-          label: "Close",
-          activate: () => this.toggleSettings(),
-        },
-      ],
-      width,
-    );
-    lines.push("", ...this.renderSettings(width));
+  private closeOverlay(): void {
+    this.#overlay = noOverlay();
+    this.#tracker.reset();
   }
 
-  private renderHelpSurface(lines: string[]): void {
-    const y = lines.length;
-    lines.push(
-      "HELP  Escape or ? closes",
-      "1 Board  2 Files  3 Agents  4 Activity",
-      "Board combines current work, questions, Signals updates, and recommendations.",
-      "Files: row previews; caret expands; checkbox selects; each pane scrolls independently.",
-      "Agents: f focus, p prompt, a ask, i interrupt, s stop, x close.",
-      "Activity contains results, decisions, updates, groups, tasks, and lifecycle history.",
-    );
-    this.addHitBox("help:close", y, 4, () => this.toggleHelp(), false, 0);
+  private openAgentMore(): void {
+    const agent = this.selectedAgent();
+    if (!agent) return;
+    this.#overlay = {
+      kind: "agent-more",
+      guard: { agentId: agent.id, generation: agent.generation },
+      focus: "primary",
+      scroll: 0,
+      pending: false,
+    };
+    this.#tracker.reset();
   }
 
-  private renderConfirmationSurface(lines: string[], width: number): void {
-    const confirmation = this.#confirmation;
-    if (!confirmation) return;
-    lines.push(
-      "CONFIRMATION",
-      confirmation.summary,
-      "Target: " + confirmation.targetId,
-      "",
+  private headerPresentation(state: DeckState) {
+    const scope = selectAdoptedScope(state, this.#targetPaneId);
+    const root = this.adoptedRootAgent();
+    const model = selectUnifiedBoardPresentation(
+      state,
+      this.#targetPaneId,
+      this.#unifiedBoardSelection,
+      "attention",
     );
-    this.addControlRow(
-      lines,
-      [
-        {
-          id: "confirm:cancel",
-          label: "Cancel",
-          activate: () => {
-            this.#confirmation = undefined;
-            this.#tracker.reset();
+    return {
+      productName: "AGENT BOARD" as const,
+      scopeLabel: adoptedScopeLabel(
+        root?.displayName ?? root?.herdrName,
+        scope.state.agents.size,
+      ),
+      attentionCount: model.counts.attention,
+      online: this.#status === "connected",
+      selectedTab: this.#tab,
+    };
+  }
+
+  private appendSurface(lines: string[], surface: RenderedSurface): void {
+    const yOffset = lines.length;
+    lines.push(...surface.lines);
+    for (const box of surface.hitBoxes)
+      this.#hitBoxes.push({ ...box, y: box.y + yOffset });
+  }
+
+  private renderOverlay(
+    overlay: Exclude<OverlayState, { kind: "none" }>,
+    width: number,
+  ): RenderedSurface {
+    switch (overlay.kind) {
+      case "settings":
+        return renderSettingsScreen({
+          width,
+          scroll: overlay.scroll ?? 0,
+          content: this.renderSettings(width),
+          onDefault: () => this.beginInput("default"),
+          onAutoClose: () => void this.toggleAutoClose(),
+          onClose: () => this.closeOverlay(),
+        });
+      case "help":
+        return renderHelpScreen(width, () => this.closeOverlay());
+      case "agent-more":
+        return renderAgentMoreScreen({
+          width,
+          agent: this.selectedAgent(),
+          onCompact: () => void this.run("compact"),
+          onRestart: () => void this.run("restart"),
+          onCloseAgent: () => this.confirmClose(),
+          onWorktree: () => void this.run("openWorktree"),
+          onCopy: () => void this.copySelectedId(),
+          onModel: () => this.cycleModel(),
+          onThinking: () => this.cycleThinking(),
+          onCreate: () => this.beginInput("create"),
+          onClose: () => this.closeOverlay(),
+        });
+      case "confirm":
+        return renderConfirmationScreen(
+          width,
+          overlay,
+          () => this.closeOverlay(),
+          () => void this.submitConfirmation(),
+        );
+      case "text-input":
+        return renderTextInputScreen({
+          width,
+          state: overlay,
+          onCancel: () => this.closeOverlay(),
+          onSubmit: () => void this.submitTextInput(),
+        });
+      case "question-response":
+        return renderQuestionResponseScreen({
+          width,
+          state: overlay,
+          onToggle: (id) => {
+            this.#overlay = toggleQuestionOption(overlay, id);
           },
-        },
-        {
-          id: "confirm:accept",
-          label: "Confirm",
-          activate: () => void this.submitConfirmation(),
-        },
-      ],
-      width,
-    );
+          onRecommendation: () => {
+            this.#overlay = applyQuestionRecommendation(overlay);
+          },
+          onSubmit: () => void this.submitQuestionResponse(),
+          onCancel: () => this.closeOverlay(),
+        });
+    }
+  }
+
+  private handleOverlayInput(data: string): void {
+    const overlay = this.#overlay;
+    if (data === "\u001b") {
+      if (
+        overlay.kind === "text-input" &&
+        (overlay.purpose === "default" || overlay.purpose === "model-filter")
+      )
+        this.#overlay = {
+          kind: "settings",
+          focus: "primary",
+          scroll: 0,
+          pending: false,
+        };
+      else this.closeOverlay();
+      return;
+    }
+    if (overlay.kind === "settings") {
+      if (data === ",") this.closeOverlay();
+      else if (data === "/") this.beginInput("model-filter");
+      else if (data === "d") this.beginInput("default");
+      else if (data === "o") void this.toggleAutoClose();
+      else if (
+        data === "\u001b[A" ||
+        data === "k" ||
+        data === "\u001b[B" ||
+        data === "j"
+      )
+        this.scrollOverlay(data === "\u001b[A" || data === "k" ? -1 : 1);
+      return;
+    }
+    if (overlay.kind === "help") {
+      if (data === "?") this.closeOverlay();
+      return;
+    }
+    if (overlay.kind === "confirm") {
+      if (data === "n") this.closeOverlay();
+      else if (data === "y" || data === "\r" || data === "\n")
+        void this.submitConfirmation();
+      return;
+    }
+    if (overlay.kind === "agent-more") {
+      if (data === "m") this.closeOverlay();
+      else if (data === "c") void this.run("compact");
+      else if (data === "r") void this.run("restart");
+      else if (data === "x") this.confirmClose();
+      else if (data === "t") this.cycleThinking();
+      else if (data === "k") this.cycleModel();
+      return;
+    }
+    if (overlay.kind === "text-input") {
+      this.handleTextInput(data);
+      return;
+    }
+    if (overlay.kind === "question-response") {
+      if (data === "y") this.#overlay = applyQuestionRecommendation(overlay);
+      else if (data >= "1" && data <= "9") {
+        const option = overlay.question.options[Number(data) - 1];
+        if (option) this.#overlay = toggleQuestionOption(overlay, option.id);
+      } else if (data === "\r" || data === "\n")
+        void this.submitQuestionResponse();
+      else if (
+        (data === "\u007f" || data === "\b") &&
+        overlay.question.allowFreeform
+      )
+        this.#overlay = {
+          ...overlay,
+          text: overlay.text.slice(0, -1),
+          cursor: Math.max(0, (overlay.cursor ?? overlay.text.length) - 1),
+        };
+      else if (
+        data.length > 0 &&
+        !data.includes("\u001b") &&
+        [...data].every((c) => c.codePointAt(0)! >= 0x20) &&
+        overlay.question.allowFreeform
+      ) {
+        const text = boundedOverlayText(`${overlay.text}${data}`);
+        this.#overlay = { ...overlay, text, cursor: text.length };
+      }
+    }
+  }
+
+  private scrollOverlay(delta: number): void {
+    if (this.#overlay.kind === "none") return;
+    this.#overlay = {
+      ...this.#overlay,
+      scroll: Math.max(0, (this.#overlay.scroll ?? 0) + delta),
+    };
+  }
+
+  private beginInput(purpose: TextInputPurpose): void {
+    const target = this.target() as import("./actions.js").ActionTarget;
+    if (purpose === "create" && !target.agent) {
+      this.#message = "Select a parent agent first.";
+      return;
+    }
+    const denied =
+      purpose === "create" || purpose === "default"
+        ? undefined
+        : this.#actions.authorize(purpose as DeckAction, target);
+    if (denied) {
+      this.#message = denied;
+      return;
+    }
+    this.#message = "";
+    this.#overlay = {
+      kind: "text-input",
+      purpose,
+      guard: {
+        ...(target.agent
+          ? { agentId: target.agent.id, generation: target.agent.generation }
+          : {}),
+        ...(target.question ? { questionId: target.question.id } : {}),
+      },
+      value: "",
+      cursor: 0,
+      focus: "editor",
+      scroll: 0,
+      pending: false,
+    };
+    this.#tracker.reset();
+  }
+
+  private beginQuestionResponse(source: "answer" | "board-answer"): void {
+    const target = this.target() as import("./actions.js").ActionTarget;
+    if (source === "answer") {
+      const question = this.selectedQuestion();
+      if (!question) {
+        this.#message = "Select a question first.";
+        return;
+      }
+      const normalized = normalizeBrokerQuestion(question);
+      if (normalized.terminal) {
+        this.#message = "The selected question is terminal.";
+        return;
+      }
+      const denied = this.#actions.authorize("answer", target);
+      if (denied) {
+        this.#message = denied;
+        return;
+      }
+      this.#overlay = {
+        kind: "question-response",
+        question: normalized,
+        guard: { questionId: question.id },
+        selectedOptionIds: [],
+        text: "",
+        cursor: 0,
+        focus: "options",
+        scroll: 0,
+        pending: false,
+      };
+    } else {
+      const pending = this.selectedBoardQuestion();
+      if (!pending) {
+        this.#message = "Select a Signals question first.";
+        return;
+      }
+      const normalized = normalizeSignalsQuestion(pending);
+      this.#overlay = {
+        kind: "question-response",
+        question: normalized,
+        guard: { questionId: pending.questionId, revision: pending.revision },
+        selectedOptionIds: [],
+        text: "",
+        cursor: 0,
+        focus: "options",
+        scroll: 0,
+        pending: false,
+      };
+    }
+    this.#message = "";
+    this.#tracker.reset();
+  }
+
+  private handleTextInput(data: string): void {
+    const overlay = this.#overlay;
+    if (overlay.kind !== "text-input") return;
+    if (data === "\u007f" || data === "\b") {
+      this.#overlay = {
+        ...overlay,
+        value: overlay.value.slice(0, -1),
+        cursor: Math.max(0, (overlay.cursor ?? overlay.value.length) - 1),
+      };
+      return;
+    }
+    if (data === "\r" || data === "\n") {
+      void this.submitTextInput();
+      return;
+    }
+    if (
+      data.length > 0 &&
+      !data.includes("\u001b") &&
+      [...data].every((c) => c.codePointAt(0)! >= 0x20)
+    ) {
+      const value = boundedOverlayText(`${overlay.value}${data}`);
+      this.#overlay = { ...overlay, value, cursor: value.length };
+    }
+  }
+
+  private async submitTextInput(): Promise<void> {
+    const overlay = this.#overlay;
+    if (overlay.kind !== "text-input" || overlay.pending) return;
+    const value = overlay.value.trim();
+    if (!value) {
+      this.#overlay = { ...overlay, error: "Text is required." };
+      return;
+    }
+    if (overlay.purpose === "default" || overlay.purpose === "model-filter")
+      this.#overlay = {
+        kind: "settings",
+        focus: "primary",
+        scroll: 0,
+        pending: false,
+      };
+    else this.closeOverlay();
+    if (overlay.purpose === "create") void this.createAgent(value);
+    else if (overlay.purpose === "files-filter") {
+      this.#filesFilter = value;
+      this.#filesScroll = 0;
+      void this.runFiles("filter", value);
+    } else if (overlay.purpose === "model-filter") {
+      this.#modelFilter = value;
+      void this.loadSettings();
+    } else if (overlay.purpose === "default") void this.setDefault(value);
+    else void this.run(overlay.purpose, value);
+  }
+
+  private async submitQuestionResponse(): Promise<void> {
+    const overlay = this.#overlay;
+    if (overlay.kind !== "question-response" || overlay.pending) return;
+    if (overlay.question.terminal || !questionResponseValid(overlay)) {
+      this.#overlay = {
+        ...overlay,
+        error: overlay.question.terminal
+          ? "This question is no longer answerable."
+          : "Choose an option or enter text.",
+      };
+      return;
+    }
+    const target = this.target() as import("./actions.js").ActionTarget;
+    const guard = overlay.guard;
+    if (
+      guard?.questionId &&
+      target.questionId !== guard.questionId &&
+      target.boardQuestion?.questionId !== guard.questionId
+    ) {
+      this.#overlay = {
+        ...overlay,
+        error: "The question changed. Close and select it again.",
+      };
+      return;
+    }
+    if (
+      overlay.question.source === "signals" &&
+      guard?.revision !== undefined &&
+      target.boardQuestion?.revision !== guard.revision
+    ) {
+      this.#overlay = {
+        ...overlay,
+        error: "The question revision changed. Close and select it again.",
+      };
+      return;
+    }
+    this.#overlay = { ...overlay, pending: true };
+    try {
+      if (overlay.question.source === "signals") {
+        const value = {
+          kind: overlay.selectedOptionIds.length > 0 ? "options" : "text",
+          ...(overlay.selectedOptionIds.length > 0
+            ? { optionIds: [...overlay.selectedOptionIds] }
+            : {}),
+          ...(overlay.text.trim() ? { text: overlay.text.trim() } : {}),
+        };
+        await this.#actions.run("agentBoardAnswer", target, value);
+      } else
+        await this.#actions.run("answer", target, {
+          optionId: overlay.selectedOptionIds[0] ?? null,
+          text: overlay.text.trim() || null,
+        });
+      this.#message = "Answer accepted.";
+      this.closeOverlay();
+    } catch (error) {
+      this.#overlay = {
+        ...overlay,
+        pending: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+    this.#requestRender();
   }
 
   private async submitConfirmation(): Promise<void> {
-    const confirmation = this.#confirmation;
-    if (!confirmation) return;
+    const overlay = this.#overlay;
+    if (overlay.kind !== "confirm" || overlay.pending) return;
     const state = this.scopedWorkState(this.#client.store.state);
-    if (confirmation.action === "cancelTask") {
-      const task = state.tasks.get(confirmation.targetId);
+    const guard = overlay.guard ?? {};
+    if (overlay.action === "cancelTask") {
+      const task = state.tasks.get(guard.targetId ?? "");
       if (
         !task ||
         ["succeeded", "failed", "cancelled", "timed_out"].includes(task.state)
       ) {
         this.#message = "The task changed or became terminal.";
-        this.#confirmation = undefined;
+        this.closeOverlay();
         return;
       }
       this.#selectedTask = task.id;
     } else if (
-      confirmation.action === "groupStop" ||
-      confirmation.action === "groupClose"
+      overlay.action === "groupStop" ||
+      overlay.action === "groupClose"
     ) {
-      const group = state.groups.get(confirmation.targetId);
+      const group = state.groups.get(guard.targetId ?? "");
       if (
         !group ||
         ["closed", "stopped", "completed", "failed", "cancelled"].includes(
@@ -619,99 +860,33 @@ export class BrokerDeckApp implements Component {
         )
       ) {
         this.#message = "The group changed or became terminal.";
-        this.#confirmation = undefined;
+        this.closeOverlay();
         return;
       }
       this.#selectedGroup = group.id;
     } else {
-      const agent = state.agents.get(confirmation.targetId);
+      const agent = state.agents.get(guard.agentId ?? guard.targetId ?? "");
       if (
         !agent ||
-        (confirmation.generation !== undefined &&
-          agent.generation !== confirmation.generation)
+        (guard.generation !== undefined &&
+          agent.generation !== guard.generation)
       ) {
         this.#message = "The agent changed or disappeared.";
-        this.#confirmation = undefined;
+        this.closeOverlay();
         return;
       }
       this.#selectedAgent = agent.id;
     }
-    this.#confirmation = undefined;
-    this.#tracker.reset();
-    await this.run(confirmation.action);
-  }
-
-  private renderAgentMoreSurface(lines: string[], width: number): void {
-    const agent = this.selectedAgent();
-    lines.push(
-      "AGENT MORE  Escape closes",
-      agent
-        ? `${agent.displayName ?? agent.herdrName ?? agent.id} · ${agent.state}`
-        : "Agent is unavailable",
-      "",
-    );
-    this.addControlRow(
-      lines,
-      [
-        {
-          id: "agent-more:compact",
-          label: "Compact",
-          disabled: agent?.state !== "idle",
-          activate: () => void this.run("compact"),
-        },
-        {
-          id: "agent-more:restart",
-          label: "Restart",
-          disabled: !agent || ["stopped", "replaced"].includes(agent.state),
-          activate: () => void this.run("restart"),
-        },
-        {
-          id: "agent-more:close",
-          label: "Close",
-          disabled: !agent,
-          activate: () => this.confirmClose(),
-        },
-        {
-          id: "agent-more:worktree",
-          label: "Open worktree",
-          disabled: !agent?.cwd,
-          activate: () => void this.run("openWorktree"),
-        },
-        {
-          id: "agent-more:copy",
-          label: "Copy ID",
-          disabled: !agent,
-          activate: () => void this.copySelectedId(),
-        },
-        {
-          id: "agent-more:model",
-          label: "Running model",
-          disabled: getAgentModelChoices(agent).length === 0,
-          activate: () => this.cycleModel(),
-        },
-        {
-          id: "agent-more:thinking",
-          label: "Thinking level",
-          disabled: getAgentThinkingChoices(agent).length === 0,
-          activate: () => this.cycleThinking(),
-        },
-        {
-          id: "agent-more:create",
-          label: "Create child agent",
-          disabled: !agent?.cwd,
-          activate: () => this.beginInput("create"),
-        },
-        {
-          id: "agent-more:close-drawer",
-          label: "Close drawer",
-          activate: () => {
-            this.#agentMoreOpen = false;
-            this.#tracker.reset();
-          },
-        },
-      ],
-      width,
-    );
+    this.closeOverlay();
+    try {
+      await this.run(overlay.action);
+    } catch (error) {
+      this.#overlay = {
+        ...overlay,
+        pending: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
   }
 
   private selectBoardItem(item: BoardItem): void {
@@ -785,7 +960,7 @@ export class BrokerDeckApp implements Component {
           this.#boardScroll = 0;
         },
         answer: (item) =>
-          this.beginInput(
+          this.beginQuestionResponse(
             item.kind === "signal-question" ? "board-answer" : "answer",
           ),
         run: (item, action) => {
@@ -914,8 +1089,7 @@ export class BrokerDeckApp implements Component {
           label: "More…",
           disabled: !agent,
           activate: () => {
-            this.#agentMoreOpen = true;
-            this.#tracker.reset();
+            this.openAgentMore();
           },
         },
       ],
@@ -1533,14 +1707,8 @@ export class BrokerDeckApp implements Component {
 
   private move(delta: number): void {
     const state = this.#client.store.state;
-    if (this.#settingsOpen) {
-      this.#settingsScroll = Math.max(
-        0,
-        Math.min(
-          Math.max(0, (this.#capabilities?.models.length ?? 0) - 1),
-          this.#settingsScroll + delta,
-        ),
-      );
+    if (this.#overlay.kind !== "none") {
+      this.scrollOverlay(delta);
     } else if (this.#tab === "agents") {
       const moved = moveAgentListSelection(
         this.agentPresentation(state),
@@ -1598,7 +1766,7 @@ export class BrokerDeckApp implements Component {
         this.#filesWheelDetached = false;
       }
     }
-    this.#confirmation = undefined;
+    if (this.#overlay.kind === "confirm") this.closeOverlay();
   }
 
   private target() {
@@ -1690,84 +1858,11 @@ export class BrokerDeckApp implements Component {
         action === "copyId"
           ? `Copied ID: ${String(result)}`
           : `${action} accepted.`;
-      this.#confirmation = undefined;
+      if (this.#overlay.kind === "confirm") this.closeOverlay();
     } catch (error) {
       this.#message = error instanceof Error ? error.message : String(error);
     }
     this.#requestRender();
-  }
-
-  private beginInput(mode: InputMode): void {
-    const target = this.target() as import("./actions.js").ActionTarget;
-    if (mode === "board-answer" && !this.selectedBoardQuestion()) {
-      this.#message = "Select a Signals question first.";
-      return;
-    }
-    if (mode === "create" && !target.agent) {
-      this.#message = "Select a parent agent first.";
-      return;
-    }
-    const action: DeckAction =
-      mode === "answer" ? "answer" : (mode as DeckAction);
-    const denied =
-      mode === "create" || mode === "default" || mode === "board-answer"
-        ? undefined
-        : this.#actions.authorize(action, target);
-    if (denied) {
-      this.#message = denied;
-      return;
-    }
-    if (mode === "answer" && target.question?.answered) {
-      this.#message = "The selected question is terminal.";
-      return;
-    }
-    this.#inputMode = mode;
-    this.#input = "";
-    this.#message = "";
-  }
-
-  private handleEditorInput(data: string): void {
-    if (data === "\u001b") {
-      this.#inputMode = undefined;
-      this.#input = "";
-      this.#message = "Input cancelled.";
-    } else if (data === "\u007f" || data === "\b")
-      this.#input = this.#input.slice(0, -1);
-    else if (data === "\r" || data === "\n") {
-      const mode = this.#inputMode;
-      if (!mode) return;
-      const value = this.#input.trim();
-      if (!value) {
-        this.#message = "Text is required.";
-        return;
-      }
-      this.#inputMode = undefined;
-      this.#input = "";
-      if (mode === "create") void this.createAgent(value);
-      else if (mode === "files-filter") {
-        this.#filesFilter = value;
-        this.#filesScroll = 0;
-        void this.runFiles("filter", value);
-      } else if (mode === "model-filter") {
-        this.#modelFilter = value;
-        this.#settingsScroll = 0;
-        this.#inputMode = undefined;
-        this.#input = "";
-      } else if (mode === "default") void this.setDefault(value);
-      else if (mode === "board-answer") {
-        const question = this.selectedBoardQuestion();
-        if (question)
-          this.runProvider("agentBoardAnswer", "board-answer", {
-            kind: "text",
-            text: value,
-          });
-      } else void this.run(mode === "answer" ? "answer" : mode, value);
-    } else if (
-      data.length > 0 &&
-      !data.includes("\u001b") &&
-      [...data].every((character) => character.codePointAt(0)! >= 0x20)
-    )
-      this.#input = `${this.#input}${data}`.slice(0, 16_384);
   }
 
   private renderSettings(_width: number): string[] {
@@ -1824,7 +1919,11 @@ export class BrokerDeckApp implements Component {
       const pageSize = Math.max(3, this.#getHeight() - lines.length - 4);
       const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
       const page = Math.min(
-        Math.floor(this.#settingsScroll / pageSize),
+        Math.floor(
+          (this.#overlay.kind === "settings"
+            ? (this.#overlay.scroll ?? 0)
+            : 0) / pageSize,
+        ),
         pages - 1,
       );
       const start = page * pageSize;
@@ -1969,10 +2068,14 @@ export class BrokerDeckApp implements Component {
       this.#message = "Select a task first.";
       return;
     }
-    this.#confirmation = {
+    this.#overlay = {
+      kind: "confirm",
       action: "cancelTask",
-      targetId: task.id,
+      guard: { targetId: task.id },
       summary: `Cancel ${task.title}?`,
+      focus: "primary",
+      scroll: 0,
+      pending: false,
     };
     this.#tracker.reset();
   }
@@ -1985,10 +2088,14 @@ export class BrokerDeckApp implements Component {
       this.#message = "Select a group first.";
       return;
     }
-    this.#confirmation = {
+    this.#overlay = {
+      kind: "confirm",
       action,
-      targetId: group.id,
+      guard: { targetId: group.id },
       summary: `${action === "groupStop" ? "Stop" : "Close"} ${group.name ?? group.id}?`,
+      focus: "primary",
+      scroll: 0,
+      pending: false,
     };
     this.#tracker.reset();
   }
@@ -2004,11 +2111,14 @@ export class BrokerDeckApp implements Component {
   private confirmAgentStop(): void {
     const agent = this.selectedAgent();
     if (!agent) return;
-    this.#confirmation = {
+    this.#overlay = {
+      kind: "confirm",
       action: "stop",
-      targetId: agent.id,
-      generation: agent.generation,
+      guard: { agentId: agent.id, generation: agent.generation },
       summary: `Stop ${agent.displayName ?? agent.id}?`,
+      focus: "primary",
+      scroll: 0,
+      pending: false,
     };
     this.#tracker.reset();
   }
@@ -2019,11 +2129,14 @@ export class BrokerDeckApp implements Component {
       this.#message = "Select an agent first.";
       return;
     }
-    this.#confirmation = {
+    this.#overlay = {
+      kind: "confirm",
       action: "close",
-      targetId: agent.id,
-      generation: agent.generation,
+      guard: { agentId: agent.id, generation: agent.generation },
       summary: `Close ${agent.displayName ?? agent.id}?`,
+      focus: "primary",
+      scroll: 0,
+      pending: false,
     };
     this.#tracker.reset();
   }

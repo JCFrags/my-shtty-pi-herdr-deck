@@ -4,6 +4,8 @@ import type {
   AgentBoardTab,
   BoardFilter,
 } from "./product-presentation.js";
+
+export type { AgentBoardTab } from "./product-presentation.js";
 import type { HitBox } from "./components/controls.js";
 import type { OverlayState } from "./overlay-screen.js";
 
