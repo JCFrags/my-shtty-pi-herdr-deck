@@ -180,7 +180,12 @@ const SOURCE_PRIORITY: Record<SourceLabel, number> = {
 };
 
 function text(value: unknown, fallback: string): string {
-  return typeof value === "string" && value.length > 0 ? value : fallback;
+  if (typeof value !== "string" || value.length === 0) return fallback;
+  const sanitized = value
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+    .trim()
+    .slice(0, 4_000);
+  return sanitized.length > 0 ? sanitized : fallback;
 }
 function rowId(row: BoardRecord, index: number): string {
   return text(row.id ?? row.entityId, `row-${index + 1}`);
@@ -192,6 +197,32 @@ function rowTimestamp(row: BoardRecord): string {
   return text(
     row.changedAt ?? row.terminalAt ?? row.updatedAt ?? row.createdAt,
     "",
+  );
+}
+function hasAnswerId(row: BoardRecord): boolean {
+  const answer =
+    row.answer && typeof row.answer === "object" && !Array.isArray(row.answer)
+      ? (row.answer as BoardRecord)
+      : {};
+  return (
+    typeof (row.answerId ?? answer.id ?? answer.answerId) === "string" &&
+    String(row.answerId ?? answer.id ?? answer.answerId).length > 0
+  );
+}
+function isTerminalSignalRow(row: BoardRecord): boolean {
+  return new Set([
+    "completed",
+    "failed",
+    "cancelled",
+    "canceled",
+    "archived",
+    "dismissed",
+    "applied",
+    "rejected",
+  ]).has(
+    text(row.state ?? row.status ?? row.statusLabel, "")
+      .trim()
+      .toLowerCase(),
   );
 }
 function normalizedStatus(value: string | undefined): string {
@@ -255,7 +286,7 @@ export function normalizeBrokerQuestion(
     source: "orchestrator",
     uiId: `orchestrator:question:${question.id}`,
     entityId: question.id,
-    prompt: question.prompt,
+    prompt: text(question.prompt, question.id),
     responseKind:
       options.length > 0
         ? question.allowFreeform
@@ -310,7 +341,7 @@ export function selectUnifiedBoardPresentation(
   const items: BoardItem[] = [];
   for (const todo of provider?.todo.items ?? []) {
     if (isTerminalTodoStatus(todo.status)) continue;
-    const waiting = Boolean(todo.waitReason);
+    const waiting = isWaitingTodo(todo);
     const status = normalizedStatus(todo.status);
     items.push(
       boardItem({
@@ -335,16 +366,26 @@ export function selectUnifiedBoardPresentation(
   const openQuestions = [...scoped.questions.values()].filter(
     (q) => !normalizeBrokerQuestion(q).terminal,
   );
-  const representedTasks = new Set(
-    openQuestions.flatMap((q) => (q.taskId ? [q.taskId] : [])),
-  );
-  const representedGroups = new Set(
-    openQuestions.flatMap((q) =>
-      [...scoped.groups.values()]
-        .filter((g) => g.questionIds?.includes(q.id))
-        .map((g) => g.id),
-    ),
-  );
+  const representedTasks = new Set<string>();
+  const representedRuns = new Set<string>();
+  const representedQuestions = new Set(openQuestions.map((q) => q.id));
+  for (const question of openQuestions) {
+    if (question.taskId) representedTasks.add(question.taskId);
+    if (question.runId) {
+      representedRuns.add(question.runId);
+      const run = scoped.runs.get(question.runId);
+      if (run?.taskId) representedTasks.add(run.taskId);
+    }
+  }
+  const representedGroups = new Set<string>();
+  for (const group of scoped.groups.values()) {
+    if (
+      group.questionIds?.some((id) => representedQuestions.has(id)) ||
+      group.taskIds?.some((id) => representedTasks.has(id)) ||
+      group.runIds?.some((id) => representedRuns.has(id))
+    )
+      representedGroups.add(group.id);
+  }
   for (const question of openQuestions)
     items.push(
       boardItem({
@@ -366,7 +407,13 @@ export function selectUnifiedBoardPresentation(
       }),
     );
   for (const task of scoped.tasks.values()) {
-    if (isTerminalTaskState(task.state) || representedTasks.has(task.id))
+    if (
+      isTerminalTaskState(task.state) ||
+      representedTasks.has(task.id) ||
+      (task.currentRunId !== undefined &&
+        representedRuns.has(task.currentRunId)) ||
+      task.runIds?.some((runId) => representedRuns.has(runId))
+    )
       continue;
     const attention = task.state === "blocked";
     const assigned = task.assignedAgentId
@@ -402,7 +449,12 @@ export function selectUnifiedBoardPresentation(
     );
   }
   for (const group of scoped.groups.values()) {
-    if (GROUP_TERMINAL.has(group.state) || representedGroups.has(group.id))
+    if (
+      GROUP_TERMINAL.has(group.state) ||
+      representedGroups.has(group.id) ||
+      group.taskIds?.some((taskId) => representedTasks.has(taskId)) ||
+      group.runIds?.some((runId) => representedRuns.has(runId))
+    )
       continue;
     const attention = group.state === "blocked" || Boolean(group.blockedReason);
     items.push(
@@ -429,6 +481,8 @@ export function selectUnifiedBoardPresentation(
     const pending = provider?.agentBoard.pendingQuestions?.find(
       (q) => q.questionId === id,
     );
+    if (row.userAnswerable === false && row.retryableDelivery !== true)
+      continue;
     items.push(
       boardItem({
         uiId: `signals:question:${id}`,
@@ -452,7 +506,9 @@ export function selectUnifiedBoardPresentation(
               ? ["use-recommendation"]
               : []),
             ...(row.dismissible === true ? ["dismiss-question"] : []),
-            ...(row.retryableDelivery === true ? ["retry-delivery"] : []),
+            ...(row.retryableDelivery === true && hasAnswerId(row)
+              ? ["retry-delivery"]
+              : []),
           ] as BoardAction[],
         },
       }),
@@ -467,6 +523,7 @@ export function selectUnifiedBoardPresentation(
   ).entries()) {
     const id = rowId(row, index);
     if (signalIds.has(id)) continue;
+    if (isTerminalSignalRow(row) && row.retryableDelivery !== true) continue;
     items.push(
       boardItem({
         uiId: `signals:update:${id}`,
@@ -484,7 +541,9 @@ export function selectUnifiedBoardPresentation(
         actions: {
           actions: [
             ...(row.archivable === true ? ["archive-update"] : []),
-            ...(row.retryableDelivery === true ? ["retry-delivery"] : []),
+            ...(row.retryableDelivery === true && hasAnswerId(row)
+              ? ["retry-delivery"]
+              : []),
           ] as BoardAction[],
         },
       }),
@@ -515,23 +574,30 @@ export function selectUnifiedBoardPresentation(
           },
         }),
       );
-  if (
-    provider?.todo.waitReason &&
-    !(provider.todo.items ?? []).some(isWaitingTodo)
-  )
+  const providerWaitReasons = [
+    ...(provider?.todo.waitReason ? [provider.todo.waitReason] : []),
+    ...(provider?.todo.externalWaits ?? []),
+  ];
+  const seenProviderWaits = new Set<string>();
+  for (const [index, reason] of providerWaitReasons.entries()) {
+    if (seenProviderWaits.has(reason)) continue;
+    seenProviderWaits.add(reason);
     items.push(
       boardItem({
-        uiId: "todo:provider-wait",
-        entityId: "provider-wait",
+        uiId:
+          index === 0
+            ? "todo:provider-wait"
+            : `todo:provider-wait:${index + 1}`,
+        entityId: index === 0 ? "provider-wait" : `provider-wait:${index + 1}`,
         kind: "todo",
         source: {
-          id: "provider-wait",
+          id: index === 0 ? "provider-wait" : `provider-wait:${index + 1}`,
           text: "Todo provider wait",
-          waitReason: provider.todo.waitReason,
+          waitReason: reason,
         },
         sourceLabel: "TODO",
         title: "Todo provider wait",
-        summary: provider.todo.waitReason,
+        summary: reason,
         state: "waiting",
         section: "attention",
         priority: 25,
@@ -539,6 +605,7 @@ export function selectUnifiedBoardPresentation(
         actions: { actions: [] },
       }),
     );
+  }
   const attention = items
     .filter((i) => i.section === "attention")
     .sort(boardSort);
@@ -594,7 +661,9 @@ function signalActivity(
       actions: {
         actions: [
           ...(row.archivable === true ? ["archive-update"] : []),
-          ...(row.retryableDelivery === true ? ["retry-delivery"] : []),
+          ...(row.retryableDelivery === true && hasAnswerId(row)
+            ? ["retry-delivery"]
+            : []),
         ] as BoardAction[],
       },
     });

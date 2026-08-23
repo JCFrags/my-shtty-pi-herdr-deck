@@ -79,9 +79,10 @@ function projection(): ProviderProjection {
                 {
                   id: "U-1",
                   title: "Progress",
-                  state: "completed",
+                  state: "active",
                   archivable: true,
                   retryableDelivery: true,
+                  answerId: "A-1",
                   changedAt: "2026-08-23T02:00:00Z",
                 },
               ],

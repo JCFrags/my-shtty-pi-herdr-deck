@@ -11,6 +11,7 @@ import {
 import type { BoardAction } from "../../src/deck/product-presentation.js";
 import { buildBoardActionRequest } from "../../src/deck/actions.js";
 import type { NormalizedQuestion } from "../../src/deck/product-presentation.js";
+import { SIGNALS_ANSWER_FIXTURES } from "../fixtures/signals-contract.js";
 
 const question = (
   responseKind: NormalizedQuestion["responseKind"],
@@ -44,14 +45,14 @@ test("question payload builders cover broker and all Signals response kinds", ()
       selectedOptionIds: ["a"],
       text: "",
     }),
-    { kind: "option", optionId: "a" },
+    { kind: "single", optionId: "a" },
   );
   assert.deepEqual(
     buildSignalsQuestionAnswer(question("multiple"), {
       selectedOptionIds: ["a", "b"],
       text: "",
     }),
-    { kind: "options", optionIds: ["a", "b"] },
+    { kind: "multiple", optionIds: ["a", "b"] },
   );
   assert.deepEqual(
     buildSignalsQuestionAnswer(question("text"), {
@@ -65,14 +66,64 @@ test("question payload builders cover broker and all Signals response kinds", ()
       selectedOptionIds: [],
       text: "free",
     }),
-    { kind: "text", text: "free" },
+    { kind: "single_or_text", text: "free" },
   );
   assert.deepEqual(
     buildSignalsQuestionAnswer(question("multiple_or_text"), {
       selectedOptionIds: ["b"],
       text: "",
     }),
-    { kind: "options", optionIds: ["b"] },
+    { kind: "multiple_or_text", optionIds: ["b"] },
+  );
+});
+
+test("Signals answer fixtures preserve current kind and canonical fields", () => {
+  for (const fixture of SIGNALS_ANSWER_FIXTURES)
+    assert.deepEqual(
+      buildSignalsQuestionAnswer(
+        {
+          ...question(fixture.kind),
+          options: [
+            { id: "first", label: "First" },
+            { id: "second", label: "Second" },
+          ],
+        },
+        fixture.selection,
+      ),
+      fixture.answer,
+    );
+});
+
+test("Signals answer builder rejects unknown, duplicate, unordered, stale, and oversized input", () => {
+  assert.throws(() =>
+    buildSignalsQuestionAnswer(question("single"), {
+      selectedOptionIds: ["unknown"],
+      text: "",
+    }),
+  );
+  assert.throws(() =>
+    buildSignalsQuestionAnswer(question("multiple"), {
+      selectedOptionIds: ["a", "a"],
+      text: "",
+    }),
+  );
+  assert.throws(() =>
+    buildSignalsQuestionAnswer(question("multiple"), {
+      selectedOptionIds: ["b", "a"],
+      text: "",
+    }),
+  );
+  assert.throws(() =>
+    buildSignalsQuestionAnswer(
+      { ...question("single"), responseKind: "text" },
+      { selectedOptionIds: ["a"], text: "" },
+    ),
+  );
+  assert.throws(() =>
+    buildSignalsQuestionAnswer(question("text"), {
+      selectedOptionIds: [],
+      text: "x".repeat(4_001),
+    }),
   );
 });
 

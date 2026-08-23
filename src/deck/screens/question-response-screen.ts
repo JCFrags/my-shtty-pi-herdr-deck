@@ -13,6 +13,7 @@ export interface QuestionResponseScreenOptions {
   onRecommendation(): void;
   onSubmit(): void;
   onCancel(): void;
+  onDismiss(): void;
 }
 
 export function renderQuestionResponseScreen(
@@ -43,17 +44,27 @@ export function renderQuestionResponseScreen(
     surface.addButtons([
       {
         id: "question:recommendation",
-        label: "Use recommendation",
+        label: "Recommendation",
         activate: options.onRecommendation,
       },
     ]);
   if (state.error) surface.addLine(`! ${state.error}`);
   surface.addButtons([
-    {
-      id: "question:cancel",
-      label: state.question.dismissible ? "Dismiss" : "Cancel",
-      activate: options.onCancel,
-    },
+    ...(state.question.dismissible
+      ? [
+          {
+            id: "question:dismiss",
+            label: "Dismiss",
+            activate: options.onDismiss,
+          },
+        ]
+      : [
+          {
+            id: "question:cancel",
+            label: "Cancel",
+            activate: options.onCancel,
+          },
+        ]),
     {
       id: "question:submit",
       label: "Submit",

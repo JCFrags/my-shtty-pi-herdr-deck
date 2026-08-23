@@ -4,6 +4,7 @@ import type { DeckQuestion } from "./types.js";
 import {
   buildBrokerQuestionAnswer,
   buildSignalsQuestionAnswer,
+  type QuestionResponseSelection,
 } from "./question-response.js";
 import {
   normalizeBrokerQuestion,
@@ -77,15 +78,44 @@ export interface QuestionAnswer {
   text: string | null;
 }
 
+const BOARD_ACTION_FIELDS: Record<string, readonly string[]> = {
+  "accept-recommendation": ["questionId", "expectedRevision"],
+  "dismiss-question": ["questionId", "expectedRevision"],
+  "retry-delivery": ["questionId", "answerId", "expectedRevision"],
+  "archive-update": ["updateId", "expectedRevision"],
+  "acknowledge-answer": [
+    "answerId",
+    "outcome",
+    "summary",
+    "resultingUpdateIds",
+    "attachments",
+  ],
+};
+
 export function buildBoardActionRequest(
   ownerAgentId: string,
   boardAction: { action: string; fields?: Record<string, unknown> },
 ): Record<string, unknown> {
-  return {
-    ownerAgentId,
-    ...(boardAction.fields ?? {}),
-    action: boardAction.action,
-  };
+  const allowed = BOARD_ACTION_FIELDS[boardAction.action];
+  if (!allowed) throw new Error("Signals action is not available.");
+  const fields = boardAction.fields ?? {};
+  if (Object.keys(fields).some((key) => !allowed.includes(key)))
+    throw new Error("Signals action fields are invalid.");
+  if (
+    allowed
+      .filter(
+        (key) =>
+          key === "questionId" || key === "answerId" || key === "updateId",
+      )
+      .some((key) => typeof fields[key] !== "string" || !fields[key])
+  )
+    throw new Error("Signals action identity is missing.");
+  if (
+    "expectedRevision" in fields &&
+    !Number.isSafeInteger(fields.expectedRevision)
+  )
+    throw new Error("Signals action revision is invalid.");
+  return { ownerAgentId, ...fields, action: boardAction.action };
 }
 
 type Guard = (target: ActionTarget) => string | undefined;
@@ -157,7 +187,7 @@ export class DeckActions {
   async run(
     action: DeckAction,
     target: ActionTarget,
-    value?: string | QuestionAnswer | Record<string, unknown>,
+    value?: string | QuestionResponseSelection | QuestionAnswer,
   ): Promise<unknown> {
     const denied = this.authorize(action, target);
     if (denied) throw new Error(denied);
@@ -189,16 +219,10 @@ export class DeckActions {
           confirm: true,
         });
       case "answer": {
-        const answer =
-          typeof value === "object" && value !== null && "optionId" in value
-            ? (value as QuestionAnswer)
-            : buildBrokerQuestionAnswer(
-                normalizeBrokerQuestion(target.question!),
-                {
-                  selectedOptionIds: [],
-                  text: typeof value === "string" ? value : "",
-                },
-              );
+        const answer = buildBrokerQuestionAnswer(
+          normalizeBrokerQuestion(target.question!),
+          questionSelection(value),
+        );
         return this.client.answer(
           target.questionId ?? target.question!.id,
           answer,
@@ -250,7 +274,7 @@ export class DeckActions {
           questionId: target.boardQuestion?.questionId ?? target.question!.id,
           expectedRevision: target.boardQuestion?.revision ?? 0,
           source: "manual",
-          value: this.signalsAnswer(target, value),
+          value: this.signalsAnswer(target, questionSelection(value)),
         });
       case "cancelTask":
         return this.client.request("task.cancel", {
@@ -376,10 +400,12 @@ export class DeckActions {
     };
   }
 
-  private signalsAnswer(target: ActionTarget, value: unknown): unknown {
+  private signalsAnswer(
+    target: ActionTarget,
+    selection: QuestionResponseSelection,
+  ): unknown {
     const board = target.boardQuestion;
     if (!board) throw new Error("Select a Signals question first.");
-    if (value && typeof value === "object" && "kind" in value) return value;
     const question = normalizeSignalsQuestion({
       questionId: board.questionId,
       revision: board.revision,
@@ -387,9 +413,30 @@ export class DeckActions {
       response: board.response as never,
       recommendedOptionIds: [],
     });
-    return buildSignalsQuestionAnswer(question, {
-      selectedOptionIds: [],
-      text: typeof value === "string" ? value : "",
-    });
+    return buildSignalsQuestionAnswer(question, selection);
   }
+}
+
+function questionSelection(
+  value: string | QuestionResponseSelection | QuestionAnswer | undefined,
+): QuestionResponseSelection {
+  if (typeof value === "string") return { selectedOptionIds: [], text: value };
+  if (
+    value &&
+    "selectedOptionIds" in value &&
+    Array.isArray(value.selectedOptionIds) &&
+    typeof value.text === "string"
+  )
+    return value;
+  if (
+    value &&
+    "optionId" in value &&
+    (value.optionId === null || typeof value.optionId === "string") &&
+    (value.text === null || typeof value.text === "string")
+  )
+    return {
+      selectedOptionIds: value.optionId ? [value.optionId] : [],
+      text: value.text ?? "",
+    };
+  throw new Error("A structured question response is required.");
 }

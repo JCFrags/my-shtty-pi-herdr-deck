@@ -19,6 +19,7 @@ export interface ProductActionRequest {
 export interface ProductTargetContext {
   rootAgent?: Agent | undefined;
   scopedAgents: ReadonlyMap<string, Agent>;
+  runs?: ReadonlyMap<string, { taskId: string; agentId?: string }>;
   agentBoard?: AgentBoardProjection | undefined;
 }
 
@@ -43,11 +44,19 @@ export function actionTargetForBoardItem(
   context: ProductTargetContext,
 ): ActionTarget {
   const owner =
-    item.kind === "task" && item.source.assignedAgentId
-      ? context.scopedAgents.get(item.source.assignedAgentId)
-      : item.kind === "agent-alert"
-        ? item.source
-        : context.rootAgent;
+    item.kind === "task"
+      ? ((item.source.assignedAgentId
+          ? context.scopedAgents.get(item.source.assignedAgentId)
+          : item.source.currentRunId && context.runs
+            ? context.scopedAgents.get(
+                context.runs.get(item.source.currentRunId)?.agentId ?? "",
+              )
+            : undefined) ?? context.rootAgent)
+      : item.kind === "broker-question" && item.source.agentId
+        ? (context.scopedAgents.get(item.source.agentId) ?? context.rootAgent)
+        : item.kind === "agent-alert"
+          ? item.source
+          : context.rootAgent;
   const base = agentTarget(owner ?? context.rootAgent);
   switch (item.kind) {
     case "todo":
@@ -161,8 +170,8 @@ export function signalsQuestionForBoardItem(
               {
                 id,
                 label,
-                ...(typeof option.description === "string"
-                  ? { description: option.description }
+                ...(stringValue(option.description)
+                  ? { description: stringValue(option.description) }
                   : {}),
               },
             ]
@@ -171,7 +180,9 @@ export function signalsQuestionForBoardItem(
     : [];
   const recommendedOptionIds =
     detailItem.recommendedOptionIds ?? detail.recommendedOptionIds;
-  const recommendedText = detailItem.recommendedText ?? detail.recommendedText;
+  const recommendedText = stringValue(
+    detailItem.recommendedText ?? detail.recommendedText,
+  );
   return {
     questionId,
     revision,
@@ -185,7 +196,7 @@ export function signalsQuestionForBoardItem(
           (value): value is string => typeof value === "string",
         )
       : [],
-    ...(typeof recommendedText === "string" ? { recommendedText } : {}),
+    ...(recommendedText ? { recommendedText } : {}),
   };
 }
 
@@ -241,25 +252,24 @@ export function signalsActionRequest(
         },
       };
     case "retry-delivery":
+      if (!answerId) return undefined;
       return {
         action,
-        fields: {
-          questionId,
-          ...(answerId ? { answerId } : {}),
-          expectedRevision: revision,
-        },
+        fields: { questionId, answerId, expectedRevision: revision },
       };
     case "accept-recommendation":
     case "use-recommendation":
+      return {
+        action: "accept-recommendation",
+        fields: { questionId, expectedRevision: revision },
+      };
+    case "dismiss-question":
       return {
         action,
         fields: { questionId, expectedRevision: revision },
       };
     default:
-      return {
-        action,
-        fields: { questionId, expectedRevision: revision },
-      };
+      return undefined;
   }
 }
 
@@ -286,22 +296,19 @@ export function activityActionRequest(
     source.questionId ?? source.id ?? item.entityId,
   );
   const answerId = stringValue(source.answerId ?? "");
+  if (!answerId) return undefined;
   return {
     action,
-    fields: {
-      questionId,
-      ...(answerId ? { answerId } : {}),
-      expectedRevision: revision,
-    },
+    fields: { questionId, answerId, expectedRevision: revision },
   };
 }
 
 function stringValue(value: unknown): string {
-  return typeof value === "string"
-    ? value
-    : value === undefined
-      ? ""
-      : String(value);
+  if (typeof value !== "string") return "";
+  return value
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+    .trim()
+    .slice(0, 4_000);
 }
 
 function numberValue(value: unknown): number {

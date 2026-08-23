@@ -30,7 +30,27 @@ const SECTION_LABEL: Record<BoardItem["section"], string> = {
   "recent-signals": "RECENT SIGNALS",
 };
 
-/** Render Board independently from BrokerDeckApp. Scroll is over flattened items, not lines. */
+export type BoardListEntry =
+  | { kind: "heading"; section: BoardItem["section"] }
+  | { kind: "item"; item: BoardItem };
+
+/** Flatten items and section headings into the scrollable Board list. */
+export function flattenBoardItems(
+  items: readonly BoardItem[],
+): BoardListEntry[] {
+  const entries: BoardListEntry[] = [];
+  let prior: BoardItem["section"] | undefined;
+  for (const item of items) {
+    if (item.section !== prior) {
+      entries.push({ kind: "heading", section: item.section });
+      prior = item.section;
+    }
+    entries.push({ kind: "item", item });
+  }
+  return entries;
+}
+
+/** Render Board independently from BrokerDeckApp. Scroll includes headings. */
 export function renderBoardScreen(
   options: BoardScreenOptions,
 ): RenderedSurface<BoardScreenState> {
@@ -39,21 +59,30 @@ export function renderBoardScreen(
   const narrow = width < 96;
   const corrected = { ...options.state };
   const list = options.model.visible;
+  const entries = flattenBoardItems(list);
   const selectedIndex = options.model.selected
-    ? list.findIndex((item) => item.uiId === options.model.selected!.uiId)
+    ? entries.findIndex(
+        (entry) =>
+          entry.kind === "item" &&
+          entry.item.uiId === options.model.selected!.uiId,
+      )
     : -1;
-  if (selectedIndex >= 0 && selectedIndex < corrected.listScroll)
-    corrected.listScroll = selectedIndex;
   const listBudget = Math.max(
     1,
     Math.floor((height - 9) * (narrow ? 0.55 : 1)),
   );
-  corrected.listScroll = clamp(
-    corrected.listScroll,
-    0,
-    Math.max(0, list.length - listBudget),
-  );
-  const visible = list.slice(
+  const maxScroll = Math.max(0, entries.length - listBudget);
+  corrected.listScroll = clamp(corrected.listScroll, 0, maxScroll);
+  if (!corrected.wheelDetached && selectedIndex >= 0) {
+    if (selectedIndex < corrected.listScroll)
+      corrected.listScroll = selectedIndex;
+    else if (selectedIndex >= corrected.listScroll + listBudget)
+      corrected.listScroll = Math.min(
+        maxScroll,
+        selectedIndex - listBudget + 1,
+      );
+  }
+  const visible = entries.slice(
     corrected.listScroll,
     corrected.listScroll + listBudget,
   );
@@ -102,17 +131,17 @@ export function renderBoardScreen(
 
 function renderList(
   width: number,
-  items: BoardItem[],
+  entries: BoardListEntry[],
   model: UnifiedBoardPresentation,
   actions: BoardScreenActions,
 ): RenderedSurface {
   const surface = new SurfaceBuilder(width);
-  let prior: BoardItem["section"] | undefined;
-  for (const item of items) {
-    if (item.section !== prior) {
-      surface.addLine(SECTION_LABEL[item.section]);
-      prior = item.section;
+  for (const entry of entries) {
+    if (entry.kind === "heading") {
+      surface.addLine(SECTION_LABEL[entry.section]);
+      continue;
     }
+    const item = entry.item;
     const badge = `[${item.sourceLabel}]`;
     const marker = item.uiId === model.selected?.uiId ? ">" : " ";
     surface.addRow(
@@ -121,7 +150,7 @@ function renderList(
       () => actions.select(item),
     );
   }
-  if (items.length === 0) surface.addLine("✓ No items match this filter.");
+  if (entries.length === 0) surface.addLine("✓ No items match this filter.");
   return surface.finish();
 }
 

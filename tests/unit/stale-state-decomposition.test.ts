@@ -138,7 +138,7 @@ test("Board targets contain only the latest Todo, task, or Signals source", () =
   assert.equal(signalTarget.task, undefined);
   assert.equal(signalTarget.todoTaskId, undefined);
   assert.deepEqual(signalTarget.boardAction, {
-    action: "use-recommendation",
+    action: "accept-recommendation",
     fields: { questionId: signalQuestion.questionId, expectedRevision: 7 },
   });
   app.dispose();

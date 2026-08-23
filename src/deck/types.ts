@@ -40,6 +40,7 @@ export interface DeckGroup {
   state: string;
   agentIds?: string[];
   taskIds?: string[];
+  runIds?: string[];
   questionIds?: string[];
   resultIds?: string[];
   parentAgentId?: string;
