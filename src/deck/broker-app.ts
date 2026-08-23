@@ -37,7 +37,11 @@ import {
   type VisibleWorkView,
 } from "./render-dependencies.js";
 import { selectAdoptedRootAgent, selectAdoptedScope } from "./scope.js";
-import { effectiveSelection } from "./selections.js";
+import {
+  effectiveSelection,
+  moveAgentListSelection,
+  selectAgentListPresentation,
+} from "./selections.js";
 import { selectBoardPresentation } from "./board-presentation.js";
 
 export interface BrokerDeckAppOptions {
@@ -51,6 +55,10 @@ export interface BrokerDeckAppOptions {
     tab: VisibleDeckTab;
     workView: VisibleWorkView;
   }): void;
+  onActionTarget?(
+    action: DeckAction,
+    target: import("./actions.js").ActionTarget,
+  ): void;
 }
 
 type DeckTab = VisibleDeckTab;
@@ -84,6 +92,7 @@ export class BrokerDeckApp implements Component {
   readonly #targetPaneId: string | undefined;
   readonly #onClose: () => void;
   readonly #onRenderDecision: BrokerDeckAppOptions["onRenderDecision"];
+  readonly #onActionTarget: BrokerDeckAppOptions["onActionTarget"];
   readonly #unsubscribers: Array<() => void> = [];
   readonly #tracker = new PressReleaseTracker();
   #status: BrokerStatus;
@@ -126,6 +135,7 @@ export class BrokerDeckApp implements Component {
     this.#targetPaneId = options.targetPaneId;
     this.#onClose = options.onClose ?? (() => undefined);
     this.#onRenderDecision = options.onRenderDecision;
+    this.#onActionTarget = options.onActionTarget;
     this.#status = options.client.status;
     this.#renderSignature = this.visibleSignature(options.client.store.state);
     this.#unsubscribers.push(
@@ -686,7 +696,11 @@ export class BrokerDeckApp implements Component {
     else if (data === "f" && this.#tab === "agents") void this.run("focus");
     else if (data === "p" && this.#tab === "agents") this.beginInput("prompt");
     else if (data === "a" && this.#tab === "agents") this.beginInput("ask");
-    else if (data === "a" && this.#tab === "inbox")
+    else if (
+      data === "a" &&
+      this.#tab === "inbox" &&
+      this.#boardTab === "inbox"
+    )
       this.beginInput(this.selectedBoardQuestion() ? "board-answer" : "answer");
     else if (data === "y" && this.#tab === "inbox")
       void this.runBoard("accept-recommendation");
@@ -1320,32 +1334,22 @@ export class BrokerDeckApp implements Component {
     return selectAdoptedScope(state, this.#targetPaneId).state;
   }
 
+  private agentPresentation(state: DeckState = this.#client.store.state) {
+    const scoped = this.scopedWorkState(state);
+    return selectAgentListPresentation(
+      scoped.agents.values(),
+      this.#agentFilter,
+      this.#agentPage,
+      this.#selectedAgent,
+    );
+  }
+
   private visibleAgents(state: DeckState): Agent[] {
-    const active = new Set([
-      "provisioning",
-      "starting",
-      "working",
-      "blocked",
-      "stopping",
-    ]);
-    const idle = new Set(["idle"]);
-    return [...state.agents.values()]
-      .filter((agent) =>
-        this.#agentFilter === "active"
-          ? active.has(agent.state)
-          : this.#agentFilter === "idle"
-            ? idle.has(agent.state)
-            : !active.has(agent.state) && !idle.has(agent.state),
-      )
-      .sort((a, b) => b.id.localeCompare(a.id))
-      .slice(this.#agentPage * 12, this.#agentPage * 12 + 12);
+    return this.agentPresentation(state).visible;
   }
 
   private selectedAgent(): Agent | undefined {
-    return this.selected(
-      this.visibleAgents(this.scopedWorkState(this.#client.store.state)),
-      this.#selectedAgent,
-    );
+    return this.agentPresentation().selected;
   }
   private selectedGroup(
     state: DeckState = this.#client.store.state,
@@ -1378,6 +1382,7 @@ export class BrokerDeckApp implements Component {
   }
 
   private selectedBoardQuestion(): AgentBoardPendingQuestion | undefined {
+    if (this.#boardTab !== "inbox") return undefined;
     const projection = currentProviderProjection(
       this.#client.store.state,
       this.#targetPaneId,
@@ -1516,16 +1521,12 @@ export class BrokerDeckApp implements Component {
   private move(delta: number): void {
     const state = this.#client.store.state;
     if (this.#tab === "agents") {
-      const items = this.visibleAgents(this.scopedWorkState(state));
-      this.#selectedAgent = this.nextId(items, this.selectedAgent()?.id, delta);
-      if (
-        delta > 0 &&
-        items.length &&
-        this.#selectedAgent === items[items.length - 1]?.id
-      )
-        this.#agentPage++;
-      if (delta < 0 && items.length && this.#selectedAgent === items[0]?.id)
-        this.#agentPage = Math.max(0, this.#agentPage - 1);
+      const moved = moveAgentListSelection(
+        this.agentPresentation(state),
+        delta,
+      );
+      this.#selectedAgent = moved.selectedId;
+      this.#agentPage = moved.page;
     } else if (this.#tab === "work" && this.#workView === "groups") {
       const scoped = this.scopedWorkState(state);
       this.#selectedGroup = this.nextId(
@@ -1675,11 +1676,9 @@ export class BrokerDeckApp implements Component {
   }
   private async run(action: DeckAction, value?: string): Promise<void> {
     try {
-      const result = await this.#actions.run(
-        action,
-        this.target() as import("./actions.js").ActionTarget,
-        value,
-      );
+      const target = this.target() as import("./actions.js").ActionTarget;
+      this.#onActionTarget?.(action, target);
+      const result = await this.#actions.run(action, target, value);
       this.#message =
         action === "copyId"
           ? `Copied ID: ${String(result)}`
@@ -1704,7 +1703,7 @@ export class BrokerDeckApp implements Component {
     const action: DeckAction =
       mode === "answer" ? "answer" : (mode as DeckAction);
     const denied =
-      mode === "create" || mode === "default"
+      mode === "create" || mode === "default" || mode === "board-answer"
         ? undefined
         : this.#actions.authorize(action, target);
     if (denied) {
@@ -1980,7 +1979,9 @@ export class BrokerDeckApp implements Component {
   }
 
   private confirmGroup(action: "groupStop" | "groupClose"): void {
-    const group = this.selectedGroup();
+    const group = this.selectedGroup(
+      this.scopedWorkState(this.#client.store.state),
+    );
     if (!group) {
       this.#message = "Select a group first.";
       return;

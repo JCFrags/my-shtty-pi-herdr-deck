@@ -35,8 +35,9 @@ export function currentProviderProjection(
   });
   if (ranked[0]) return ranked[0];
   if (targetPaneId) return undefined;
-  return projections.length === 1 &&
-    state.agents.has(projections[0]!.ownerAgentId)
+  if (projections.length !== 1) return undefined;
+  const owner = state.agents.get(projections[0]!.ownerAgentId);
+  return owner && !["closed", "stopped"].includes(owner.state)
     ? projections[0]
     : undefined;
 }

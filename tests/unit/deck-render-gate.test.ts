@@ -4,7 +4,11 @@ import type { TuiMouseEvent } from "@pi-herdr-deck/tui";
 import { BrokerDeckApp } from "../../src/deck/broker-app.js";
 import { BrokerClient } from "../../src/deck/broker-client.js";
 import { visibleSurfaceSignature } from "../../src/deck/render-dependencies.js";
-import { selectAdoptedScope } from "../../src/deck/scope.js";
+import {
+  currentProviderProjection,
+  selectAdoptedRootAgent,
+  selectAdoptedScope,
+} from "../../src/deck/scope.js";
 import { selectBoardPresentation } from "../../src/deck/board-presentation.js";
 import type { DeckSnapshot, DeckState } from "../../src/deck/types.js";
 import type { Agent } from "../../src/state/types.js";
@@ -72,7 +76,7 @@ function snapshot(provider = projection(), owner = agent()): DeckSnapshot {
 
 function clickLabel(app: BrokerDeckApp, label: string): void {
   const lines = app.render(120);
-  const y = lines.findIndex((line) => line.includes(label));
+  const y = lines.findLastIndex((line) => line.includes(label));
   assert.notEqual(y, -1);
   const x = lines[y]!.indexOf(label) + 1;
   const event = (type: "press" | "release"): TuiMouseEvent => ({
@@ -256,6 +260,16 @@ test("authoritative provider selects the newest same-pane root and descendants",
   assert.deepEqual([...scope.state.agents.keys()].sort(), ["new", "new-child"]);
 });
 
+test("terminal sole provider owners fail closed", () => {
+  for (const terminal of ["closed", "stopped"] as const) {
+    const value = state();
+    value.agents.set("agent-1", { ...agent(), state: terminal } as Agent);
+    assert.equal(currentProviderProjection(value), undefined);
+    assert.equal(selectAdoptedRootAgent(value), undefined);
+  }
+  assert.equal(currentProviderProjection(state())?.ownerAgentId, "agent-1");
+});
+
 test("implicit Work selections include displayed detail but ignore unselected detail", () => {
   const value = state();
   value.tasks.set("a", {
@@ -368,6 +382,104 @@ test("implicit result, group, and agent details are selected deterministically",
     prompt: "Changed question",
   });
   assert.notEqual(visibleSurfaceSignature(value, agentContext), agentBase);
+});
+
+test("task detail tracks exact resultId and deterministic displayed question only", () => {
+  const value = state();
+  value.tasks.set("task", {
+    id: "task",
+    title: "Task",
+    state: "running",
+    assignedAgentId: "agent-1",
+    resultId: "z-result",
+  } as never);
+  value.results.set("a-result", {
+    id: "a-result",
+    taskId: "task",
+    status: "accepted",
+    summary: "not displayed",
+  });
+  value.results.set("z-result", {
+    id: "z-result",
+    taskId: "task",
+    status: "accepted",
+    summary: "displayed",
+  });
+  value.questions.set("a-question", {
+    id: "a-question",
+    taskId: "task",
+    prompt: "displayed",
+  });
+  value.questions.set("z-question", {
+    id: "z-question",
+    taskId: "task",
+    prompt: "not displayed",
+  });
+  const context = {
+    tab: "work",
+    workView: "tasks",
+    targetPaneId: "pane-1",
+  } as const;
+  const baseline = visibleSurfaceSignature(value, context);
+  value.results.set("a-result", {
+    ...value.results.get("a-result")!,
+    summary: "hidden changed",
+  });
+  value.questions.set("z-question", {
+    ...value.questions.get("z-question")!,
+    prompt: "hidden changed",
+  });
+  assert.equal(visibleSurfaceSignature(value, context), baseline);
+  value.results.set("z-result", {
+    ...value.results.get("z-result")!,
+    summary: "shown changed",
+  });
+  assert.notEqual(visibleSurfaceSignature(value, context), baseline);
+  const resultChanged = visibleSurfaceSignature(value, context);
+  value.questions.set("a-question", {
+    ...value.questions.get("a-question")!,
+    prompt: "shown changed",
+  });
+  assert.notEqual(visibleSurfaceSignature(value, context), resultChanged);
+});
+
+test("History dependencies match visible task and result rows", () => {
+  const value = state();
+  value.tasks.set("running", {
+    id: "running",
+    title: "Visible",
+    state: "running",
+    assignedAgentId: "agent-1",
+    objective: "hidden",
+  } as never);
+  value.results.set("result", {
+    id: "result",
+    taskId: "running",
+    status: "accepted",
+    summary: "visible",
+  });
+  const context = {
+    tab: "work",
+    workView: "history",
+    targetPaneId: "pane-1",
+  } as const;
+  const baseline = visibleSurfaceSignature(value, context);
+  value.tasks.set("running", {
+    ...value.tasks.get("running")!,
+    objective: "hidden changed",
+  });
+  assert.equal(visibleSurfaceSignature(value, context), baseline);
+  value.tasks.set("running", {
+    ...value.tasks.get("running")!,
+    title: "Visible changed",
+  });
+  assert.notEqual(visibleSurfaceSignature(value, context), baseline);
+  const taskChanged = visibleSurfaceSignature(value, context);
+  value.results.set("result", {
+    ...value.results.get("result")!,
+    summary: "result changed",
+  });
+  assert.notEqual(visibleSurfaceSignature(value, context), taskChanged);
 });
 
 test("removing an explicit selection falls back to the first scoped item", () => {
@@ -581,6 +693,217 @@ test("Board visible counts, selected detail, flags, and pending response are dep
     ),
     baseline,
   );
+});
+
+test("Board answer keyboard action follows the visible provider tab", () => {
+  const board = {
+    available: true,
+    openCount: 1,
+    items: [],
+    pendingQuestions: [
+      {
+        questionId: "q1",
+        revision: 1,
+        question: "Choose",
+        response: {
+          kind: "single" as const,
+          options: [{ id: "yes", label: "Yes" }],
+        },
+        recommendedOptionIds: ["yes"],
+      },
+    ],
+    view: {
+      view: {
+        tabCounts: { inbox: 1, updates: 1 },
+        tabs: {
+          inbox: { rows: [{ id: "q1", revision: 1, userAnswerable: true }] },
+          updates: { rows: [{ id: "u1", title: "Update" }] },
+        },
+      },
+    },
+  };
+  const client = new BrokerClient({
+    socketPath: "/tmp/board-tab-action.sock",
+    secret: "test",
+  });
+  client.store.replace(snapshot(projection({ agentBoard: board })));
+  const app = new BrokerDeckApp({
+    client,
+    targetPaneId: "pane-1",
+    requestRender: () => undefined,
+    getHeight: () => 40,
+  });
+  app.handleInput("5");
+  clickLabel(app, "Updates");
+  app.handleInput("a");
+  assert.doesNotMatch(app.render(120).join("\n"), /BOARD-ANSWER:/);
+  clickLabel(app, "Inbox");
+  app.handleInput("a");
+  assert.match(app.render(120).join("\n"), /BOARD-ANSWER:/);
+  app.dispose();
+});
+
+test("BrokerDeckApp uses the first displayed agent for inspector and dependencies", () => {
+  const client = new BrokerClient({
+    socketPath: "/tmp/render-agent-gate.sock",
+    secret: "test",
+  });
+  const owner = {
+    ...agent(),
+    id: "z-agent",
+    displayName: "Zulu",
+    closeReason: "selected old",
+  } as Agent;
+  const child = {
+    ...agent(),
+    id: "a-agent",
+    displayName: "Alpha",
+    parentAgentId: "z-agent",
+    closeReason: "other old",
+  } as Agent;
+  const provider = projection({ ownerAgentId: "z-agent" });
+  client.store.replace({
+    ...snapshot(provider, owner),
+    agents: [owner, child],
+  });
+  let renders = 0;
+  const app = new BrokerDeckApp({
+    client,
+    targetPaneId: "pane-1",
+    requestRender: () => renders++,
+    getHeight: () => 40,
+  });
+  app.handleInput("4");
+  const output = app.render(120).join("\n");
+  assert.match(output, />.*Zulu/);
+  assert.match(output, /Identity: z-agent/);
+  const baseline = renders;
+  client.store.replace({
+    ...snapshot(provider, owner),
+    agents: [{ ...owner, closeReason: "selected changed" }, child] as Agent[],
+  });
+  assert.equal(renders, baseline + 1);
+  const afterSelected = renders;
+  client.store.replace({
+    ...snapshot(provider, owner),
+    agents: [
+      { ...owner, closeReason: "selected changed" },
+      { ...child, closeReason: "other changed" },
+    ] as Agent[],
+  });
+  assert.equal(renders, afterSelected);
+  app.dispose();
+});
+
+test("BrokerDeckApp clamps an invalid agent page after scope shrink", () => {
+  const owner = { ...agent(), id: "z-owner", displayName: "Owner" } as Agent;
+  const provider = projection({ ownerAgentId: "z-owner" });
+  const children = Array.from(
+    { length: 13 },
+    (_, index) =>
+      ({
+        ...agent(),
+        id: `child-${String(index).padStart(2, "0")}`,
+        displayName: `Child ${index}`,
+        parentAgentId: "z-owner",
+      }) as Agent,
+  );
+  const client = new BrokerClient({
+    socketPath: "/tmp/agent-page-clamp.sock",
+    secret: "test",
+  });
+  client.store.replace({
+    ...snapshot(provider, owner),
+    agents: [owner, ...children],
+  });
+  let renders = 0;
+  const app = new BrokerDeckApp({
+    client,
+    targetPaneId: "pane-1",
+    requestRender: () => renders++,
+    getHeight: () => 50,
+  });
+  app.handleInput("4");
+  for (let index = 0; index < 12; index++) app.handleInput("j");
+  const baseline = renders;
+  client.store.replace({
+    ...snapshot(provider, owner),
+    agents: [owner, children[0]!],
+  });
+  assert.equal(renders, baseline + 1);
+  const output = app.render(120).join("\n");
+  assert.match(output, /page 1\/1/);
+  assert.match(output, /Identity: z-owner/);
+  app.dispose();
+});
+
+test("BrokerDeckApp action targets match scoped displayed entities", () => {
+  const owner = { ...agent(), id: "z-agent", displayName: "Zulu" } as Agent;
+  const other = { ...agent(), id: "other-root", paneId: "other-pane" } as Agent;
+  const provider = projection({ ownerAgentId: "z-agent" });
+  const scopedTask = {
+    id: "z-task",
+    title: "Scoped",
+    state: "running",
+    assignedAgentId: "z-agent",
+  } as never;
+  const outsideTask = {
+    id: "a-task",
+    title: "Outside",
+    state: "running",
+    assignedAgentId: "other-root",
+  } as never;
+  const scopedGroup = {
+    id: "z-group",
+    name: "Scoped",
+    state: "open",
+    agentIds: ["z-agent"],
+  };
+  const outsideGroup = {
+    id: "a-group",
+    name: "Outside",
+    state: "open",
+    agentIds: ["other-root"],
+  };
+  const client = new BrokerClient({
+    socketPath: "/tmp/scoped-action-target.sock",
+    secret: "test",
+  });
+  client.store.replace({
+    ...snapshot(provider, owner),
+    agents: [owner, other],
+    tasks: [outsideTask, scopedTask],
+    groups: [outsideGroup, scopedGroup],
+  });
+  const captured: Array<{ action: string; target: any }> = [];
+  const app = new BrokerDeckApp({
+    client,
+    targetPaneId: "pane-1",
+    requestRender: () => undefined,
+    getHeight: () => 40,
+    onActionTarget: (action, target) => captured.push({ action, target }),
+  });
+  app.handleInput("2");
+  clickLabel(app, "Tasks");
+  clickLabel(app, "Cancel task");
+  clickLabel(app, "Cancel task");
+  assert.equal(
+    captured.find((item) => item.action === "cancelTask")?.target.task.id,
+    "z-task",
+  );
+  clickLabel(app, "Groups");
+  clickLabel(app, "Wait");
+  assert.equal(
+    captured.find((item) => item.action === "groupWait")?.target.group.id,
+    "z-group",
+  );
+  app.handleInput("4");
+  clickLabel(app, "Focus");
+  assert.equal(
+    captured.find((item) => item.action === "focus")?.target.agent.id,
+    "z-agent",
+  );
+  app.dispose();
 });
 
 test("BrokerDeckApp tracks the implicitly selected scoped task detail", () => {

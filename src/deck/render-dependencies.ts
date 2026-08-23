@@ -1,9 +1,12 @@
 import type { DeckNotification, DeckState } from "./types.js";
 import { currentProviderProjection, selectAdoptedScope } from "./scope.js";
 import {
-  effectiveOrderedSelection,
   effectiveSelection,
   selectAgentInspectorRelation,
+  selectAgentListPresentation,
+  selectTaskDetailRelation,
+  selectTaskRowPresentation,
+  taskRowDependency,
 } from "./selections.js";
 import { selectBoardPresentation } from "./board-presentation.js";
 
@@ -81,23 +84,12 @@ function providerAuthority(state: DeckState, targetPaneId?: string) {
 
 function selectedRelated(state: DeckState, taskId?: string) {
   const task = taskId ? state.tasks.get(taskId) : undefined;
-  const run = task?.currentRunId
-    ? state.runs.get(task.currentRunId)
-    : undefined;
-  const result = sortedValues(state.results.values()).find(
-    (item) => item.taskId === taskId || (run && item.runId === run.id),
-  );
-  const question = sortedValues(state.questions.values()).find(
-    (item) =>
-      !item.answered &&
-      item.state !== "answered" &&
-      (item.taskId === taskId || (run && item.runId === run.id)),
-  );
+  const relation = selectTaskDetailRelation(task, state);
   return {
     task: brokerEntity(task),
-    run: brokerEntity(run),
-    result: brokerEntity(result),
-    question: brokerEntity(question),
+    run: brokerEntity(relation.run),
+    result: brokerEntity(relation.result),
+    question: brokerEntity(relation.question),
   };
 }
 
@@ -112,16 +104,7 @@ function workModel(state: DeckState, context: VisibleSurfaceContext): unknown {
     const tasks = sortedValues(scoped.tasks.values());
     const selected = effectiveSelection(tasks, context.selectedTaskId);
     return {
-      rows: tasks.map((task) => ({
-        id: task.id,
-        state: task.state,
-        title: task.title,
-        assignedAgentId: task.assignedAgentId,
-        resultId: task.resultId,
-        runAgentId: task.currentRunId
-          ? scoped.runs.get(task.currentRunId)?.agentId
-          : undefined,
-      })),
+      rows: tasks.map((task) => taskRowDependency(task, scoped)),
       selected: selectedRelated(scoped, selected?.id),
     };
   }
@@ -157,17 +140,17 @@ function workModel(state: DeckState, context: VisibleSurfaceContext): unknown {
       selected: brokerEntity(selected),
     };
   }
-  const terminalTasks = sortedValues(scoped.tasks.values()).filter((task) =>
-    ["succeeded", "failed", "cancelled", "timed_out"].includes(task.state),
-  );
+  const rows = selectTaskRowPresentation(scoped);
   return {
-    tasks: terminalTasks.map(brokerEntity),
-    runs: sortedValues(scoped.runs.values())
-      .filter((run) =>
-        terminalTasks.some((task) => task.currentRunId === run.id),
-      )
-      .map(brokerEntity),
-    results: sortedValues(scoped.results.values()).map(brokerEntity),
+    currentCount: rows.current.length,
+    historyCount: rows.history.length,
+    current: rows.visibleCurrent.map((task) => taskRowDependency(task, scoped)),
+    history: rows.visibleHistory.map((task) => taskRowDependency(task, scoped)),
+    results: sortedValues(scoped.results.values()).map((result) => ({
+      id: result.id,
+      status: result.status,
+      summary: result.summary,
+    })),
   };
 }
 
@@ -176,29 +159,20 @@ function agentsModel(
   context: VisibleSurfaceContext,
 ): unknown {
   const scoped = selectAdoptedScope(state, context.targetPaneId).state;
-  const active = new Set([
-    "provisioning",
-    "starting",
-    "working",
-    "blocked",
-    "stopping",
-  ]);
-  const filter = context.agentFilter ?? "active";
-  const matching = sortedValues(scoped.agents.values())
-    .filter((agent) =>
-      filter === "active"
-        ? active.has(agent.state)
-        : filter === "idle"
-          ? agent.state === "idle"
-          : !active.has(agent.state) && agent.state !== "idle",
-    )
-    .sort((a, b) => b.id.localeCompare(a.id));
-  const page = Math.max(0, context.agentPage ?? 0);
-  const visible = matching.slice(page * 12, page * 12 + 12);
-  const selected = effectiveOrderedSelection(visible, context.selectedAgentId);
+  const presentation = selectAgentListPresentation(
+    scoped.agents.values(),
+    context.agentFilter ?? "active",
+    context.agentPage ?? 0,
+    context.selectedAgentId,
+  );
+  const matching = presentation.matching;
+  const visible = presentation.visible;
+  const selected = presentation.selected;
   const relation = selectAgentInspectorRelation(selected, scoped);
   return {
-    matchingCount: matching.length,
+    matchingCount: presentation.matchingCount,
+    pageCount: presentation.pageCount,
+    safePage: presentation.safePage,
     order: matching.map((agent) => agent.id),
     rows: visible.map((agent) => ({
       id: agent.id,
