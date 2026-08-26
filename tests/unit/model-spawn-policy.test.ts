@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   modelSelectionMatches,
+  requiredModelSelections,
   resolveSpawnPolicy,
   validateModelSelection,
   type ModelSelection,
@@ -83,6 +84,28 @@ test("scoped model defaults use task, project, role, then global precedence", ()
       config,
     ).effective.model,
     explicit,
+  );
+});
+
+test("required model selections include reachable scoped and fallback defaults", () => {
+  const role = { ...sol, thinkingLevel: "high" as const };
+  const project = { ...luna, thinkingLevel: "low" as const };
+  assert.deepEqual(
+    requiredModelSelections({
+      defaults: {
+        roles: { reviewer: role },
+        projects: { "/project": project },
+      },
+      profiles: { manager: sol, subagent: luna },
+    }),
+    [role, project, sol, luna],
+  );
+  assert.deepEqual(
+    requiredModelSelections({
+      defaults: { global: luna, roles: { reviewer: role } },
+      profiles: { manager: sol },
+    }),
+    [role, luna],
   );
 });
 

@@ -30,6 +30,7 @@ import {
 import { resolveHerdrPaths } from "../src/shared/paths.js";
 import { ProviderProjectionCollector } from "../src/pi/provider-projection-collector.js";
 import { ProviderEventAdapters } from "../src/pi/provider-event-adapters.js";
+import { openAgentSettings } from "../src/pi/agent-settings.js";
 export const ORCHESTRATION_TOOLS = new Set([
   "orchestrator_result",
   "orchestrator_ask",
@@ -1056,6 +1057,14 @@ export default async function piHerdrOrchestrator(
   api.registerCommand("agent-board", {
     description: "Open and focus Agent Board beside this Pi pane",
     handler: openAgentBoard,
+  });
+  api.registerCommand("agent-settings", {
+    description: "Choose agent models and per-model thinking levels",
+    handler: async (_args, next) => {
+      const context = next as PiContextLike;
+      await start(context);
+      await openAgentSettings(client, context);
+    },
   });
   api.registerCommand("pi-herd", {
     description: "Open Agent Board (Pi Herd compatibility alias)",

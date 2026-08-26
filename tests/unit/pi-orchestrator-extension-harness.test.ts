@@ -388,11 +388,11 @@ test("orchestrator extension reload transfers runtime credential and registers t
   );
   assert.deepEqual(
     first.commands.map((item) => item.name),
-    ["agent-board", "pi-herd", "orchestrator-status"],
+    ["agent-board", "agent-settings", "pi-herd", "orchestrator-status"],
   );
   assert.equal(
     first.commands[0]?.command.handler,
-    first.commands[1]?.command.handler,
+    first.commands[2]?.command.handler,
   );
   await emit(first, "session_start", firstHarness.context);
   assert.deepEqual(firstHarness.activeTools.sort(), [
@@ -434,13 +434,13 @@ test("orchestrator extension reload transfers runtime credential and registers t
   assert.equal(second.tools.length, 2);
   assert.deepEqual(
     second.commands.map((item) => item.name),
-    ["agent-board", "pi-herd", "orchestrator-status"],
+    ["agent-board", "agent-settings", "pi-herd", "orchestrator-status"],
   );
   assert.equal(
     second.commands[0]?.command.handler,
-    second.commands[1]?.command.handler,
+    second.commands[2]?.command.handler,
   );
-  assert.equal(new Set(second.commands.map((item) => item.name)).size, 3);
+  assert.equal(new Set(second.commands.map((item) => item.name)).size, 4);
   assert.equal(
     new Set((second.tools as Array<{ name: string }>).map((tool) => tool.name))
       .size,

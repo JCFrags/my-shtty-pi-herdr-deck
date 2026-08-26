@@ -46,6 +46,54 @@ declare module "@earendil-works/pi-tui" {
     drainInput(maxMs?: number, idleMs?: number): Promise<void>;
   }
 
+  export interface SettingItem {
+    id: string;
+    label: string;
+    description?: string;
+    currentValue: string;
+    values?: string[];
+    submenu?: (
+      currentValue: string,
+      done: (selectedValue?: string) => void,
+    ) => Component;
+  }
+
+  export interface SettingsListTheme {
+    label(text: string, selected: boolean): string;
+    value(text: string, selected: boolean): string;
+    description(text: string): string;
+    cursor: string;
+    hint(text: string): string;
+  }
+
+  export class SettingsList implements Component {
+    constructor(
+      items: SettingItem[],
+      maxVisible: number,
+      theme: SettingsListTheme,
+      onChange: (id: string, newValue: string) => void,
+      onCancel: () => void,
+      options?: { enableSearch?: boolean },
+    );
+    updateValue(id: string, newValue: string): void;
+    render(width: number): string[];
+    handleInput(data: string): void;
+    invalidate(): void;
+  }
+
+  export class Container implements Component {
+    addChild(component: Component): void;
+    render(width: number): string[];
+    handleInput(data: string): void;
+    invalidate(): void;
+  }
+
+  export class Text implements Component {
+    constructor(text: string, paddingX?: number, paddingY?: number);
+    render(width: number): string[];
+    invalidate(): void;
+  }
+
   export class ProcessTerminal implements Terminal {
     start(onInput: (data: string) => void, onResize: () => void): void;
     stop(): void;

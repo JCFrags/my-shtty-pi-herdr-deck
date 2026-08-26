@@ -116,12 +116,37 @@ export function validateModelSelection(value: unknown): ModelSelection {
   };
 }
 
-function sameModel(left: ModelSelection, right: ModelSelection): boolean {
+export function sameModelSelection(
+  left: ModelSelection,
+  right: ModelSelection,
+): boolean {
   return (
     left.provider === right.provider &&
     left.modelId === right.modelId &&
     left.thinkingLevel === right.thinkingLevel
   );
+}
+
+export function requiredModelSelections(
+  config: ModelPolicyConfig = {},
+): readonly ModelSelection[] {
+  const required: ModelSelection[] = [];
+  const add = (selection: ModelSelection): void => {
+    const valid = validateModelSelection(selection);
+    if (!required.some((candidate) => sameModelSelection(candidate, valid)))
+      required.push(valid);
+  };
+  const defaults = config.defaults;
+  const roles = defaults?.roles ?? {};
+  const projects = defaults?.projects ?? {};
+  for (const key of Object.keys(roles).sort()) add(roles[key]!);
+  for (const key of Object.keys(projects).sort()) add(projects[key]!);
+  if (defaults?.global) add(defaults.global);
+  else {
+    add(config.profiles?.manager ?? DEFAULT_PROFILES.manager);
+    add(config.profiles?.subagent ?? DEFAULT_PROFILES.subagent);
+  }
+  return required;
 }
 
 export function resolveSpawnPolicy(
@@ -173,7 +198,10 @@ export function resolveSpawnPolicy(
       DEFAULT_PROFILES[modelProfileId],
   );
   const allowlist = config.allowlist?.map(validateModelSelection);
-  if (allowlist && !allowlist.some((allowed) => sameModel(allowed, model)))
+  if (
+    allowlist &&
+    !allowlist.some((allowed) => sameModelSelection(allowed, model))
+  )
     throw new OrchestratorError(
       "PERMISSION_DENIED",
       "The effective model selection is outside the configured allowlist.",
