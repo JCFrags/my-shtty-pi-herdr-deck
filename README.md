@@ -92,6 +92,68 @@ Example configuration:
 }
 ```
 
+### Scoped internet foundation data
+
+The optional Artificial Analysis adapter imports task-capability scores as a capped foundation prior. It uses only `GET /api/v2/language/models/{slug}`. It does not list or import the provider catalog. Before it sends a request, the broker requires an installed Pi model, permission from the broker allowlist when one is configured, an exact runtime mapping, and an explicit canonical-to-source mapping. Runtime variants that map to one canonical model share one request.
+
+Add the source under the existing version-1 configuration. Every exact runtime mapping needs a declared scheduler endpoint. `profileMetrics` maps a broker task profile to one supported source metric: `coding`, `intelligence`, or `agentic`.
+
+```json
+{
+  "version": 1,
+  "scheduler": {
+    "endpoints": {
+      "remote_primary": { "maxConcurrentAgents": 4 }
+    }
+  },
+  "modelIntelligence": {
+    "schemaVersion": 1,
+    "mappings": [
+      {
+        "provider": "openai-codex",
+        "modelId": "gpt-5.6-luna",
+        "endpointId": "remote_primary",
+        "canonicalModelId": "openai/gpt-test"
+      }
+    ],
+    "sources": {
+      "artificialAnalysis": {
+        "enabled": true,
+        "refreshHours": 168,
+        "maxRequestsPerRefresh": 4,
+        "profileMetrics": {
+          "implementer": "coding",
+          "planner": "intelligence"
+        },
+        "models": [
+          {
+            "canonicalModelId": "openai/gpt-test",
+            "slug": "gpt-test"
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+Artificial Analysis requires a supported API entitlement. Store its key only in `~/.config/pi-herdr-orchestrator/artificial-analysis.key`. The broker accepts one owner-only regular file. It rejects symlinks, unsafe modes, invalid ownership, extra lines, and values outside the bounded format. Do not put the key in `config.json`, an environment variable, a command argument, state, logs, or chat.
+
+```bash
+install -d -m 700 ~/.config/pi-herdr-orchestrator
+install -m 600 /dev/null ~/.config/pi-herdr-orchestrator/artificial-analysis.key
+${EDITOR:-vi} ~/.config/pi-herdr-orchestrator/artificial-analysis.key
+```
+
+Restart the broker after a configuration change. Use these operator commands to inspect state or request one bounded asynchronous refresh:
+
+```bash
+./bin/pi-herdr-orchestrator foundation status
+./bin/pi-herdr-orchestrator foundation refresh
+```
+
+A refresh runs outside agent admission and the broker mutation queue. Missing credentials, source outages, rate limits, or rejected data report `failed` or `stale` status. They do not block agent creation and do not replace the last validated snapshot. Source evidence records its Artificial Analysis attribution, observation time, expiry, canonical model, task profile, and content-derived identity in the existing hash-chained event store. It does not change model selection in this release.
+
 ## Compact delegation rollback switch
 
 The `delegate_compact` parent tool previews compact todo text without mutation. Scheduling requires `accept: true` and the exact preview digest. Accepted work uses the existing broker workflow, task, result, question, model, authority, and cleanup paths.

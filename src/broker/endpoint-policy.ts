@@ -5,6 +5,29 @@ export const DERIVED_ENDPOINT_PREFIX = "derived-v1-";
 export const MAX_ENDPOINTS = 64;
 export const MAX_ENDPOINT_MAPPINGS = 128;
 export const MAX_ENDPOINT_CONCURRENCY = 32;
+export const MAX_FOUNDATION_MODELS = 64;
+export const MAX_FOUNDATION_PROFILES = 32;
+export const MAX_FOUNDATION_REQUESTS = 32;
+export const MAX_FOUNDATION_RECORDS_PER_REFRESH = 256;
+
+export type ArtificialAnalysisMetric = "coding" | "intelligence" | "agentic";
+
+export interface ArtificialAnalysisModelMapping {
+  readonly canonicalModelId: string;
+  readonly slug: string;
+}
+
+export interface ArtificialAnalysisSourceConfig {
+  readonly enabled: boolean;
+  readonly refreshHours: number;
+  readonly maxRequestsPerRefresh: number;
+  readonly profileMetrics: Readonly<Record<string, ArtificialAnalysisMetric>>;
+  readonly models: readonly ArtificialAnalysisModelMapping[];
+}
+
+export interface ModelFoundationSourcesConfig {
+  readonly artificialAnalysis?: ArtificialAnalysisSourceConfig;
+}
 
 const ENDPOINT_ID_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/u;
 
@@ -23,6 +46,7 @@ export interface EndpointMapping {
 export interface ModelIntelligenceConfig {
   readonly schemaVersion: 1;
   readonly mappings: readonly EndpointMapping[];
+  readonly sources?: ModelFoundationSourcesConfig;
 }
 
 export interface EndpointPolicyConfig {
@@ -105,7 +129,8 @@ export function validateEndpointPolicyConfig(
     const input = object(modelIntelligenceValue, "modelIntelligence");
     if (
       Object.keys(input).some(
-        (key) => key !== "schemaVersion" && key !== "mappings",
+        (key) =>
+          key !== "schemaVersion" && key !== "mappings" && key !== "sources",
       ) ||
       input.schemaVersion !== 1 ||
       !Array.isArray(input.mappings) ||
@@ -165,7 +190,122 @@ export function validateEndpointPolicyConfig(
           : {}),
       });
     }
-    modelIntelligence = { schemaVersion: 1, mappings };
+    let sources: ModelFoundationSourcesConfig | undefined;
+    if (input.sources !== undefined) {
+      const sourceInput = object(input.sources, "modelIntelligence.sources");
+      if (Object.keys(sourceInput).some((key) => key !== "artificialAnalysis"))
+        throw new Error("modelIntelligence.sources is invalid.");
+      if (sourceInput.artificialAnalysis !== undefined) {
+        const raw = object(
+          sourceInput.artificialAnalysis,
+          "modelIntelligence.sources.artificialAnalysis",
+        );
+        if (
+          Object.keys(raw).some(
+            (key) =>
+              ![
+                "enabled",
+                "refreshHours",
+                "maxRequestsPerRefresh",
+                "profileMetrics",
+                "models",
+              ].includes(key),
+          ) ||
+          typeof raw.enabled !== "boolean" ||
+          !Number.isSafeInteger(raw.refreshHours) ||
+          Number(raw.refreshHours) < 1 ||
+          Number(raw.refreshHours) > 8_760 ||
+          !Number.isSafeInteger(raw.maxRequestsPerRefresh) ||
+          Number(raw.maxRequestsPerRefresh) < 1 ||
+          Number(raw.maxRequestsPerRefresh) > MAX_FOUNDATION_REQUESTS
+        )
+          throw new Error(
+            "modelIntelligence.sources.artificialAnalysis is invalid.",
+          );
+        const profileInput = object(
+          raw.profileMetrics,
+          "modelIntelligence.sources.artificialAnalysis.profileMetrics",
+        );
+        const profileEntries = Object.entries(profileInput);
+        if (
+          profileEntries.length < 1 ||
+          profileEntries.length > MAX_FOUNDATION_PROFILES ||
+          profileEntries.length * Number(raw.maxRequestsPerRefresh) >
+            MAX_FOUNDATION_RECORDS_PER_REFRESH
+        )
+          throw new Error(
+            "modelIntelligence.sources.artificialAnalysis.profileMetrics is invalid.",
+          );
+        const profileMetrics: Record<string, ArtificialAnalysisMetric> = {};
+        for (const [profile, metric] of profileEntries) {
+          if (
+            !/^[a-z][a-z0-9_-]{0,63}$/u.test(profile) ||
+            !["coding", "intelligence", "agentic"].includes(String(metric))
+          )
+            throw new Error(
+              "modelIntelligence.sources.artificialAnalysis.profileMetrics is invalid.",
+            );
+          profileMetrics[profile] = metric as ArtificialAnalysisMetric;
+        }
+        if (
+          !Array.isArray(raw.models) ||
+          raw.models.length < 1 ||
+          raw.models.length > MAX_FOUNDATION_MODELS
+        )
+          throw new Error(
+            "modelIntelligence.sources.artificialAnalysis.models is invalid.",
+          );
+        const models: ArtificialAnalysisModelMapping[] = [];
+        const canonicalIds = new Set<string>();
+        const slugs = new Set<string>();
+        const configuredCanonicalIds = new Set(
+          mappings
+            .map((mapping) => mapping.canonicalModelId)
+            .filter((value): value is string => value !== undefined),
+        );
+        for (const [index, rawModel] of raw.models.entries()) {
+          const model = object(
+            rawModel,
+            `modelIntelligence.sources.artificialAnalysis.models[${index}]`,
+          );
+          if (
+            Object.keys(model).some(
+              (key) => key !== "canonicalModelId" && key !== "slug",
+            ) ||
+            typeof model.canonicalModelId !== "string" ||
+            !/^[a-z0-9][a-z0-9._/-]{0,255}$/u.test(model.canonicalModelId) ||
+            typeof model.slug !== "string" ||
+            !/^[a-z0-9][a-z0-9-]{0,127}$/u.test(model.slug) ||
+            !configuredCanonicalIds.has(model.canonicalModelId) ||
+            canonicalIds.has(model.canonicalModelId) ||
+            slugs.has(model.slug)
+          )
+            throw new Error(
+              `modelIntelligence.sources.artificialAnalysis.models[${index}] is invalid.`,
+            );
+          canonicalIds.add(model.canonicalModelId);
+          slugs.add(model.slug);
+          models.push({
+            canonicalModelId: model.canonicalModelId,
+            slug: model.slug,
+          });
+        }
+        sources = {
+          artificialAnalysis: {
+            enabled: raw.enabled,
+            refreshHours: Number(raw.refreshHours),
+            maxRequestsPerRefresh: Number(raw.maxRequestsPerRefresh),
+            profileMetrics,
+            models,
+          },
+        };
+      }
+    }
+    modelIntelligence = {
+      schemaVersion: 1,
+      mappings,
+      ...(sources ? { sources } : {}),
+    };
   }
   return {
     ...(endpoints ? { endpoints } : {}),

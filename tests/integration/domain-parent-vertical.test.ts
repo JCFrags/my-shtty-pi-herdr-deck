@@ -10,6 +10,7 @@ import { createId } from "../../src/shared/ids.js";
 import { sessionKey, type ResolvedPaths } from "../../src/shared/paths.js";
 import { encodeFrame, NdjsonDecoder } from "../../src/shared/protocol/codec.js";
 import type { EventStore } from "../../src/state/event-store.js";
+import { ArtificialAnalysisFoundationAdapter } from "../../src/model-intelligence/artificial-analysis.js";
 type Frame = {
   type?: string;
   id?: string;
@@ -1120,6 +1121,159 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
     removeAssignmentAccepted();
     removeSecondProvisionReceipt?.();
     if (!brokerStopped) await broker.stop().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+    await rm(runtime, { recursive: true, force: true });
+  }
+});
+
+test("a pending foundation request does not block broker-owned agent creation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "foundation-spawn-"));
+  const runtime = await mkdtemp(join(tmpdir(), "foundation-spawn-runtime-"));
+  const paths = {
+    sessionKey: sessionKey(join(runtime, "broker.sock")),
+    root,
+    runtime,
+    events: join(root, "events"),
+    snapshot: join(root, "snapshot"),
+    lock: join(runtime, "lock"),
+    socket: join(runtime, "broker.sock"),
+    secret: join(runtime, "secret"),
+  };
+  let resolveSource!: (response: Response) => void;
+  let markStarted!: () => void;
+  const sourceStarted = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  const sourceResponse = new Promise<Response>((resolve) => {
+    resolveSource = resolve;
+  });
+  const adapter = new ArtificialAnalysisFoundationAdapter({
+    fetch: async () => {
+      markStarted();
+      return await sourceResponse;
+    },
+  });
+  let fake!: FakeHerdr;
+  const mappings = [
+    {
+      provider: "openai-codex",
+      modelId: "gpt-5.6-luna",
+      endpointId: "remote_one",
+      canonicalModelId: "openai/gpt-test",
+    },
+  ];
+  const broker = new Broker(paths, {
+    herdrFactory: async (store) => (fake = new FakeHerdr(store)) as any,
+    modelPolicy: {
+      allowlist: [
+        {
+          provider: "openai-codex",
+          modelId: "gpt-5.6-luna",
+          thinkingLevel: "medium",
+        },
+      ],
+    },
+    endpointPolicy: {
+      endpoints: { remote_one: { maxConcurrentAgents: 4 } },
+      mappings,
+    },
+    modelIntelligence: {
+      schemaVersion: 1,
+      mappings,
+      sources: {
+        artificialAnalysis: {
+          enabled: true,
+          refreshHours: 168,
+          maxRequestsPerRefresh: 2,
+          profileMetrics: { scout: "coding" },
+          models: [{ canonicalModelId: "openai/gpt-test", slug: "gpt-test" }],
+        },
+      },
+    },
+    foundationAdapter: adapter,
+    foundationCredentialProvider: async () => "private-key",
+  });
+  let parent: Socket | undefined;
+  try {
+    await broker.start();
+    await sourceStarted;
+    const secret = (await readFile(paths.secret, "utf8")).trim();
+    const connected = await connect(
+      paths,
+      { kind: "client_secret", secret },
+      "pi_parent",
+    );
+    parent = connected.socket;
+    ok(
+      await send(parent, "agent.register_adopted", {
+        adapterVersion: "0.1.0",
+        herdr: {
+          paneId: "root-1",
+          terminalId: "root-term-1",
+          detectedKind: "pi",
+          sessionReference: {
+            source: "herdr:pi",
+            agent: "pi",
+            kind: "id",
+            value: "foundation-spawn-session",
+          },
+          name: "foundation-parent",
+        },
+        pi: {
+          sessionId: "foundation-parent-session",
+          sessionName: "foundation-parent",
+          capabilities: {},
+          state: {
+            model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+            thinkingLevel: "medium",
+          },
+        },
+      }),
+    );
+    const spawned = ok(
+      await bounded(
+        send(parent, "agent.spawn", {
+          task: { title: "Scout", objective: "Check spawn independence." },
+          profileId: "scout",
+          placement: "current-workspace",
+          lifecycleClass: "temporary",
+          isolation: { mode: "shared-readonly" },
+          budget: { wallTimeMs: 60_000 },
+          wait: false,
+        }),
+        "agent creation waited for the foundation source",
+        2_000,
+      ),
+    );
+    assert.equal(fake.provisions, 1);
+    assert.equal(typeof spawned.tasks?.[0]?.taskId, "string");
+  } finally {
+    resolveSource(
+      new Response(
+        JSON.stringify({
+          tier: "pro",
+          intelligence_index_version: 4.1,
+          data: {
+            id: "36f73aaf-d38a-4b56-a2b3-d04d17186910",
+            name: "GPT Test",
+            slug: "gpt-test",
+            release_date: "2026-08-01",
+            model_creator: {
+              id: "e67e56e3-15cd-43db-b679-da4660a69f41",
+              name: "OpenAI",
+            },
+            evaluations: {
+              artificial_analysis_intelligence_index: 71.2,
+              artificial_analysis_coding_index: 65.8,
+              artificial_analysis_agentic_index: 58.3,
+            },
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    if (parent) await closeSocket(parent).catch(() => undefined);
+    await broker.stop().catch(() => undefined);
     await rm(root, { recursive: true, force: true });
     await rm(runtime, { recursive: true, force: true });
   }

@@ -19,6 +19,7 @@ import { exportState, planRetention } from "../ops/retention.js";
 import { planRetention as planRetentionPolicy } from "../ops/retention-policy.js";
 import { exportBeforeRepair, planRecovery } from "../ops/recovery.js";
 import { ConfigPolicy } from "../ops/config-policy.js";
+import { ARTIFICIAL_ANALYSIS_CREDENTIAL_FILE } from "../model-intelligence/artificial-analysis.js";
 import {
   createOperationPlan,
   createRollbackRecord,
@@ -267,6 +268,28 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     return;
   }
   if (!paths) throw new Error("Offline operation dispatch did not complete.");
+  if (command === "foundation") {
+    const method =
+      subcommand === "status"
+        ? "model.foundation.status"
+        : subcommand === "refresh"
+          ? "model.foundation.refresh"
+          : undefined;
+    if (!method) throw new Error("Usage: foundation status|refresh.");
+    await ensureBroker();
+    console.log(
+      JSON.stringify(
+        await brokerRequest(
+          paths.socket,
+          paths.secret,
+          method,
+          {},
+          paths.sessionKey,
+        ),
+      ),
+    );
+    return;
+  }
   if (command === "export") {
     const outputFlag = argv.indexOf("--output");
     const output = outputFlag >= 0 ? argv[outputFlag + 1] : undefined;
@@ -386,6 +409,23 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
             ...(brokerConfig.modelIntelligence
               ? { mappings: brokerConfig.modelIntelligence.mappings }
               : {}),
+          },
+        }
+      : {}),
+    ...(brokerConfig?.modelIntelligence
+      ? { modelIntelligence: brokerConfig.modelIntelligence }
+      : {}),
+    ...(brokerConfig?.modelIntelligence?.sources?.artificialAnalysis?.enabled
+      ? {
+          foundationCredentialProvider: async () => {
+            const value = await readPrivateRegular(
+              join(homedir(), ARTIFICIAL_ANALYSIS_CREDENTIAL_FILE),
+            );
+            if (!/^[^\r\n]{8,512}\n?$/u.test(value))
+              throw new Error(
+                "Artificial Analysis credential file is invalid.",
+              );
+            return value.endsWith("\n") ? value.slice(0, -1) : value;
           },
         }
       : {}),

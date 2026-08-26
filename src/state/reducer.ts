@@ -8,6 +8,10 @@ import {
   validateModelEvidenceRecord,
   validateModelEvidenceSupersession,
 } from "../model-intelligence/model-evidence.js";
+import {
+  applyFoundationEvidenceSnapshot,
+  validateFoundationEvidenceSnapshot,
+} from "../model-intelligence/foundation-snapshot.js";
 import type { HerdrTaskMetadata } from "./types.js";
 import type { EventInput, OrchestrationState, StoredEvent } from "./types.js";
 import type {
@@ -118,6 +122,7 @@ const known = new Set([
   "model.evidence_recorded",
   "model.evidence_superseded",
   "model.evidence_compacted",
+  "model.foundation_snapshot_recorded",
 ]);
 export function reduce(
   state: OrchestrationState,
@@ -1515,6 +1520,21 @@ export function reduce(
         throw new OrchestratorError(
           "STATE_CORRUPT",
           `Model evidence compaction is invalid: ${(error as Error).message}`,
+        );
+      }
+      break;
+    }
+    case "model.foundation_snapshot_recorded": {
+      try {
+        next.modelEvidence = applyFoundationEvidenceSnapshot(
+          next.modelEvidence,
+          validateFoundationEvidenceSnapshot(p),
+          "seq" in event ? event.seq : state.lastEventSeq + 1,
+        );
+      } catch (error) {
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          `Foundation evidence snapshot is invalid: ${(error as Error).message}`,
         );
       }
       break;
