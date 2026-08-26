@@ -95,6 +95,8 @@ export interface Run {
   firstTurnIndex?: number;
   piSessionId?: string;
   terminalId?: string;
+  startedAt?: string;
+  terminalAt?: string;
   settled: boolean;
   resultRecoveryCount?: 0 | 1;
   resultId?: string;
@@ -141,6 +143,18 @@ export interface Agent {
   currentAssignmentGeneration?: number;
   lastAdapterSeq?: number;
   tokenDigest?: string;
+}
+export interface ReviewContract {
+  id: string;
+  reviewTaskId: string;
+  reviewedTaskId: string;
+  reviewedRunId: string;
+  reviewedResultId: string;
+  resultDigest: string;
+  rubricVersion: string;
+  taskProfile: string;
+  issuedAt: string;
+  expiresAt: string;
 }
 export interface ResultRecord {
   id: string;
@@ -245,6 +259,7 @@ export interface OrchestrationState {
   groups?: Record<string, AgentGroup>;
   herdrMetadata?: Record<string, HerdrTaskMetadata>;
   modelEvidence?: ModelEvidenceState;
+  reviewContracts?: Record<string, ReviewContract>;
   herdrResources?: Record<
     string,
     {

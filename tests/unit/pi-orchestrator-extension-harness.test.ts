@@ -381,10 +381,10 @@ test("orchestrator extension reload transfers runtime credential and registers t
   const firstActive = { api: first, context: firstHarness.context };
   activeHarnesses.push(firstActive);
   await extension(first.api as never);
-  assert.equal(await first.waitForToolRegistration(2), 2);
+  assert.equal(await first.waitForToolRegistration(3), 3);
   assert.deepEqual(
     (first.tools as Array<{ name: string }>).map((tool) => tool.name).sort(),
-    ["orchestrator_ask", "orchestrator_result"],
+    ["orchestrator_ask", "orchestrator_result", "orchestrator_review_submit"],
   );
   assert.deepEqual(
     first.commands.map((item) => item.name),
@@ -398,6 +398,7 @@ test("orchestrator extension reload transfers runtime credential and registers t
   assert.deepEqual(firstHarness.activeTools.sort(), [
     "orchestrator_ask",
     "orchestrator_result",
+    "orchestrator_review_submit",
     "read",
   ]);
   assert.equal(await waitForRegistrationResponse(1), 1);
@@ -405,6 +406,7 @@ test("orchestrator extension reload transfers runtime credential and registers t
   assert.deepEqual(firstHarness.activeTools.sort(), [
     "orchestrator_ask",
     "orchestrator_result",
+    "orchestrator_review_submit",
     "read",
   ]);
   assert.equal(registrationCount, 1);
@@ -415,11 +417,12 @@ test("orchestrator extension reload transfers runtime credential and registers t
   const secondActive = { api: second, context: secondHarness.context };
   activeHarnesses.push(secondActive);
   await extension(second.api as never);
-  assert.equal(await second.waitForToolRegistration(2), 2);
+  assert.equal(await second.waitForToolRegistration(3), 3);
   await emit(second, "session_start", secondHarness.context);
   assert.deepEqual(secondHarness.activeTools.sort(), [
     "orchestrator_ask",
     "orchestrator_result",
+    "orchestrator_review_submit",
     "read",
   ]);
   assert.equal(await waitForRegistrationResponse(2), 2);
@@ -427,11 +430,12 @@ test("orchestrator extension reload transfers runtime credential and registers t
   assert.deepEqual(secondHarness.activeTools.sort(), [
     "orchestrator_ask",
     "orchestrator_result",
+    "orchestrator_review_submit",
     "read",
   ]);
   assert.equal(registrationCount, 2);
-  assert.equal(first.tools.length, 2);
-  assert.equal(second.tools.length, 2);
+  assert.equal(first.tools.length, 3);
+  assert.equal(second.tools.length, 3);
   assert.deepEqual(
     second.commands.map((item) => item.name),
     ["agent-board", "agent-settings", "pi-herd", "orchestrator-status"],
@@ -444,7 +448,7 @@ test("orchestrator extension reload transfers runtime credential and registers t
   assert.equal(
     new Set((second.tools as Array<{ name: string }>).map((tool) => tool.name))
       .size,
-    2,
+    3,
   );
   assert.equal(connections[0]?.destroyed, true);
   await shutdown(secondActive, "quit");

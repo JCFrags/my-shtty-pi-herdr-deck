@@ -777,6 +777,43 @@ export class EventStore {
         exactKeys(p, ["taskId", "project"]) &&
         p.taskId === refs.taskId &&
         validTaskProject(p.project);
+    } else if (event.type === "review.contract_issued") {
+      valid =
+        exactKeys(refs, [
+          "reviewContractId",
+          "taskId",
+          "reviewedTaskId",
+          "runId",
+          "resultId",
+        ]) &&
+        isEntityId(refs.reviewContractId, "rvc") &&
+        isEntityId(refs.taskId, "tsk") &&
+        isEntityId(refs.reviewedTaskId, "tsk") &&
+        isEntityId(refs.runId, "run") &&
+        isEntityId(refs.resultId, "res") &&
+        exactKeys(p, [
+          "id",
+          "reviewTaskId",
+          "reviewedTaskId",
+          "reviewedRunId",
+          "reviewedResultId",
+          "resultDigest",
+          "rubricVersion",
+          "taskProfile",
+          "issuedAt",
+          "expiresAt",
+        ]) &&
+        p.id === refs.reviewContractId &&
+        p.reviewTaskId === refs.taskId &&
+        p.reviewedTaskId === refs.reviewedTaskId &&
+        p.reviewedRunId === refs.runId &&
+        p.reviewedResultId === refs.resultId &&
+        /^[a-f0-9]{64}$/u.test(String(p.resultDigest)) &&
+        boundedText(p.rubricVersion, 64) &&
+        /^[a-z][a-z0-9_-]{0,63}$/u.test(String(p.taskProfile)) &&
+        validTimestamp(p.issuedAt) &&
+        validTimestamp(p.expiresAt) &&
+        Date.parse(String(p.expiresAt)) > Date.parse(String(p.issuedAt));
     } else if (event.type === "run.created") {
       const runKeyVariants = [
         [

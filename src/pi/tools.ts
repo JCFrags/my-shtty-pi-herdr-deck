@@ -265,6 +265,7 @@ const parentInputKeys: Readonly<Record<ParentToolName, readonly string[]>> =
       "project",
       "isolation",
       "budget",
+      "review",
       "wait",
     ],
     agent_list: [
@@ -1056,6 +1057,18 @@ function schemaForKey(key: string): unknown {
         },
       },
     };
+  if (key === "review")
+    return {
+      type: "object",
+      additionalProperties: false,
+      required: ["taskId", "runId", "resultId", "rubricVersion"],
+      properties: {
+        taskId: { type: "string", pattern: "^tsk_[0-9A-HJKMNP-TV-Z]{26}$" },
+        runId: { type: "string", pattern: "^run_[0-9A-HJKMNP-TV-Z]{26}$" },
+        resultId: { type: "string", pattern: "^res_[0-9A-HJKMNP-TV-Z]{26}$" },
+        rubricVersion: { type: "string", minLength: 1, maxLength: 64 },
+      },
+    };
   if (["project"].includes(key))
     return {
       type: "object",
@@ -1590,6 +1603,52 @@ export function registerManagedChildTools(
   const binding: PiToolBinding = client
     ? { adapter: adapterOrBinding as PiAdapter, client }
     : (adapterOrBinding as PiToolBinding);
+  register(api, {
+    name: "orchestrator_review_submit",
+    label: "Submit independent review",
+    description:
+      "Submit one bounded quality score for the broker-issued review contract bound to the current managed task.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      required: ["valuePpm", "confidencePpm"],
+      properties: {
+        valuePpm: { type: "integer", minimum: 0, maximum: 1_000_000 },
+        confidencePpm: {
+          type: "integer",
+          minimum: 0,
+          maximum: 1_000_000,
+        },
+      },
+    },
+    async execute(_id, params, signal) {
+      if (signal.aborted) throw new Error("CANCELLED");
+      const adapter = binding.adapter;
+      const client = binding.client;
+      if (!adapter || !client || !client.connected)
+        throw new Error("AGENT_DISCONNECTED");
+      const assignment = adapter.assignmentForTools();
+      if (!assignment) throw new Error("RUN_MISMATCH");
+      if (
+        !Number.isSafeInteger(params.valuePpm) ||
+        Number(params.valuePpm) < 0 ||
+        Number(params.valuePpm) > 1_000_000 ||
+        !Number.isSafeInteger(params.confidencePpm) ||
+        Number(params.confidencePpm) < 0 ||
+        Number(params.confidencePpm) > 1_000_000
+      )
+        throw new Error("INVALID_REQUEST");
+      const result = await client.request("review.submit", {
+        agentId: assignment.agentId,
+        taskId: assignment.taskId,
+        runId: assignment.runId,
+        assignmentGeneration: assignment.assignmentGeneration,
+        valuePpm: params.valuePpm,
+        confidencePpm: params.confidencePpm,
+      });
+      return textResult(result);
+    },
+  });
   register(api, {
     name: "orchestrator_result",
     label: "Publish orchestrator result",

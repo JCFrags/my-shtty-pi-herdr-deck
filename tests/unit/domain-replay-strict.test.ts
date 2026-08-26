@@ -953,3 +953,75 @@ test("terminal runs reject late adapter progress and replay rejects valid-hash r
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("append rejects malformed review contract events before projection", async () => {
+  const { root, store } = await fresh();
+  const reviewContractId = createId("rvc");
+  const reviewTaskId = createId("tsk");
+  const reviewedTaskId = createId("tsk");
+  const reviewedRunId = createId("run");
+  const reviewedResultId = createId("res");
+  const validEvent = (): EventRec => ({
+    type: "review.contract_issued",
+    actor,
+    entityRefs: {
+      reviewContractId,
+      taskId: reviewTaskId,
+      reviewedTaskId,
+      runId: reviewedRunId,
+      resultId: reviewedResultId,
+    },
+    payload: {
+      id: reviewContractId,
+      reviewTaskId,
+      reviewedTaskId,
+      reviewedRunId,
+      reviewedResultId,
+      resultDigest: "a".repeat(64),
+      rubricVersion: "quality-v1",
+      taskProfile: "implementer",
+      issuedAt: "2026-01-01T00:00:00.000Z",
+      expiresAt: "2026-01-01T00:01:00.000Z",
+    },
+  });
+  const malformed: Array<(event: EventRec) => void> = [
+    (event) => {
+      event.entityRefs.taskId = createId("tsk");
+    },
+    (event) => {
+      event.payload.reviewedRunId = createId("run");
+    },
+    (event) => {
+      event.payload.resultDigest = "not-a-digest";
+    },
+    (event) => {
+      event.payload.rubricVersion = "";
+    },
+    (event) => {
+      event.payload.taskProfile = "Reviewer";
+    },
+    (event) => {
+      event.payload.issuedAt = "not-a-time";
+    },
+    (event) => {
+      event.payload.expiresAt = event.payload.issuedAt;
+    },
+    (event) => {
+      event.payload.unexpected = true;
+    },
+  ];
+  try {
+    for (const mutate of malformed) {
+      const event = validEvent();
+      mutate(event);
+      await assert.rejects(
+        store.append(event as unknown as Parameters<EventStore["append"]>[0]),
+        /Event payload is invalid/,
+      );
+      assert.equal(store.state.lastEventSeq, 0);
+      assert.deepEqual(store.state.reviewContracts, {});
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
