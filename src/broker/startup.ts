@@ -420,6 +420,7 @@ export function minimalBrokerEnvironment(
     "HERDR_TAB_ID",
     "HERDR_BIN_PATH",
     "HERDR_CONFIG_PATH",
+    "PI_HERDR_ORCH_CONFIG_PATH",
   ])
     if (process.env[key] !== undefined) env[key] = process.env[key];
   env.HERDR_SOCKET_PATH = identity.path;

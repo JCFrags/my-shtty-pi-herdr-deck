@@ -50,6 +50,19 @@ test("scheduler admits deterministic priority FIFO and enforces parent limit", (
     ],
   );
 });
+test("scheduler rejects unknown or unsafe configured limits", () => {
+  assert.throws(
+    () =>
+      new DeterministicScheduler({
+        unknownLimit: 1,
+      } as never),
+    /Unknown scheduler limit/u,
+  );
+  assert.throws(
+    () => new DeterministicScheduler({ maxActiveAgents: 33 }),
+    /Invalid scheduler limit/u,
+  );
+});
 test("scheduler blocks missing and unsuccessful dependencies", () => {
   const scheduler = new DeterministicScheduler();
   scheduler.enqueue({
@@ -121,11 +134,17 @@ const workflow = {
     },
   ],
 };
-test("workflow planner validates DAG and keeps dry runs side-effect free", () => {
+test("workflow planner validates DAG and reports configured limits", () => {
   validateWorkflow(workflow);
-  const plan = planWorkflow(workflow, { objective: "inspect", dryRun: true });
+  const plan = planWorkflow(workflow, {
+    objective: "inspect",
+    dryRun: true,
+    maxActiveAgents: 3,
+    maxTasks: 11,
+  });
   assert.equal(plan.dryRun, true);
   assert.equal(plan.steps[1]?.objective, "Use ");
+  assert.deepEqual(plan.limits, { maxActiveAgents: 3, maxTasks: 11 });
 });
 test("workflow planner rejects cycles", () => {
   assert.throws(

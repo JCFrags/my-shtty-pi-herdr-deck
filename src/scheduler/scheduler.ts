@@ -29,6 +29,9 @@ export interface SchedulerSnapshot {
 
 function clampLimits(input: Partial<SchedulerLimits>): SchedulerLimits {
   const result = { ...DEFAULT_SCHEDULER_LIMITS };
+  for (const key of Object.keys(input))
+    if (!Object.hasOwn(result, key))
+      throw new RangeError(`Unknown scheduler limit: ${key}.`);
   for (const key of Object.keys(result) as (keyof SchedulerLimits)[]) {
     const value = input[key];
     if (value !== undefined) {
