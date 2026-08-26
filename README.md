@@ -23,6 +23,7 @@ The Pi control deck also requires component mouse events, per-tool expansion sta
 | ------------------------- | -------------------------------------------- |
 | Pi extension              | `./dist/extensions/pi-herdr-orchestrator.js` |
 | Primary Pi status command | `/orchestrator-status`                       |
+| Agent settings command    | `/agent-settings`                            |
 | Herdr plugin ID           | `pi.herdr.orchestrator`                      |
 | Managed pane entrypoint   | `deck`                                       |
 | Managed pane title        | `Agent Board`                                |
@@ -49,7 +50,9 @@ Each new agent has an explicit provider, model, and thinking selection. Selectio
 
 The broker reads `~/.config/pi-herdr-orchestrator/config.json` by default. Set `PI_HERDR_ORCH_CONFIG_PATH` to use a different owner-controlled file. Use `modelPolicy.defaults.global`, `modelPolicy.defaults.projects`, and `modelPolicy.defaults.roles` for scoped defaults. An optional allowlist can restrict the effective selection. The broker and provisioner validate the model and its exact thinking levels against the installed Pi catalog before they create a Herdr resource. This includes `xhigh` and `max` only when the installed model reports support.
 
-The Settings overlay shows installed choices. Press `d` in Settings to save a scoped default. Open Agents and press `n` to create an agent with an explicit provider, model, thinking level, and lifecycle class. The `agent_spawn` tool provides the same explicit fields for direct tool workflows. Pi always starts with explicit `--provider`, provider-qualified `--model`, and `--thinking` arguments. Managed registration must report the same selection.
+Run `/agent-settings` in Pi to edit this same broker allowlist. The searchable list starts with Pi's current model scope. Open one model to choose its allowed thinking levels. The broker saves all changes as one batch. Restricted mode must retain every effective model default and supports at most 64 exact model-level pairs. Escape cancels the draft. Unrestricted mode removes the allowlist. Changes apply only to new agents.
+
+The Agent Board Settings overlay also shows installed choices. Press `d` in Settings to save a scoped default. Open Agents and press `n` to create an agent with an explicit provider, model, thinking level, and lifecycle class. The `agent_spawn` tool provides the same explicit fields for direct tool workflows. Pi always starts with explicit `--provider`, provider-qualified `--model`, and `--thinking` arguments. Managed registration must report the same selection.
 
 Lifecycle classes are `temporary`, `reusable`, `retained`, and `pinned`. Agent lists and the inspector show the class and close recommendation. A temporary agent is recommended for close only after its task is terminal and its result is collected. Reusable agents stay idle and marked for reuse. Press `o` in Settings to enable or disable safe automatic closure. Automatic closure never closes a pinned, retained, reusable, blocked, or active agent. It also never closes an agent with an uncollected result.
 

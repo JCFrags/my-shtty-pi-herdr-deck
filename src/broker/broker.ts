@@ -91,7 +91,9 @@ import {
 import { InstalledPiCapabilities } from "../pi/model-capabilities.js";
 import {
   modelSelectionMatches,
+  requiredModelSelections,
   resolveSpawnPolicy,
+  sameModelSelection,
   validateModelSelection,
   type AgentPlacement,
   type ModelPolicyConfig,
@@ -3283,6 +3285,68 @@ export class Broker {
           accepted: true,
           persisted: Boolean(this.#persistLifecyclePolicy),
           lifecyclePolicy: nextPolicy,
+        };
+      } else if (request.method === "model.policy.allowlist.set") {
+        requirePermission(principal, "configure");
+        const p = request.params;
+        if (
+          !exactKeys(p, ["allowlist"]) ||
+          (p.allowlist !== null &&
+            (!Array.isArray(p.allowlist) ||
+              p.allowlist.length < 1 ||
+              p.allowlist.length > 64))
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Model allowlist is invalid.",
+          );
+        const allowlist =
+          p.allowlist === null
+            ? undefined
+            : p.allowlist.map((selection) => validateModelSelection(selection));
+        if (allowlist) {
+          if (
+            allowlist.some((selection, index) =>
+              allowlist
+                .slice(0, index)
+                .some((candidate) => sameModelSelection(candidate, selection)),
+            )
+          )
+            throw new OrchestratorError(
+              "INVALID_REQUEST",
+              "Model allowlist entries must be unique.",
+            );
+          await Promise.all(
+            allowlist.map(
+              async (selection) =>
+                await this.#piCapabilities.validate(selection),
+            ),
+          );
+          const missingDefaults = requiredModelSelections(
+            this.#modelPolicy,
+          ).filter(
+            (required) =>
+              !allowlist.some((selection) =>
+                sameModelSelection(selection, required),
+              ),
+          );
+          if (missingDefaults.length > 0)
+            throw new OrchestratorError(
+              "INVALID_REQUEST",
+              "The model allowlist must include every effective default.",
+              { details: { missingDefaults } },
+            );
+        }
+        const nextPolicy = { ...this.#modelPolicy };
+        if (allowlist) nextPolicy.allowlist = allowlist;
+        else delete nextPolicy.allowlist;
+        if (this.#persistModelPolicy)
+          await this.#persistModelPolicy(nextPolicy);
+        this.#modelPolicy = nextPolicy;
+        result = {
+          accepted: true,
+          persisted: Boolean(this.#persistModelPolicy),
+          policy: this.#modelPolicy,
         };
       } else if (request.method === "model.policy.set") {
         requirePermission(principal, "configure");
