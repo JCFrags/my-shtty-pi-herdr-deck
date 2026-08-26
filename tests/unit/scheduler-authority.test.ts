@@ -9,10 +9,9 @@ test("the production broker constructs one configured scheduler authority", asyn
   );
   const constructions = source.match(/new DeterministicScheduler\(/gu) ?? [];
   assert.equal(constructions.length, 1);
-  assert.match(
-    source,
-    /new DeterministicScheduler\(options\.schedulerLimits\)/u,
-  );
+  assert.match(source, /new DeterministicScheduler\(/u);
+  assert.match(source, /options\.schedulerLimits/u);
+  assert.match(source, /this\.#endpointPolicy\.endpoints/u);
 });
 
 test("production startup passes scheduler configuration into the broker", async () => {
@@ -20,5 +19,7 @@ test("production startup passes scheduler configuration into the broker", async 
     new URL("../../src/cli/main.js", import.meta.url),
     "utf8",
   );
-  assert.match(source, /schedulerLimits:\s*brokerConfig\.scheduler/u);
+  assert.match(source, /scalarSchedulerLimits\(brokerConfig\?\.scheduler\)/u);
+  assert.match(source, /schedulerLimits:\s*brokerSchedulerLimits/u);
+  assert.match(source, /endpointPolicy:/u);
 });

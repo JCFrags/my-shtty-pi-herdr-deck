@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { Broker } from "../../src/broker/broker.js";
+import type { EndpointPolicyConfig } from "../../src/broker/endpoint-policy.js";
 import type { ModelPolicyConfig } from "../../src/broker/model-policy.js";
 import { digest } from "../../src/broker/authentication.js";
 import { PiAdapter } from "../../src/pi/adapter.js";
@@ -15,6 +16,7 @@ import { EventStore } from "../../src/state/event-store.js";
 import { HerdrProvisioner } from "../../src/herdr/provisioner.js";
 import { HerdrService } from "../../src/herdr/service.js";
 import { normalizeSnapshot } from "../../src/herdr/normalizers.js";
+import type { SchedulerLimits } from "../../src/scheduler/types.js";
 
 const actor = {
   principalId: "prn_00000000000000000000000000",
@@ -70,10 +72,13 @@ async function productionParent(
     resourceMode?: "missing" | "wrong-owner" | "stale";
     holdProvisions?: boolean;
     holdReuseProvisions?: boolean;
+    failProvisionAt?: number;
     compactLifecycle?: boolean;
     compactEnabled?: boolean;
     modelPolicy?: ModelPolicyConfig;
     restartModelPolicy?: ModelPolicyConfig;
+    schedulerLimits?: Partial<SchedulerLimits>;
+    endpointPolicy?: EndpointPolicyConfig;
     realReconcileWorktree?:
       | "exact"
       | "missing"
@@ -212,6 +217,8 @@ async function productionParent(
         else heldProvisions.push(entry);
         await held;
       }
+      if (options.failProvisionAt === provisions.length)
+        throw new Error("held provision failed");
       await store.append({
         type: "herdr.provision.intent",
         actor,
@@ -367,6 +374,12 @@ async function productionParent(
       ? { compactDelegationEnabled: options.compactEnabled }
       : {}),
     ...(options.modelPolicy ? { modelPolicy: options.modelPolicy } : {}),
+    ...(options.schedulerLimits
+      ? { schedulerLimits: options.schedulerLimits }
+      : {}),
+    ...(options.endpointPolicy
+      ? { endpointPolicy: options.endpointPolicy }
+      : {}),
   });
   await broker.start();
   const secret = (await readFile(paths.secret, "utf8")).trim();
@@ -413,6 +426,12 @@ async function productionParent(
         : {}),
       ...((options.restartModelPolicy ?? options.modelPolicy)
         ? { modelPolicy: options.restartModelPolicy ?? options.modelPolicy }
+        : {}),
+      ...(options.schedulerLimits
+        ? { schedulerLimits: options.schedulerLimits }
+        : {}),
+      ...(options.endpointPolicy
+        ? { endpointPolicy: options.endpointPolicy }
         : {}),
     });
     await broker.start();
@@ -528,9 +547,42 @@ async function connectManagedChild(
   h.children.set(agentId, child);
 }
 
+async function publishManagedResult(
+  h: Awaited<ReturnType<typeof productionParent>>,
+  agentId: string,
+): Promise<void> {
+  const child = h.children.get(agentId);
+  const agent = h.broker.store.state.agents[agentId];
+  const run = agent?.currentRunId
+    ? h.broker.store.state.runs[agent.currentRunId]
+    : undefined;
+  assert.ok(child && run);
+  await child.request("result.publish", {
+    agentId,
+    taskId: run.taskId,
+    runId: run.id,
+    assignmentGeneration: run.assignmentGeneration,
+    result: {
+      schemaVersion: 1,
+      status: "succeeded",
+      summary: `completed ${agentId}`,
+      findings: [],
+      changedFiles: [],
+      commandsRun: [],
+      tests: [],
+      commits: [],
+      artifacts: [],
+      unresolved: [],
+      questions: [],
+      recommendedNextAction: null,
+    },
+  });
+}
+
 async function completeManagedChild(
   h: Awaited<ReturnType<typeof productionParent>>,
   agentId: string,
+  publishResult = true,
 ): Promise<void> {
   const child = h.children.get(agentId);
   const agent = h.broker.store.state.agents[agentId];
@@ -577,26 +629,8 @@ async function completeManagedChild(
     turnIndex: 0,
     agentCycleId: `cycle-${agentId}`,
   });
-  await child.request("result.publish", {
-    agentId,
-    taskId: run.taskId,
-    runId: run.id,
-    assignmentGeneration: run.assignmentGeneration,
-    result: {
-      schemaVersion: 1,
-      status: "succeeded",
-      summary: `completed ${agentId}`,
-      findings: [],
-      changedFiles: [],
-      commandsRun: [],
-      tests: [],
-      commits: [],
-      artifacts: [],
-      unresolved: [],
-      questions: [],
-      recommendedNextAction: null,
-    },
-  });
+  if (!publishResult) return;
+  await publishManagedResult(h, agentId);
 }
 
 test("production agent.spawn preserves explicit worktree through exact receipts", async () => {
@@ -885,6 +919,66 @@ test("compact acceptance rejects live admission drift before its first mutation"
     );
     assert.equal(Object.keys(h.broker.store.state.workflows).length, 0);
     assert.equal(h.provisions.length, 0);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("compact preview and replay preserve endpoint capacity without duplicate provision", async () => {
+  const h = await productionParent({
+    holdProvisions: true,
+    schedulerLimits: {
+      maxActiveAgents: 4,
+      maxActivePerParent: 4,
+      maxProvisioning: 2,
+    },
+    endpointPolicy: {
+      endpoints: { local: { maxConcurrentAgents: 1 } },
+      mappings: [{ provider: "openai-codex", endpointId: "local" }],
+    },
+  });
+  try {
+    const text = [
+      "- [ ] first: Compact capacity first [profile:implementer] [mode:write]",
+      "- [ ] second: Compact capacity second [profile:reviewer] [mode:read]",
+    ].join("\n");
+    const preview = (await h.client.request("compact.delegate", { text })) as {
+      workflowDigest: string;
+      stepCount: number;
+    };
+    assert.equal(preview.stepCount, 2);
+    assert.equal(Object.keys(h.broker.store.state.tasks).length, 0);
+    assert.equal(h.provisions.length, 0);
+
+    const params = {
+      text,
+      accept: true,
+      workflowDigest: preview.workflowDigest,
+      parentAgentId: h.registered.agentId,
+    };
+    const options = { idempotencyKey: "compact-endpoint-capacity-replay" };
+    const accepted = h.client.request("compact.delegate", params, options);
+    (await h.nextProvision()).release();
+    const frozen = await accepted;
+    const tasks = Object.values(h.broker.store.state.tasks);
+    assert.equal(tasks.length, 2);
+    assert.equal(h.provisions.length, 1);
+    assert.equal(
+      tasks.filter((task) => task.admissionReason === "endpoint_capacity")
+        .length,
+      1,
+    );
+
+    await h.restart();
+    const replay = await h.client.request("compact.delegate", params, options);
+    assert.deepEqual(replay, frozen);
+    assert.equal(h.provisions.length, 1);
+    assert.equal(
+      Object.values(h.broker.store.state.tasks).filter(
+        (task) => task.admissionReason === "endpoint_capacity",
+      ).length,
+      1,
+    );
   } finally {
     await h.cleanup();
   }
@@ -1450,6 +1544,294 @@ test("delegate.execute provisions both defaults through exact owned receipts", a
   }
 });
 
+test("failed provisioning releases endpoint capacity for the queued task", async () => {
+  const h = await productionParent({
+    holdProvisions: true,
+    failProvisionAt: 1,
+    schedulerLimits: {
+      maxActiveAgents: 4,
+      maxActivePerParent: 4,
+      maxProvisioning: 2,
+    },
+    endpointPolicy: {
+      endpoints: { local: { maxConcurrentAgents: 1 } },
+      mappings: [{ provider: "openai-codex", endpointId: "local" }],
+    },
+  });
+  try {
+    const accepted = h.client.request("delegate.execute", {
+      mode: "parallel",
+      parentAgentId: h.registered.agentId,
+      title: "capacity-failed-provision",
+      steps: [
+        {
+          key: "first",
+          profileId: "implementer",
+          title: "capacity-failed-first",
+          objective: "capacity-failed-first",
+          dependsOn: [],
+        },
+        {
+          key: "second",
+          profileId: "reviewer",
+          title: "capacity-failed-second",
+          objective: "capacity-failed-second",
+          dependsOn: [],
+        },
+      ],
+      wait: false,
+      waitUntil: [],
+      timeoutMs: 60_000,
+      failureMode: "collect_all",
+      dryRun: false,
+    }) as Promise<{ tasks: Array<{ taskId: string }> }>;
+
+    (await h.nextProvision()).release();
+    const secondProvision = await h.nextProvision();
+    secondProvision.release();
+    const response = await accepted;
+    const tasks = response.tasks.map(
+      ({ taskId }) => h.broker.store.state.tasks[taskId]!,
+    );
+    assert.equal(h.provisions.length, 2);
+    assert.equal(tasks.filter((task) => task.state === "failed").length, 1);
+    assert.equal(
+      tasks.filter((task) => task.currentRunId && task.state !== "failed")
+        .length,
+      1,
+    );
+    assert.deepEqual(
+      tasks.map((task) => task.endpointId),
+      ["local", "local"],
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("direct spawn waits for endpoint capacity until cancellation releases it", async () => {
+  const h = await productionParent({
+    holdProvisions: true,
+    schedulerLimits: {
+      maxActiveAgents: 4,
+      maxActivePerParent: 4,
+      maxProvisioning: 2,
+    },
+    endpointPolicy: {
+      endpoints: { local: { maxConcurrentAgents: 1 } },
+      mappings: [{ provider: "openai-codex", endpointId: "local" }],
+    },
+  });
+  try {
+    const firstAccepted = h.client.request("agent.spawn", {
+      task: { title: "capacity-spawn-first", objective: "first" },
+      profileId: "implementer",
+      isolation: { mode: "worktree" },
+      wait: false,
+      dryRun: false,
+    }) as Promise<{ tasks: Array<{ taskId: string }> }>;
+    const firstProvision = await h.nextProvision();
+    firstProvision.release();
+    const firstTaskId = (await firstAccepted).tasks[0]!.taskId;
+
+    const second = (await h.client.request("agent.spawn", {
+      task: { title: "capacity-spawn-second", objective: "second" },
+      profileId: "reviewer",
+      isolation: { mode: "shared-readonly" },
+      wait: false,
+      dryRun: false,
+    })) as { tasks: Array<{ taskId: string }> };
+    const secondTaskId = second.tasks[0]!.taskId;
+    assert.equal(h.provisions.length, 1);
+    assert.equal(
+      h.broker.store.state.tasks[secondTaskId]?.admissionReason,
+      "endpoint_capacity",
+    );
+
+    await h.client.request("task.cancel", {
+      taskId: firstTaskId,
+      reason: "capacity cancellation test",
+      cascade: false,
+    });
+    const secondProvision = await h.nextProvision();
+    secondProvision.release();
+    assert.equal(h.provisions.length, 2);
+    assert.equal(h.broker.store.state.tasks[firstTaskId]?.state, "cancelled");
+    assert.ok(h.broker.store.state.tasks[secondTaskId]?.currentRunId);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("result recovery holds endpoint capacity until result publish", async () => {
+  const h = await productionParent({
+    holdProvisions: true,
+    schedulerLimits: {
+      maxActiveAgents: 4,
+      maxActivePerParent: 4,
+      maxProvisioning: 2,
+    },
+    endpointPolicy: {
+      endpoints: { local: { maxConcurrentAgents: 1 } },
+      mappings: [{ provider: "openai-codex", endpointId: "local" }],
+    },
+  });
+  try {
+    const accepted = h.client.request("delegate.execute", {
+      mode: "parallel",
+      parentAgentId: h.registered.agentId,
+      title: "capacity-result-recovery",
+      steps: [
+        {
+          key: "first",
+          profileId: "implementer",
+          title: "capacity-recovery-first",
+          objective: "capacity-recovery-first",
+          dependsOn: [],
+        },
+        {
+          key: "second",
+          profileId: "reviewer",
+          title: "capacity-recovery-second",
+          objective: "capacity-recovery-second",
+          dependsOn: [],
+        },
+      ],
+      wait: false,
+      waitUntil: [],
+      timeoutMs: 60_000,
+      failureMode: "collect_all",
+      dryRun: false,
+    }) as Promise<{ tasks: Array<{ taskId: string }> }>;
+
+    const firstProvision = await h.nextProvision();
+    const firstAgentId = firstProvision.input.agentId as string;
+    firstProvision.release();
+    const response = await accepted;
+    const tasks = response.tasks.map(
+      ({ taskId }) => h.broker.store.state.tasks[taskId]!,
+    );
+    const active = tasks.find((task) => task.currentRunId)!;
+    const queued = tasks.find((task) => !task.currentRunId)!;
+    await connectManagedChild(h, firstAgentId);
+    const recoveryRequested = boundedReceipt(h.broker.store, (event) => {
+      const value = event as {
+        type?: string;
+        entityRefs?: Record<string, unknown>;
+      };
+      return (
+        value.type === "run.result_recovery_requested" &&
+        value.entityRefs?.runId === active.currentRunId
+      );
+    });
+    await Promise.all([
+      completeManagedChild(h, firstAgentId, false),
+      recoveryRequested.promise,
+    ]);
+    recoveryRequested.remove();
+    assert.equal(
+      h.broker.store.state.runs[active.currentRunId!]?.state,
+      "result_pending_missing",
+    );
+    assert.equal(queued.admissionReason, "endpoint_capacity");
+    assert.equal(h.provisions.length, 1);
+
+    await publishManagedResult(h, firstAgentId);
+    const secondProvision = await h.nextProvision();
+    secondProvision.release();
+    assert.equal(h.provisions.length, 2);
+    assert.ok(h.broker.store.state.tasks[queued.id]?.currentRunId);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("endpoint capacity survives restart and releases only after terminal result", async () => {
+  const h = await productionParent({
+    holdProvisions: true,
+    schedulerLimits: {
+      maxActiveAgents: 4,
+      maxActivePerParent: 4,
+      maxProvisioning: 2,
+    },
+    endpointPolicy: {
+      endpoints: { local: { maxConcurrentAgents: 1 } },
+      mappings: [{ provider: "openai-codex", endpointId: "local" }],
+    },
+  });
+  try {
+    const accepted = h.client.request("delegate.execute", {
+      mode: "parallel",
+      parentAgentId: h.registered.agentId,
+      title: "capacity-one-restart",
+      steps: [
+        {
+          key: "first",
+          profileId: "implementer",
+          title: "capacity-one-first",
+          objective: "capacity-one-first",
+          dependsOn: [],
+        },
+        {
+          key: "second",
+          profileId: "reviewer",
+          title: "capacity-one-second",
+          objective: "capacity-one-second",
+          dependsOn: [],
+        },
+      ],
+      wait: false,
+      waitUntil: [],
+      timeoutMs: 60_000,
+      failureMode: "fail_fast",
+      dryRun: false,
+    }) as Promise<{ tasks: Array<{ taskId: string }> }>;
+
+    const firstProvision = await h.nextProvision();
+    const firstAgentId = firstProvision.input.agentId as string;
+    firstProvision.release();
+    const response = await accepted;
+    assert.equal(response.tasks.length, 2);
+
+    const tasks = response.tasks.map(
+      ({ taskId }) => h.broker.store.state.tasks[taskId]!,
+    );
+    const active = tasks.find((task) => task.currentRunId);
+    const queued = tasks.find((task) => !task.currentRunId);
+    assert.ok(active && queued);
+    assert.equal(active.endpointId, "local");
+    assert.equal(queued.endpointId, "local");
+    assert.equal(queued.state, "queued");
+    assert.equal(queued.admissionReason, "endpoint_capacity");
+    assert.equal(h.provisions.length, 1);
+
+    await h.restart();
+    assert.equal(h.provisions.length, 1);
+    assert.equal(
+      h.broker.store.state.tasks[queued.id]?.admissionReason,
+      "endpoint_capacity",
+    );
+    assert.equal(
+      h.broker.store.state.runs[active.currentRunId!]?.endpointId,
+      "local",
+    );
+
+    await connectManagedChild(h, firstAgentId);
+    await completeManagedChild(h, firstAgentId);
+    const secondProvision = await h.nextProvision();
+    assert.notEqual(secondProvision.input.agentId, firstAgentId);
+    secondProvision.release();
+    assert.equal(h.provisions.length, 2);
+    assert.ok(h.broker.store.state.tasks[queued.id]?.currentRunId);
+    assert.equal(
+      h.broker.store.state.tasks[queued.id]?.admissionReason,
+      undefined,
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
 test("reuse-worktree rejects multiple dependencies before workflow mutation", async () => {
   const h = await productionParent();
   const appended: unknown[] = [];
@@ -1508,6 +1890,84 @@ test("reuse-worktree rejects multiple dependencies before workflow mutation", as
     assert.equal(h.provisions.length, 0);
   } finally {
     remove();
+    await h.cleanup();
+  }
+});
+
+test("reuse-worktree waits for the predecessor endpoint lease and binds once", async () => {
+  const h = await productionParent({
+    holdProvisions: true,
+    schedulerLimits: {
+      maxActiveAgents: 4,
+      maxActivePerParent: 4,
+      maxProvisioning: 2,
+    },
+    endpointPolicy: {
+      endpoints: { local: { maxConcurrentAgents: 1 } },
+      mappings: [{ provider: "openai-codex", endpointId: "local" }],
+    },
+  });
+  try {
+    const accepted = h.client.request("workflow.create", {
+      objective: "capacity-reuse-worktree",
+      parentAgentId: h.registered.agentId,
+      definition: {
+        version: 1,
+        id: "capacity-reuse-worktree",
+        name: "capacity reuse worktree",
+        description: "reuse after one endpoint lease releases",
+        mode: "dag",
+        failureMode: "fail_fast",
+        maxCorrectionLoops: 0,
+        steps: [
+          {
+            key: "implement",
+            profileId: "implementer",
+            title: "implement",
+            objectiveTemplate: "{{input.objective}}",
+            constraints: [],
+            dependsOn: [],
+            resultProjection: [],
+            isolationMode: "worktree",
+          },
+          {
+            key: "review",
+            profileId: "reviewer",
+            title: "review",
+            objectiveTemplate: "{{input.objective}}",
+            constraints: [],
+            dependsOn: ["implement"],
+            resultProjection: [],
+            isolationMode: "reuse-worktree",
+          },
+        ],
+      },
+      dryRun: false,
+    }) as Promise<{ tasks: Array<{ taskId: string }> }>;
+    const firstProvision = await h.nextProvision();
+    const firstAgentId = firstProvision.input.agentId as string;
+    firstProvision.release();
+    const response = await accepted;
+    const implement = h.broker.store.state.tasks[response.tasks[0]!.taskId]!;
+    const review = h.broker.store.state.tasks[response.tasks[1]!.taskId]!;
+    assert.equal(h.provisions.length, 1);
+    assert.equal(implement.endpointId, "local");
+    assert.equal(review.endpointId, "local");
+    assert.equal(review.currentRunId, undefined);
+
+    await connectManagedChild(h, firstAgentId);
+    await completeManagedChild(h, firstAgentId);
+    const secondProvision = await h.nextProvision();
+    assert.equal(
+      secondProvision.input.reuseWorktreeId,
+      `worktree-${firstAgentId}`,
+    );
+    secondProvision.release();
+    assert.equal(h.provisions.length, 2);
+    const reviewRun = h.broker.store.state.tasks[review.id]?.currentRunId;
+    assert.ok(reviewRun);
+    assert.equal(h.broker.store.state.runs[reviewRun]?.endpointId, "local");
+  } finally {
     await h.cleanup();
   }
 });

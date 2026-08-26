@@ -4,6 +4,7 @@ export type SchedulableState =
   | "provisioning"
   | "running"
   | "blocked"
+  | "collecting"
   | "succeeded"
   | "failed"
   | "cancelled"
@@ -23,6 +24,7 @@ export interface SchedulerTask {
   readonly depth: number;
   readonly dependencies: readonly SchedulerDependency[];
   readonly state: SchedulableState;
+  readonly endpointId?: string;
   readonly projectKey?: string;
   readonly worktreeKey?: string;
   readonly allowReuse?: boolean;
