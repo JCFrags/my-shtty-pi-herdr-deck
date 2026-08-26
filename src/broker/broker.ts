@@ -5178,6 +5178,11 @@ export class Broker {
           );
         }
         const scheduler = this.#scheduler;
+        if (planned.length > scheduler.limits.maxTasksPerDelegate)
+          throw new OrchestratorError(
+            "LIMIT_EXCEEDED",
+            "Delegation exceeds the per-request task limit.",
+          );
         if (
           Object.values(this.store.state.tasks).filter(
             (task) => task.state === "queued",
