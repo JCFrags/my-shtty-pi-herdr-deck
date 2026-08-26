@@ -14,7 +14,7 @@ import { access } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createProductionHerdrService } from "../herdr/service.js";
-import { loadConfig } from "../ops/config.js";
+import { loadConfig, scalarSchedulerLimits } from "../ops/config.js";
 import { exportState, planRetention } from "../ops/retention.js";
 import { planRetention as planRetentionPolicy } from "../ops/retention-policy.js";
 import { exportBeforeRepair, planRecovery } from "../ops/recovery.js";
@@ -148,7 +148,9 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     const policy = new ConfigPolicy({
       user: {
         version: config.version,
-        ...(config.scheduler ? { scheduler: config.scheduler } : {}),
+        ...(scalarSchedulerLimits(config.scheduler)
+          ? { scheduler: scalarSchedulerLimits(config.scheduler) }
+          : {}),
         ...(config.timeouts ? { timeouts: config.timeouts } : {}),
         ...(config.retention ? { retention: config.retention } : {}),
         ...(config.security ? { security: config.security } : {}),
@@ -354,6 +356,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
         trustedProject: process.env.PI_HERDR_ORCH_PROJECT_TRUSTED === "1",
       })
     : undefined;
+  const brokerSchedulerLimits = scalarSchedulerLimits(brokerConfig?.scheduler);
   let persistedBrokerConfig = brokerConfig;
   const persistBrokerConfig =
     brokerConfigPath && brokerConfig
@@ -371,8 +374,20 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     ...(brokerConfig?.modelPolicy
       ? { modelPolicy: brokerConfig.modelPolicy }
       : {}),
-    ...(brokerConfig?.scheduler
-      ? { schedulerLimits: brokerConfig.scheduler }
+    ...(brokerSchedulerLimits
+      ? { schedulerLimits: brokerSchedulerLimits }
+      : {}),
+    ...(brokerConfig?.scheduler?.endpoints || brokerConfig?.modelIntelligence
+      ? {
+          endpointPolicy: {
+            ...(brokerConfig.scheduler?.endpoints
+              ? { endpoints: brokerConfig.scheduler.endpoints }
+              : {}),
+            ...(brokerConfig.modelIntelligence
+              ? { mappings: brokerConfig.modelIntelligence.mappings }
+              : {}),
+          },
+        }
       : {}),
     ...(brokerConfig?.lifecyclePolicy
       ? { lifecyclePolicy: brokerConfig.lifecyclePolicy }

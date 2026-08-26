@@ -46,6 +46,18 @@ const runSharedTerminal = new Set([
   "lost",
 ]);
 const DEFAULT_TASK_WALL_MS = 15 * 60_000;
+const validEndpointId = (value: unknown): value is string =>
+  typeof value === "string" && /^[a-z][a-z0-9_-]{0,63}$/u.test(value);
+const admissionReasons = new Set([
+  "global_limit",
+  "parent_limit",
+  "endpoint_capacity",
+  "provisioning_limit",
+  "dependency_blocked",
+  "depth_exceeded",
+  "queue_full",
+  "not_queued",
+]);
 function derivedDeadline(createdAt: unknown): string | undefined {
   if (typeof createdAt !== "string") return undefined;
   const created = Date.parse(createdAt);
@@ -213,7 +225,7 @@ export function reduce(
         if (
           typeof taskId !== "string" ||
           !/^tsk_[A-Za-z0-9_-]{1,128}$/u.test(taskId) ||
-          ![10, 11].includes(Object.keys(definition).length) ||
+          ![10, 11, 12].includes(Object.keys(definition).length) ||
           ![
             "taskId",
             "title",
@@ -236,6 +248,7 @@ export function reduce(
                 "parentAgentId",
                 "workflowId",
                 "profileId",
+                "endpointId",
                 "constraints",
                 "dependencies",
                 "project",
@@ -254,6 +267,8 @@ export function reduce(
           typeof definition.createdAt !== "string" ||
           !Number.isFinite(Date.parse(definition.createdAt)) ||
           typeof definition.profileId !== "string" ||
+          (definition.endpointId !== undefined &&
+            !validEndpointId(definition.endpointId)) ||
           (definition.constraints !== undefined &&
             (!Array.isArray(definition.constraints) ||
               definition.constraints.length > 64 ||
@@ -308,6 +323,9 @@ export function reduce(
           parentAgentId,
           workflowId,
           profileId: definition.profileId,
+          ...(validEndpointId(definition.endpointId)
+            ? { endpointId: definition.endpointId }
+            : {}),
           constraints: Array.isArray(definition.constraints)
             ? [...definition.constraints]
             : [],
@@ -387,6 +405,7 @@ export function reduce(
       next.tasks[taskId] = {
         ...task,
         state: to,
+        ...(to !== "queued" ? { admissionReason: undefined } : {}),
         ...(to === "timed_out" && timeoutReason(p.reason)
           ? { terminalReason: p.reason as ErrorSummary }
           : {}),
@@ -521,6 +540,11 @@ export function reduce(
       const id = String(p.taskId);
       if (!id || next.tasks[id])
         throw new OrchestratorError("INVALID_REQUEST", "Task already exists.");
+      if (p.endpointId !== undefined && !validEndpointId(p.endpointId))
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Task endpoint is invalid.",
+        );
       next.tasks = {
         ...next.tasks,
         [id]: {
@@ -537,6 +561,9 @@ export function reduce(
             : {}),
           ...(typeof p.profileId === "string"
             ? { profileId: p.profileId }
+            : {}),
+          ...(validEndpointId(p.endpointId)
+            ? { endpointId: p.endpointId }
             : {}),
           ...(Array.isArray(p.constraints)
             ? {
@@ -619,6 +646,18 @@ export function reduce(
           "STATE_CORRUPT",
           "Run deadline does not match its task deadline.",
         );
+      if (
+        p.endpointId !== undefined &&
+        (!validEndpointId(p.endpointId) ||
+          (task.endpointId !== undefined && task.endpointId !== p.endpointId))
+      )
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Run endpoint is invalid.",
+        );
+      const endpointId = validEndpointId(p.endpointId)
+        ? p.endpointId
+        : task.endpointId;
       const run: Run = {
         id,
         taskId: task.id,
@@ -631,6 +670,7 @@ export function reduce(
           ? { assignmentId: p.assignmentId }
           : {}),
         assignmentGeneration: Number(p.assignmentGeneration ?? 1),
+        ...(endpointId ? { endpointId } : {}),
         ...(typeof p.piSessionId === "string"
           ? { piSessionId: p.piSessionId }
           : {}),
@@ -663,6 +703,8 @@ export function reduce(
             : {}),
           runIds: [...(task.runIds ?? []), id],
           state: "assigned",
+          admissionReason: undefined,
+          ...(endpointId ? { endpointId } : {}),
         },
       };
       break;
@@ -939,8 +981,26 @@ export function reduce(
       break;
     }
     case "scheduler.admitted":
-    case "scheduler.blocked":
+    case "scheduler.blocked": {
+      const id = event.entityRefs?.taskId ?? String(p.taskId ?? "");
+      const task = next.tasks[id];
+      if (!task) break;
+      if (event.type === "scheduler.admitted") {
+        next.tasks = {
+          ...next.tasks,
+          [id]: { ...task, admissionReason: undefined },
+        };
+      } else if (admissionReasons.has(String(p.reason))) {
+        next.tasks = {
+          ...next.tasks,
+          [id]: {
+            ...task,
+            admissionReason: p.reason as NonNullable<Task["admissionReason"]>,
+          },
+        };
+      }
       break;
+    }
     case "task.collected": {
       const id = event.entityRefs?.taskId ?? String(p.taskId ?? "");
       const task = next.tasks[id];

@@ -11,6 +11,7 @@ export type AdmissionReason =
   | "admitted"
   | "global_limit"
   | "parent_limit"
+  | "endpoint_capacity"
   | "provisioning_limit"
   | "dependency_blocked"
   | "depth_exceeded"
@@ -46,16 +47,46 @@ function clampLimits(input: Partial<SchedulerLimits>): SchedulerLimits {
   }
   return result;
 }
+function activeState(state: SchedulerTask["state"]): boolean {
+  return ["provisioning", "running", "blocked", "collecting"].includes(state);
+}
+
+function taskEndpointId(task: SchedulerTask): string {
+  return task.endpointId ?? "derived-v1-legacy";
+}
+
+function clampEndpointLimits(
+  input: Readonly<Record<string, number>>,
+): Readonly<Record<string, number>> {
+  const result: Record<string, number> = {};
+  for (const [endpointId, value] of Object.entries(input)) {
+    if (
+      !/^[a-z][a-z0-9_-]{0,63}$/u.test(endpointId) ||
+      !Number.isSafeInteger(value) ||
+      value < 1 ||
+      value > HARD_SCHEDULER_LIMITS.maxActiveAgents
+    )
+      throw new RangeError(`Invalid endpoint limit: ${endpointId}.`);
+    result[endpointId] = value;
+  }
+  return Object.freeze(result);
+}
+
 function priorityValue(priority: SchedulerTask["priority"]): number {
   return priority === "high" ? 0 : priority === "normal" ? 1 : 2;
 }
 
 export class DeterministicScheduler {
   readonly limits: SchedulerLimits;
+  readonly endpointLimits: Readonly<Record<string, number>>;
   #tasks = new Map<string, SchedulerTask>();
   #provisioning = 0;
-  constructor(limits: Partial<SchedulerLimits> = {}) {
+  constructor(
+    limits: Partial<SchedulerLimits> = {},
+    endpointLimits: Readonly<Record<string, number>> = {},
+  ) {
     this.limits = clampLimits(limits);
+    this.endpointLimits = clampEndpointLimits(endpointLimits);
   }
   enqueue(task: SchedulerTask): void {
     if (task.state !== "queued")
@@ -82,14 +113,21 @@ export class DeterministicScheduler {
     tasks: ReadonlyMap<string, SchedulerTask> = this.#tasks,
   ): Admission[] {
     const active = [...tasks.values()].filter((task) =>
-      ["provisioning", "running", "blocked"].includes(task.state),
+      activeState(task.state),
     );
     const activeByParent = new Map<string, number>();
-    for (const task of active)
+    const activeByEndpoint = new Map<string, number>();
+    for (const task of active) {
       activeByParent.set(
         task.parentAgentId,
         (activeByParent.get(task.parentAgentId) ?? 0) + 1,
       );
+      const endpointId = taskEndpointId(task);
+      activeByEndpoint.set(
+        endpointId,
+        (activeByEndpoint.get(endpointId) ?? 0) + 1,
+      );
+    }
     let slots = Math.max(0, this.limits.maxActiveAgents - active.length);
     const available = [...tasks.values()]
       .filter((task) => task.state === "queued")
@@ -150,11 +188,26 @@ export class DeterministicScheduler {
         });
         continue;
       }
+      const endpointId = taskEndpointId(task);
+      const endpointLimit =
+        this.endpointLimits[endpointId] ?? this.limits.maxActiveAgents;
+      if ((activeByEndpoint.get(endpointId) ?? 0) >= endpointLimit) {
+        result.push({
+          taskId: task.id,
+          admitted: false,
+          reason: "endpoint_capacity",
+        });
+        continue;
+      }
       result.push({ taskId: task.id, admitted: true, reason: "admitted" });
       slots--;
       activeByParent.set(
         task.parentAgentId,
         (activeByParent.get(task.parentAgentId) ?? 0) + 1,
+      );
+      activeByEndpoint.set(
+        endpointId,
+        (activeByEndpoint.get(endpointId) ?? 0) + 1,
       );
     }
     return result;
@@ -169,9 +222,7 @@ export class DeterministicScheduler {
     const values = [...this.#tasks.values()];
     return {
       queued: values.filter((task) => task.state === "queued"),
-      active: values.filter((task) =>
-        ["provisioning", "running", "blocked"].includes(task.state),
-      ),
+      active: values.filter((task) => activeState(task.state)),
       provisioning: this.#provisioning,
     };
   }

@@ -62,8 +62,13 @@ import type {
   HerdrMetadataState,
   QuestionRecord,
   StoredEvent,
+  Task,
 } from "../state/types.js";
 import { DeterministicScheduler } from "../scheduler/scheduler.js";
+import {
+  resolveEndpoint,
+  type EndpointPolicyConfig,
+} from "./endpoint-policy.js";
 import { planAdmission } from "../scheduler/admission.js";
 import {
   workflowReadiness,
@@ -531,6 +536,7 @@ export interface BrokerOptions {
   ) => Promise<HerdrService>;
   modelPolicy?: ModelPolicyConfig;
   schedulerLimits?: Partial<SchedulerLimits>;
+  endpointPolicy?: EndpointPolicyConfig;
   lifecyclePolicy?: { autoCloseCompletedTemporary?: boolean };
   persistModelPolicy?: (policy: ModelPolicyConfig) => Promise<void>;
   persistLifecyclePolicy?: (policy: {
@@ -571,6 +577,7 @@ export class Broker {
   #clearTimeout: (timer: NodeJS.Timeout) => void;
   #herdr?: HerdrService;
   #modelPolicy: ModelPolicyConfig;
+  readonly #endpointPolicy: EndpointPolicyConfig;
   readonly #scheduler: DeterministicScheduler;
   readonly #piCapabilities = new InstalledPiCapabilities();
   readonly #persistModelPolicy:
@@ -607,7 +614,15 @@ export class Broker {
       ((callback, delayMs) => setTimeout(callback, delayMs));
     this.#clearTimeout = options.clearTimeout ?? clearTimeout;
     this.#modelPolicy = options.modelPolicy ?? {};
-    this.#scheduler = new DeterministicScheduler(options.schedulerLimits);
+    this.#endpointPolicy = options.endpointPolicy ?? {};
+    this.#scheduler = new DeterministicScheduler(
+      options.schedulerLimits,
+      Object.fromEntries(
+        Object.entries(this.#endpointPolicy.endpoints ?? {}).map(
+          ([endpointId, limit]) => [endpointId, limit.maxConcurrentAgents],
+        ),
+      ),
+    );
     this.#persistModelPolicy = options.persistModelPolicy;
     this.#persistLifecyclePolicy = options.persistLifecyclePolicy;
     this.#autoCloseCompletedTemporary =
@@ -5102,6 +5117,11 @@ export class Broker {
                 "Compact policy changed after preview acceptance.",
               );
           }
+          const endpoint = resolveEndpoint(
+            spawnPolicy.effective.model,
+            this.#endpointPolicy,
+            this.#scheduler.limits.maxActiveAgents,
+          );
           return {
             key: safeText(record.key, 64)
               ? (record.key as string)
@@ -5122,6 +5142,7 @@ export class Broker {
               : [],
             isolation: resolveIsolation(profileId, requested),
             spawnPolicy,
+            endpointId: endpoint.endpointId,
             lifecycleClass:
               request.method === "agent.spawn" &&
               typeof p.lifecycleClass === "string"
@@ -5206,6 +5227,7 @@ export class Broker {
               estimatedAgentCount: 1,
               requestedModel: step.spawnPolicy.requested,
               effectiveModel: step.spawnPolicy.effective,
+              endpointId: step.endpointId,
             })),
           };
         } else if (compact && compactIdempotency) {
@@ -5237,6 +5259,7 @@ export class Broker {
                 parentAgentId,
                 workflowId,
                 profileId: step.profileId,
+                endpointId: step.endpointId,
                 constraints: step.constraints.filter(
                   (item): item is string => typeof item === "string",
                 ),
@@ -5301,6 +5324,7 @@ export class Broker {
                 parentAgentId,
                 workflowId,
                 profileId: step.profileId,
+                endpointId: step.endpointId,
                 constraints: step.constraints.filter(
                   (item): item is string => typeof item === "string",
                 ),
@@ -5356,6 +5380,10 @@ export class Broker {
                   }
                 : {}),
               state: task?.state ?? "queued",
+              endpointId: task?.endpointId ?? step.endpointId,
+              ...(task?.admissionReason
+                ? { admissionReason: task.admissionReason }
+                : {}),
             };
           });
           result = {
@@ -5409,14 +5437,33 @@ export class Broker {
           maxActiveAgents: this.#scheduler.limits.maxActiveAgents,
           maxTasks: this.#scheduler.limits.maxTasksPerDelegate,
         });
-        const resolvedPlan = plan.steps.map((step) => ({
-          ...step,
-          isolationMode: resolveWorkflowIsolation(
-            step.profileId,
-            step.isolationMode,
-          ),
-          requestedIsolationMode: step.isolationMode,
-        }));
+        const workflowParent = this.store.state.agents[parentAgentId];
+        const resolvedPlan = plan.steps.map((step) => {
+          const spawnPolicy = resolveSpawnPolicy(
+            {
+              taskProfileId: step.profileId,
+              ...(workflowParent?.cwd
+                ? { projectKey: workflowParent.cwd }
+                : {}),
+            },
+            this.#modelPolicy,
+          );
+          const endpoint = resolveEndpoint(
+            spawnPolicy.effective.model,
+            this.#endpointPolicy,
+            this.#scheduler.limits.maxActiveAgents,
+          );
+          return {
+            ...step,
+            isolationMode: resolveWorkflowIsolation(
+              step.profileId,
+              step.isolationMode,
+            ),
+            requestedIsolationMode: step.isolationMode,
+            spawnPolicy,
+            endpointId: endpoint.endpointId,
+          };
+        });
         for (const step of plan.steps)
           if (
             step.isolationMode === "reuse-worktree" &&
@@ -5478,10 +5525,14 @@ export class Broker {
                         workspaceId:
                           this.store.state.agents[parentAgentId]!.workspaceId,
                         isolation: step.isolationMode,
+                        requestedSpawnPolicy: step.spawnPolicy.requested,
+                        effectiveSpawnPolicy: step.spawnPolicy.effective,
+                        modelPolicyHash: step.spawnPolicy.policyHash,
                       },
                     }
                   : {}),
                 profileId: step.profileId,
+                endpointId: step.endpointId,
                 constraints: [...step.constraints],
                 isolationMode: step.requestedIsolationMode,
                 dependencies: step.dependsOn
@@ -5504,11 +5555,18 @@ export class Broker {
               ? "created"
               : (this.store.state.workflows[plan.workflowId]?.state ??
                 "running"),
-          tasks: resolvedPlan.map((s) => ({
-            key: s.key,
-            taskId: s.taskId,
-            state: "queued",
-          })),
+          tasks: resolvedPlan.map((s) => {
+            const task = this.store.state.tasks[s.taskId];
+            return {
+              key: s.key,
+              taskId: s.taskId,
+              state: task?.state ?? "queued",
+              endpointId: task?.endpointId ?? s.endpointId,
+              ...(task?.admissionReason
+                ? { admissionReason: task.admissionReason }
+                : {}),
+            };
+          }),
         };
       } else if (request.method === "workflow.get") {
         requirePermission(principal, "read:state");
@@ -5723,6 +5781,7 @@ export class Broker {
             "The task wall deadline has expired.",
           );
         const runId = createId("run");
+        const endpointId = this.#endpointIdForTask(task, agent.id);
         committedEvent = await this.store.append({
           type: "run.created",
           actor: { principalId: principal.id, kind: principal.kind },
@@ -5734,6 +5793,7 @@ export class Broker {
             assignmentId: createId("asg"),
             assignmentGeneration: request.params.assignmentGeneration,
             agentGeneration: agent.generation,
+            endpointId,
             ...(task.timeoutAt ? { timeoutAt: task.timeoutAt } : {}),
             ...(safeText(request.params.piSessionId)
               ? { piSessionId: request.params.piSessionId }
@@ -5754,6 +5814,7 @@ export class Broker {
           taskId: task.id,
           agentId: agent.id,
           assignmentGeneration: request.params.assignmentGeneration,
+          endpointId,
           state: "working",
         };
       } else if (request.method === "task.create_m3") {
@@ -6955,6 +7016,38 @@ export class Broker {
       await this.#writeSnapshotBestEffort();
     });
   }
+  #endpointIdForTask(task: Task, agentId?: string): string {
+    const run = task.currentRunId
+      ? this.store.state.runs[task.currentRunId]
+      : undefined;
+    if (run?.endpointId) return run.endpointId;
+    if (task.endpointId) return task.endpointId;
+    const project = task.project;
+    const storedPolicy = project?.effectiveSpawnPolicy;
+    const storedModel =
+      storedPolicy &&
+      typeof storedPolicy === "object" &&
+      !Array.isArray(storedPolicy)
+        ? (storedPolicy as Record<string, unknown>).model
+        : undefined;
+    const agentModel = agentId
+      ? this.store.state.agents[agentId]?.effectiveModel
+      : undefined;
+    const model = storedModel
+      ? validateModelSelection(storedModel)
+      : agentModel?.provider && agentModel.modelId && agentModel.thinkingLevel
+        ? validateModelSelection(agentModel)
+        : resolveSpawnPolicy(
+            { taskProfileId: task.profileId ?? "scout" },
+            this.#modelPolicy,
+          ).effective.model;
+    return resolveEndpoint(
+      model,
+      this.#endpointPolicy,
+      this.#scheduler.limits.maxActiveAgents,
+    ).endpointId;
+  }
+
   async #advanceWorkflow(
     workflowId: string,
     actor: { principalId: string; kind: string },
@@ -7110,6 +7203,7 @@ export class Broker {
           );
         if (existingWorktreeId === undefined) {
           const project = {
+            ...candidate.project,
             cwd: resource.worktreePath,
             workspaceId: candidate.project.workspaceId,
             worktreeId: resource.worktreeId,
@@ -7258,15 +7352,33 @@ export class Broker {
             taskId: dependency,
             requirement: "succeeded" as const,
           })),
+          endpointId: this.#endpointIdForTask(task),
           state: (task.state === "assigned"
             ? "running"
             : task.state) as SchedulerTask["state"],
         },
       ]),
     );
-    const admitted = new Set(
-      planAdmission(scheduler, schedulerTasks).admittedTaskIds,
-    );
+    const admissionPlan = planAdmission(scheduler, schedulerTasks);
+    for (const decision of admissionPlan.decisions) {
+      const task = this.store.state.tasks[decision.taskId];
+      if (
+        !decision.admitted &&
+        task?.state === "queued" &&
+        task.admissionReason !== decision.reason
+      )
+        await this.store.append({
+          type: "scheduler.blocked",
+          actor,
+          entityRefs: { taskId: task.id },
+          payload: {
+            taskId: task.id,
+            reason: decision.reason,
+            endpointId: this.#endpointIdForTask(task),
+          },
+        });
+    }
+    const admitted = new Set(admissionPlan.admittedTaskIds);
     for (const taskId of admitted) {
       const task = this.store.state.tasks[taskId];
       if (
@@ -7319,6 +7431,14 @@ export class Broker {
           "The canonical task model policy is invalid.",
         );
       const effectiveModel = validateModelSelection(effectivePolicy.model);
+      const endpointId = this.#endpointIdForTask(task);
+      if (task.admissionReason)
+        await this.store.append({
+          type: "scheduler.admitted",
+          actor,
+          entityRefs: { taskId },
+          payload: { taskId, endpointId },
+        });
       scheduler.setProvisioning(1);
       const agentId = createId("agt"),
         runId = createId("run"),
@@ -7362,6 +7482,7 @@ export class Broker {
           assignmentId,
           assignmentGeneration: 1,
           agentGeneration: 1,
+          endpointId,
           timeoutAt: task.timeoutAt,
         },
       });
@@ -7440,6 +7561,8 @@ export class Broker {
                 ),
           );
         }
+        if (compensationErrors.length === 0)
+          this.#trackDeferred(() => this.#advanceWorkflow(workflowId, actor));
       } finally {
         scheduler.setProvisioning(-1);
       }

@@ -45,6 +45,9 @@ function boundedText(value: unknown, max: number): value is string {
     !/[\u0000-\u001f\u007f]/u.test(value)
   );
 }
+function validEndpointId(value: unknown): value is string {
+  return typeof value === "string" && /^[a-z][a-z0-9_-]{0,63}$/u.test(value);
+}
 function validTaskProject(value: unknown): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const project = value as Record<string, unknown>;
@@ -692,12 +695,13 @@ export class EventStore {
         "parentAgentId",
         "workflowId",
         "profileId",
+        "endpointId",
         "constraints",
         "dependencies",
         "project",
         "isolationMode",
       ];
-      for (let mask = 0; mask < 128; mask++)
+      for (let mask = 0; mask < 1 << optionalTaskKeys.length; mask++)
         for (const hasTimeout of [false, true]) {
           const keys = ["taskId", "title", "objective", "createdAt"];
           if (hasTimeout) keys.push("timeoutAt");
@@ -722,6 +726,7 @@ export class EventStore {
         (p.parentAgentId === undefined || isEntityId(p.parentAgentId, "agt")) &&
         (p.workflowId === undefined || isEntityId(p.workflowId, "wfl")) &&
         (p.profileId === undefined || boundedText(p.profileId, 256)) &&
+        (p.endpointId === undefined || validEndpointId(p.endpointId)) &&
         (p.constraints === undefined ||
           (Array.isArray(p.constraints) &&
             p.constraints.length <= 64 &&
@@ -825,6 +830,8 @@ export class EventStore {
           "terminalId",
         ],
       ];
+      for (const keys of [...runKeyVariants])
+        runKeyVariants.push([...keys, "endpointId"]);
       valid =
         exactKeys(refs, ["runId", "taskId", "agentId"]) &&
         isEntityId(refs.runId, "run") &&
@@ -839,6 +846,7 @@ export class EventStore {
         Number(p.assignmentGeneration) >= 0 &&
         Number.isSafeInteger(p.agentGeneration) &&
         Number(p.agentGeneration) >= 0 &&
+        (p.endpointId === undefined || validEndpointId(p.endpointId)) &&
         (p.piSessionId === undefined || boundedText(p.piSessionId, 256)) &&
         (p.terminalId === undefined || boundedText(p.terminalId, 256)) &&
         (p.timeoutAt === undefined || validDeadlineText(p.timeoutAt));

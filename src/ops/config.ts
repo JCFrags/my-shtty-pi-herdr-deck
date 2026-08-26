@@ -5,14 +5,25 @@ import {
   validateModelSelection,
   type ModelPolicyConfig,
 } from "../broker/model-policy.js";
+import {
+  validateEndpointPolicyConfig,
+  type EndpointLimit,
+  type ModelIntelligenceConfig,
+} from "../broker/endpoint-policy.js";
+import type { SchedulerLimits } from "../scheduler/types.js";
+
+export type OrchSchedulerConfig = Partial<SchedulerLimits> & {
+  endpoints?: Record<string, EndpointLimit>;
+};
 
 export interface OrchConfig {
   version: 1;
-  scheduler?: Record<string, number>;
+  scheduler?: OrchSchedulerConfig;
   timeouts?: Record<string, number>;
   retention?: Record<string, number | boolean>;
   security?: Record<string, number | boolean>;
   modelPolicy?: ModelPolicyConfig;
+  modelIntelligence?: ModelIntelligenceConfig;
   lifecyclePolicy?: { autoCloseCompletedTemporary?: boolean };
   ui?: Record<string, string | boolean>;
   logging?: Record<string, string | number>;
@@ -54,6 +65,7 @@ export function validateConfig(value: unknown): OrchConfig {
     "retention",
     "security",
     "modelPolicy",
+    "modelIntelligence",
     "lifecyclePolicy",
     "ui",
     "logging",
@@ -151,8 +163,19 @@ export function validateConfig(value: unknown): OrchConfig {
           throw new Error("modelPolicy.compatibility is invalid.");
     }
   }
+  const scheduler = value.scheduler;
+  if (scheduler !== undefined) {
+    if (!isObject(scheduler)) throw new Error("scheduler must be an object.");
+    const scalarScheduler = Object.fromEntries(
+      Object.entries(scheduler).filter(([key]) => key !== "endpoints"),
+    );
+    checkNumbers(scalarScheduler, "scheduler");
+  }
+  validateEndpointPolicyConfig(
+    isObject(scheduler) ? scheduler.endpoints : undefined,
+    value.modelIntelligence,
+  );
   for (const section of [
-    "scheduler",
     "timeouts",
     "retention",
     "security",
@@ -166,6 +189,14 @@ export function validateConfig(value: unknown): OrchConfig {
     }
   }
   return value as unknown as OrchConfig;
+}
+
+export function scalarSchedulerLimits(
+  scheduler: OrchSchedulerConfig | undefined,
+): Partial<SchedulerLimits> | undefined {
+  if (!scheduler) return undefined;
+  const { endpoints: _endpoints, ...limits } = scheduler;
+  return Object.keys(limits).length ? limits : undefined;
 }
 export async function loadConfig(
   path: string,

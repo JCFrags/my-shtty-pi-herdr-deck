@@ -66,6 +66,17 @@ export interface Task {
   resultCollectedAt?: string;
   timeoutAt?: string;
   terminalReason?: ErrorSummary;
+  endpointId?: string;
+  admissionReason?:
+    | "global_limit"
+    | "parent_limit"
+    | "endpoint_capacity"
+    | "provisioning_limit"
+    | "dependency_blocked"
+    | "depth_exceeded"
+    | "queue_full"
+    | "not_queued"
+    | undefined;
   project?: Record<string, unknown>;
 }
 export interface Run {
@@ -78,6 +89,7 @@ export interface Run {
   assignmentDeliveryState?: "pending" | "accepted" | "failed";
   assignmentConnectionGeneration?: number;
   assignmentGeneration: number;
+  endpointId?: string;
   agentCycleId?: string;
   firstTurnIndex?: number;
   piSessionId?: string;
