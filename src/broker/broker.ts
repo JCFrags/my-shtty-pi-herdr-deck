@@ -77,7 +77,18 @@ import { DeterministicScheduler } from "../scheduler/scheduler.js";
 import {
   resolveEndpoint,
   type EndpointPolicyConfig,
+  type ModelIntelligenceConfig,
 } from "./endpoint-policy.js";
+import {
+  ARTIFICIAL_ANALYSIS_SOURCE_NAME,
+  ArtificialAnalysisFoundationAdapter,
+  FoundationRefreshError,
+  resolveScopedFoundationModels,
+} from "../model-intelligence/artificial-analysis.js";
+import {
+  normalizeFoundationEvidenceSnapshot,
+  type FoundationEvidenceSnapshot,
+} from "../model-intelligence/foundation-snapshot.js";
 import { planAdmission } from "../scheduler/admission.js";
 import {
   workflowReadiness,
@@ -546,6 +557,9 @@ export interface BrokerOptions {
   modelPolicy?: ModelPolicyConfig;
   schedulerLimits?: Partial<SchedulerLimits>;
   endpointPolicy?: EndpointPolicyConfig;
+  modelIntelligence?: ModelIntelligenceConfig;
+  foundationAdapter?: ArtificialAnalysisFoundationAdapter;
+  foundationCredentialProvider?: () => Promise<string | undefined>;
   lifecyclePolicy?: { autoCloseCompletedTemporary?: boolean };
   persistModelPolicy?: (policy: ModelPolicyConfig) => Promise<void>;
   persistLifecyclePolicy?: (policy: {
@@ -580,6 +594,27 @@ export class Broker {
   #questionTimers = new Map<string, NodeJS.Timeout>();
   #deadlineTimers = new Map<string, NodeJS.Timeout>();
   #resultRecoveryTimers = new Map<string, NodeJS.Timeout>();
+  #foundationRefreshTimer: NodeJS.Timeout | undefined;
+  #foundationRefreshAbort: AbortController | undefined;
+  #foundationRefreshInFlight: Promise<void> | undefined;
+  #foundationStatus: {
+    state:
+      | "disabled"
+      | "scheduled"
+      | "refreshing"
+      | "fresh"
+      | "stale"
+      | "no_scope"
+      | "failed";
+    lastAttemptAt?: string;
+    lastSuccessAt?: string;
+    nextRefreshAt?: string;
+    errorCode?: string;
+    scopedModelCount?: number;
+    requestCount?: number;
+    recordCount?: number;
+    consecutiveFailures: number;
+  } = { state: "disabled", consecutiveFailures: 0 };
   #pendingAutomaticEvidenceRunIds = new Set<string>();
   #coordinationSignals = new Map<string, number>();
   #now: () => number;
@@ -588,6 +623,10 @@ export class Broker {
   #herdr?: HerdrService;
   #modelPolicy: ModelPolicyConfig;
   readonly #endpointPolicy: EndpointPolicyConfig;
+  readonly #modelIntelligence: ModelIntelligenceConfig | undefined;
+  readonly #foundationAdapter: ArtificialAnalysisFoundationAdapter;
+  readonly #foundationCredentialProvider:
+    (() => Promise<string | undefined>) | undefined;
   readonly #scheduler: DeterministicScheduler;
   readonly #piCapabilities = new InstalledPiCapabilities();
   readonly #persistModelPolicy:
@@ -625,6 +664,10 @@ export class Broker {
     this.#clearTimeout = options.clearTimeout ?? clearTimeout;
     this.#modelPolicy = options.modelPolicy ?? {};
     this.#endpointPolicy = options.endpointPolicy ?? {};
+    this.#modelIntelligence = options.modelIntelligence;
+    this.#foundationAdapter =
+      options.foundationAdapter ?? new ArtificialAnalysisFoundationAdapter();
+    this.#foundationCredentialProvider = options.foundationCredentialProvider;
     this.#scheduler = new DeterministicScheduler(
       options.schedulerLimits,
       Object.fromEntries(
@@ -890,6 +933,7 @@ export class Broker {
         (secured.mode & 0o077) !== 0
       )
         throw new Error("Broker socket changed while securing its mode.");
+      this.#scheduleFoundationRefresh(0);
     } catch (error) {
       const cleanupFailures: unknown[] = [];
       if (this.#server)
@@ -1012,6 +1056,10 @@ export class Broker {
       for (const timer of this.#resultRecoveryTimers.values())
         this.#clearTimeout(timer);
       this.#resultRecoveryTimers.clear();
+      if (this.#foundationRefreshTimer)
+        this.#clearTimeout(this.#foundationRefreshTimer);
+      this.#foundationRefreshTimer = undefined;
+      this.#foundationRefreshAbort?.abort();
       if (typeof this.#herdr?.shutdown === "function") this.#herdr.shutdown();
       await this.#drainAdmittedWork();
       recordBackgroundFailure();
@@ -1065,6 +1113,10 @@ export class Broker {
       for (const timer of this.#resultRecoveryTimers.values())
         this.#clearTimeout(timer);
       this.#resultRecoveryTimers.clear();
+      if (this.#foundationRefreshTimer)
+        this.#clearTimeout(this.#foundationRefreshTimer);
+      this.#foundationRefreshTimer = undefined;
+      this.#foundationRefreshAbort?.abort();
       if (this.#processRecord)
         try {
           await removeBrokerProcessRecord(this.paths.pid, this.#processRecord);
@@ -3479,6 +3531,28 @@ export class Broker {
           replacementEvidenceId: replacement?.evidenceId ?? null,
           state: correction ? "corrected" : "retracted",
         };
+      } else if (request.method === "model.foundation.status") {
+        requirePermission(principal, "read:state");
+        if (!exactKeys(request.params, []))
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Foundation status parameters must be empty.",
+          );
+        result = this.#foundationStatusView();
+      } else if (request.method === "model.foundation.refresh") {
+        if (!["human", "cli", "deck"].includes(principal.kind))
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "Foundation refresh requires an operator client.",
+          );
+        requirePermission(principal, "configure");
+        if (!exactKeys(request.params, []))
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Foundation refresh parameters must be empty.",
+          );
+        const started = this.#scheduleFoundationRefresh(0);
+        result = { started, status: this.#foundationStatusView() };
       } else if (request.method === "model.capabilities") {
         requirePermission(principal, "read:state");
         result = await this.#piCapabilities.snapshot();
@@ -3570,6 +3644,7 @@ export class Broker {
         if (this.#persistModelPolicy)
           await this.#persistModelPolicy(nextPolicy);
         this.#modelPolicy = nextPolicy;
+        this.#scheduleFoundationRefresh(0);
         result = {
           accepted: true,
           persisted: Boolean(this.#persistModelPolicy),
@@ -3624,6 +3699,7 @@ export class Broker {
         if (this.#persistModelPolicy)
           await this.#persistModelPolicy(nextPolicy);
         this.#modelPolicy = nextPolicy;
+        this.#scheduleFoundationRefresh(0);
         result = {
           accepted: true,
           persisted: Boolean(this.#persistModelPolicy),
@@ -7500,6 +7576,267 @@ export class Broker {
       }
     }
     return last;
+  }
+
+  #foundationSourceConfig() {
+    return this.#modelIntelligence?.sources?.artificialAnalysis;
+  }
+
+  #foundationStatusView(): Record<string, unknown> {
+    const config = this.#foundationSourceConfig();
+    if (!config?.enabled)
+      return {
+        source: ARTIFICIAL_ANALYSIS_SOURCE_NAME,
+        enabled: false,
+        state: "disabled",
+        stale: true,
+      };
+    const active = Object.values(this.store.state.modelEvidence?.records ?? {})
+      .map((stored) => stored.record)
+      .filter(
+        (record) =>
+          record.sourceKind === "foundation" &&
+          record.sourceName === ARTIFICIAL_ANALYSIS_SOURCE_NAME &&
+          !Object.hasOwn(
+            this.store.state.modelEvidence?.supersededBy ?? {},
+            record.evidenceId,
+          ),
+      );
+    const latest = active
+      .map((record) => record.observedAt)
+      .sort((left, right) => right.localeCompare(left))[0];
+    const stale =
+      !latest ||
+      this.#now() - Date.parse(latest) >= config.refreshHours * 3_600_000;
+    const state = ["refreshing", "failed", "no_scope"].includes(
+      this.#foundationStatus.state,
+    )
+      ? this.#foundationStatus.state
+      : stale
+        ? "stale"
+        : "fresh";
+    return {
+      source: ARTIFICIAL_ANALYSIS_SOURCE_NAME,
+      enabled: true,
+      stale,
+      refreshHours: config.refreshHours,
+      maxRequestsPerRefresh: config.maxRequestsPerRefresh,
+      lastGoodObservedAt: latest ?? null,
+      activeRecordCount: active.length,
+      ...this.#foundationStatus,
+      state,
+    };
+  }
+
+  #scheduleFoundationRefresh(delayMs: number): boolean {
+    const config = this.#foundationSourceConfig();
+    if (!config?.enabled || this.#stopping) return false;
+    if (!Number.isSafeInteger(delayMs) || delayMs < 0)
+      throw new Error("Foundation refresh delay is invalid.");
+    if (this.#foundationRefreshTimer)
+      this.#clearTimeout(this.#foundationRefreshTimer);
+    const nextRefreshAt = new Date(this.#now() + delayMs).toISOString();
+    this.#foundationStatus = {
+      ...this.#foundationStatus,
+      state:
+        this.#foundationStatus.state === "disabled"
+          ? "scheduled"
+          : this.#foundationStatus.state,
+      nextRefreshAt,
+    };
+    this.#foundationRefreshTimer = this.#setTimeout(() => {
+      this.#foundationRefreshTimer = undefined;
+      this.#trackDeferred(() => this.#refreshFoundation());
+    }, delayMs);
+    return true;
+  }
+
+  #foundationSnapshot(
+    records: readonly import("../model-intelligence/model-evidence.js").ModelEvidenceRecord[],
+    sourceName: string,
+    observedAt: string,
+  ): FoundationEvidenceSnapshot | undefined {
+    const active = Object.values(this.store.state.modelEvidence?.records ?? {})
+      .map((stored) => stored.record)
+      .filter(
+        (record) =>
+          record.sourceKind === "foundation" &&
+          record.sourceName === sourceName &&
+          !Object.hasOwn(
+            this.store.state.modelEvidence?.supersededBy ?? {},
+            record.evidenceId,
+          ),
+      );
+    const identity = (
+      record: import("../model-intelligence/model-evidence.js").ModelEvidenceRecord,
+    ): string =>
+      record.evidenceKind === "score" && record.subject.kind === "canonical"
+        ? `${record.taskProfile}\u0000${record.subject.canonicalModelId}`
+        : "";
+    const items = [...records]
+      .sort((left, right) => identity(left).localeCompare(identity(right)))
+      .flatMap((record) => {
+        const matching = active.filter(
+          (candidate) => identity(candidate) === identity(record),
+        );
+        if (
+          matching.length === 1 &&
+          matching[0]?.evidenceId === record.evidenceId
+        )
+          return [];
+        return [
+          {
+            supersedes: matching
+              .map((candidate) => candidate.evidenceId)
+              .sort((left, right) => left.localeCompare(right)),
+            record,
+          },
+        ];
+      });
+    return items.length
+      ? normalizeFoundationEvidenceSnapshot({
+          schemaVersion: 1,
+          sourceName,
+          observedAt,
+          items,
+        })
+      : undefined;
+  }
+
+  async #refreshFoundation(): Promise<void> {
+    if (this.#foundationRefreshInFlight) {
+      await this.#foundationRefreshInFlight;
+      if (!this.#stopping) await this.#refreshFoundation();
+      return;
+    }
+    const config = this.#foundationSourceConfig();
+    if (!config?.enabled || !this.#modelIntelligence || this.#stopping) return;
+    const work = (async (): Promise<void> => {
+      const attemptedAt = new Date(this.#now()).toISOString();
+      const {
+        nextRefreshAt: _nextRefreshAt,
+        errorCode: _errorCode,
+        ...priorStatus
+      } = this.#foundationStatus;
+      this.#foundationStatus = {
+        ...priorStatus,
+        state: "refreshing",
+        lastAttemptAt: attemptedAt,
+      };
+      this.#foundationRefreshAbort = new AbortController();
+      try {
+        const capabilities = await this.#piCapabilities.snapshot();
+        const scope = resolveScopedFoundationModels({
+          capabilities,
+          policy: this.#modelPolicy,
+          modelIntelligence: this.#modelIntelligence!,
+        });
+        if (scope.length === 0) {
+          this.#foundationStatus = {
+            state: "no_scope",
+            lastAttemptAt: attemptedAt,
+            scopedModelCount: 0,
+            consecutiveFailures: 0,
+          };
+          this.#scheduleFoundationRefresh(config.refreshHours * 3_600_000);
+          return;
+        }
+        let credential: string | undefined;
+        try {
+          credential = await this.#foundationCredentialProvider?.();
+        } catch {
+          throw new FoundationRefreshError(
+            "missing_credential",
+            "Foundation credential is unavailable.",
+          );
+        }
+        if (
+          credential !== undefined &&
+          (credential.length < 8 ||
+            credential.length > 512 ||
+            /[\u0000-\u0020\u007f]/u.test(credential))
+        )
+          throw new FoundationRefreshError(
+            "missing_credential",
+            "Foundation credential is unavailable.",
+          );
+        const refreshed = await this.#foundationAdapter.refresh({
+          credential,
+          scope,
+          config,
+          now: this.#now(),
+          signal: this.#foundationRefreshAbort.signal,
+        });
+        let committed = false;
+        if (refreshed.records.length > 0)
+          await this.#enqueueMutation(async () => {
+            const snapshot = this.#foundationSnapshot(
+              refreshed.records,
+              refreshed.sourceName,
+              refreshed.observedAt,
+            );
+            if (!snapshot) return;
+            await this.store.append({
+              type: "model.foundation_snapshot_recorded",
+              actor: {
+                principalId: "prn_00000000000000000000000000",
+                kind: "system",
+              },
+              entityRefs: {},
+              payload: snapshot,
+            });
+            committed = true;
+            await this.#writeSnapshotBestEffort();
+          });
+        this.#foundationStatus = {
+          state: "fresh",
+          lastAttemptAt: attemptedAt,
+          lastSuccessAt: refreshed.observedAt,
+          scopedModelCount: scope.length,
+          requestCount: refreshed.requestCount,
+          recordCount: refreshed.records.length,
+          consecutiveFailures: 0,
+          ...(committed ? {} : { errorCode: "unchanged" }),
+        };
+        this.#scheduleFoundationRefresh(config.refreshHours * 3_600_000);
+      } catch (error) {
+        if (
+          this.#stopping ||
+          (error instanceof FoundationRefreshError && error.code === "aborted")
+        )
+          return;
+        const expected = error instanceof FoundationRefreshError;
+        const failures = this.#foundationStatus.consecutiveFailures + 1;
+        this.#foundationStatus = {
+          ...this.#foundationStatus,
+          state: "failed",
+          errorCode: expected ? error.code : "commit_failed",
+          consecutiveFailures: failures,
+        };
+        if (!expected) this.#observeBackgroundFailure(error);
+        const base = Math.min(
+          config.refreshHours * 3_600_000,
+          15 * 60_000 * 2 ** Math.min(6, failures - 1),
+        );
+        const jitter =
+          Number.parseInt(
+            sha256(`${attemptedAt}:${failures}`).slice(0, 8),
+            16,
+          ) % 60_000;
+        this.#scheduleFoundationRefresh(
+          Math.min(config.refreshHours * 3_600_000, base + jitter),
+        );
+      } finally {
+        this.#foundationRefreshAbort = undefined;
+      }
+    })();
+    this.#foundationRefreshInFlight = work;
+    try {
+      await work;
+    } finally {
+      if (this.#foundationRefreshInFlight === work)
+        this.#foundationRefreshInFlight = undefined;
+    }
   }
 
   #endpointIdForTask(task: Task, agentId?: string): string {

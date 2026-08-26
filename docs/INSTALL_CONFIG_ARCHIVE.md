@@ -32,6 +32,8 @@ Active-tool reconciliation changes only current orchestrator tool names. It pres
 
 A managed broker question emits `herdr:blocked` while `orchestrator_ask` waits. The existing Herdr state integration remains the sole pane-state reporter. The broker remains the sole task and lifecycle authority.
 
+The optional Artificial Analysis foundation source uses the fixed owner-only file `~/.config/pi-herdr-orchestrator/artificial-analysis.key`. Keep the key out of `config.json`, environment variables, command arguments, logs, and chat. The source is disabled unless `modelIntelligence.sources.artificialAnalysis.enabled` is true. See the scoped foundation section in the main README for the strict mapping shape and status commands. A source failure keeps the last good evidence and never blocks agent creation.
+
 ## Legacy archive
 
 `archive/legacy-extensions/` contains four curated source files and an exact SHA-256 map. It excludes all private runtime and session data. See its README for the mapping and safety boundary.

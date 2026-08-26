@@ -15,6 +15,7 @@ import {
   validateModelEvidenceRecord,
   validateModelEvidenceSupersession,
 } from "../model-intelligence/model-evidence.js";
+import { validateFoundationEvidenceSnapshot } from "../model-intelligence/foundation-snapshot.js";
 import { emptyState, reduce } from "./reducer.js";
 import type {
   ErrorSummary,
@@ -712,6 +713,12 @@ export class EventStore {
     } else if (event.type === "model.evidence_compacted") {
       try {
         valid = exactKeys(refs, []) && !!validateModelEvidenceCompaction(p);
+      } catch {
+        valid = false;
+      }
+    } else if (event.type === "model.foundation_snapshot_recorded") {
+      try {
+        valid = exactKeys(refs, []) && !!validateFoundationEvidenceSnapshot(p);
       } catch {
         valid = false;
       }

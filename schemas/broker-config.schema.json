@@ -245,6 +245,15 @@
           "minItems": 1,
           "maxItems": 128,
           "items": { "$ref": "#/$defs/endpointMapping" }
+        },
+        "sources": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "artificialAnalysis": {
+              "$ref": "#/$defs/artificialAnalysisSource"
+            }
+          }
         }
       }
     },
@@ -302,6 +311,59 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 32
+        }
+      }
+    },
+    "artificialAnalysisSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "refreshHours",
+        "maxRequestsPerRefresh",
+        "profileMetrics",
+        "models"
+      ],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "refreshHours": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8760
+        },
+        "maxRequestsPerRefresh": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "profileMetrics": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 32,
+          "propertyNames": { "pattern": "^[a-z][a-z0-9_-]{0,63}$" },
+          "additionalProperties": {
+            "enum": ["coding", "intelligence", "agentic"]
+          }
+        },
+        "models": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["canonicalModelId", "slug"],
+            "properties": {
+              "canonicalModelId": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9._/-]{0,255}$"
+              },
+              "slug": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]{0,127}$"
+              }
+            }
+          }
         }
       }
     },
