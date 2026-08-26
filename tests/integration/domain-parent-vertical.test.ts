@@ -269,6 +269,7 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
   let fake!: FakeHerdr;
   const broker = new Broker(paths, {
     herdrFactory: async (store) => (fake = new FakeHerdr(store)) as any,
+    schedulerLimits: { maxTasksPerDelegate: 20 },
   });
   await broker.start();
   let brokerStopped = false;
@@ -392,6 +393,22 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
     assert.equal(dry.state, "created");
     assert.equal(fake.provisions, 0);
     assert.equal(fake.adoptions, 6);
+    const oversized = await send(p1.socket, "delegate.execute", {
+      mode: "parallel",
+      title: "oversized dry run",
+      parentAgentId: r1.agentId,
+      steps: Array.from({ length: 21 }, (_, index) => ({
+        key: `oversized-${index}`,
+        profileId: "scout",
+        title: `Oversized ${index}`,
+        objective: "limit check",
+      })),
+      dryRun: true,
+    });
+    assert.equal(oversized.ok, false);
+    assert.equal(oversized.error?.code, "LIMIT_EXCEEDED");
+    assert.match(oversized.error?.message ?? "", /per-request task limit/u);
+    assert.equal(fake.provisions, 0);
     const invalidSeq = broker.store.state.lastEventSeq;
     for (const steps of [
       [
