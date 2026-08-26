@@ -93,6 +93,68 @@ test("successful registration cleanup archives managed files outside the admissi
   assert.match(archived[0] ?? "", /^\.token-/u);
 });
 
+test("registration archive retains a replacement pathname", async () => {
+  const base = await mkdtemp(join(tmpdir(), "m2-token-archive-race-"));
+  const root = join(base, "prompts");
+  const token = createManagedToken();
+  const path = await createManagedTokenFile(root, "agent", token);
+  const original = join(root, "original");
+  assert.equal(
+    await archiveManagedFileForCleanup(path, undefined, {
+      afterOpen: async () => {
+        await rename(path, original);
+        await writeFile(path, "replacement\n", { mode: 0o600 });
+      },
+    }),
+    "retained",
+  );
+  assert.equal(await readFile(path, "utf8"), "replacement\n");
+  assert.equal(await readFile(original, "utf8"), token.token + "\n");
+});
+
+test("verified registration archives its files outside the admission directory", async () => {
+  const base = await mkdtemp(join(tmpdir(), "m2-provision-archive-"));
+  const root = join(base, "prompts");
+  const cli = {
+    createTab: async () => ({ tab_id: "tab", root_pane_id: "pane" }),
+    startPi: async () => ({ pane_id: "pane" }),
+  } as never;
+  const provisioner = new HerdrProvisioner(
+    cli,
+    root,
+    () => [],
+    true,
+    undefined,
+    undefined,
+    modelValidator,
+  );
+  const result = await provisioner.provision({
+    agentId: "agent",
+    parentAgentId: "parent",
+    role: "worker",
+    workspaceId: "workspace",
+    cwd: root,
+    profileId: "profile",
+    isolation: "shared-readonly",
+    model: {
+      provider: "openai-codex",
+      modelId: "gpt-5.6-luna",
+      thinkingLevel: "low",
+    },
+    prompt: "new prompt",
+  });
+  assert.equal((await readdir(root)).length, 2);
+  await provisioner.verifyRegistration(
+    result,
+    { paneId: "pane" },
+    undefined,
+    false,
+  );
+  await provisioner.archiveRegistration(result);
+  assert.deepEqual(await readdir(root), []);
+  assert.equal((await readdir(join(base, "registration-archive"))).length, 2);
+});
+
 test("token cleanup is idempotent for a missing path", async () => {
   const root = await mkdtemp(join(tmpdir(), "m2-token-clean-missing-"));
   const path = join(root, "missing");

@@ -1909,7 +1909,13 @@ export function registerParentTools(
   client?: PiBrokerClient,
 ): void {
   const binding: PiToolBinding = client
-    ? { adapter: adapterOrBinding as PiAdapter, client }
+    ? {
+        adapter: adapterOrBinding as PiAdapter,
+        client,
+        parentAuthorized:
+          client.principal?.permissions.includes("delegate") === true ||
+          client.principal?.permissions.includes("manage:all") === true,
+      }
     : (adapterOrBinding as PiToolBinding);
   const principalFromClient = (): ToolPrincipal => {
     const adapter = binding.adapter;
@@ -1943,14 +1949,7 @@ export function registerParentTools(
     },
   };
   const service = new ParentToolService(broker);
-  const permissions = new Set(principalFromClient().permissions);
   for (const tool of PARENT_TOOL_NAMES) {
-    if (
-      (tool === "delegate" || tool === "delegate_compact") &&
-      !permissions.has("delegate") &&
-      !permissions.has("manage:all")
-    )
-      continue;
     register(api, {
       name: tool,
       label: `Orchestrator ${tool}`,
@@ -1970,12 +1969,12 @@ export function registerParentTools(
             : provided;
         if (idempotencyKey !== undefined)
           assertInputString(idempotencyKey, 256);
-        const principal = principalFromClient();
         if (
           (tool === "delegate" || tool === "delegate_compact") &&
-          binding.parentAuthorized === false
+          binding.parentAuthorized !== true
         )
           throw new Error("PERMISSION_DENIED");
+        const principal = principalFromClient();
         const adapter = binding.adapter;
         const client = binding.client;
         if (!adapter || !client) throw new Error("AGENT_DISCONNECTED");

@@ -163,6 +163,7 @@ export async function createPromptFile(
 export async function archiveManagedFileForCleanup(
   path: string,
   expectedIdentity?: FileIdentity,
+  hooks?: ManagedFileHooks,
 ): Promise<ManagedFileCleanupResult> {
   let handle;
   try {
@@ -172,11 +173,24 @@ export async function archiveManagedFileForCleanup(
       return "retained";
     if (expectedIdentity === undefined && !isClaimed(path, stat))
       return "retained";
+    await hooks?.afterOpen?.();
     const archiveRoot = join(dirname(dirname(path)), "registration-archive");
     await mkdir(archiveRoot, { recursive: true, mode: 0o700 });
     const beforeMove = await handle.stat();
     if (!isSafeManagedStat(beforeMove) || !sameIdentity(beforeMove, stat))
       return "retained";
+    let currentPath;
+    try {
+      currentPath = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      const currentStat = await currentPath.stat();
+      if (
+        !isSafeManagedStat(currentStat) ||
+        !sameIdentity(currentStat, beforeMove)
+      )
+        return "retained";
+    } finally {
+      await currentPath?.close().catch(() => undefined);
+    }
     const destination = join(
       archiveRoot,
       `${basename(path)}-${process.pid}-${randomToken()}`,

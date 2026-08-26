@@ -188,7 +188,7 @@ test("M2 concurrent broker registration attempts produce one transition and clea
   assert.equal(attempts.filter((x) => x.status === "fulfilled").length, 1);
   assert.equal(attempts.filter((x) => x.status === "rejected").length, 1);
   assert.equal(store.state.herdrResources?.["agent-1"]?.state, "registered");
-  assert.equal((await readdir(prompts)).length, 2);
+  assert.equal((await readdir(prompts)).length, 0);
 });
 
 test("M2 repeated normal reconcile has stable durable state and no mutation", async () => {

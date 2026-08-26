@@ -463,10 +463,15 @@ export function reduce(
         agent = next.agents[id];
       if (!agent)
         throw new OrchestratorError("STATE_CORRUPT", "Agent is missing.");
+      const baseAgent = { ...agent };
+      if (p.clearCurrentRun === true) {
+        delete baseAgent.currentRunId;
+        delete baseAgent.currentAssignmentGeneration;
+      }
       next.agents = {
         ...next.agents,
         [id]: {
-          ...agent,
+          ...baseAgent,
           ...(typeof p.state === "string"
             ? { state: p.state as AgentState }
             : {}),
@@ -633,6 +638,7 @@ export function reduce(
           ? { terminalId: p.terminalId }
           : {}),
         settled: false,
+        resultRecoveryCount: 0,
         ...(typeof runTimeoutAt === "string"
           ? { timeoutAt: runTimeoutAt }
           : {}),
@@ -879,8 +885,59 @@ export function reduce(
       };
       break;
     }
-    case "run.result_recovery_requested":
-    case "run.result_missing":
+    case "run.result_recovery_requested": {
+      const id = String(event.entityRefs?.runId ?? p.runId);
+      const run = next.runs[id];
+      if (
+        !run ||
+        !run.settled ||
+        run.resultId !== undefined ||
+        (run.resultRecoveryCount ?? 0) !== 0 ||
+        p.attempt !== 1
+      )
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Result recovery request is invalid.",
+        );
+      next.runs = {
+        ...next.runs,
+        [id]: {
+          ...run,
+          state: "result_pending_missing",
+          resultRecoveryCount: 1,
+        },
+      };
+      break;
+    }
+    case "run.result_missing": {
+      const id = String(event.entityRefs?.runId ?? p.runId);
+      const run = next.runs[id];
+      const task = run ? next.tasks[run.taskId] : undefined;
+      if (
+        !run ||
+        !task ||
+        run.resultId !== undefined ||
+        (run.resultRecoveryCount ?? 0) !== 1 ||
+        p.code !== "RESULT_MISSING"
+      )
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Missing result outcome is invalid.",
+        );
+      const reason = {
+        code: "RESULT_MISSING" as const,
+        message: "The managed agent settled without a structured result.",
+      };
+      next.runs = {
+        ...next.runs,
+        [id]: { ...run, state: "failed", terminalReason: reason },
+      };
+      next.tasks = {
+        ...next.tasks,
+        [task.id]: { ...task, state: "failed", terminalReason: reason },
+      };
+      break;
+    }
     case "scheduler.admitted":
     case "scheduler.blocked":
       break;

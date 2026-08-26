@@ -36,7 +36,7 @@ export type RunState =
   | "timed_out"
   | "lost";
 export interface ErrorSummary {
-  code: "TIMEOUT" | "BUDGET_EXCEEDED";
+  code: "TIMEOUT" | "BUDGET_EXCEEDED" | "RESULT_MISSING";
   message: string;
 }
 export type AgentLifecycleClass =
@@ -83,6 +83,7 @@ export interface Run {
   piSessionId?: string;
   terminalId?: string;
   settled: boolean;
+  resultRecoveryCount?: 0 | 1;
   resultId?: string;
   timeoutAt?: string;
   terminalReason?: ErrorSummary;

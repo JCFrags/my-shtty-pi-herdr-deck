@@ -162,6 +162,8 @@ async function extensionClient(): Promise<void> {
     appendEntry: (type: string, data: unknown) => entries.push({ type, data }),
   };
   await piHerdrOrchestrator(api as never);
+  assert.deepEqual(new Set(tools.keys()), new Set(PARENT_TOOL_NAMES));
+  assert.equal(tools.size, PARENT_TOOL_NAMES.length);
   for (const handler of handlers.get("session_start") ?? [])
     await handler({}, harness.context);
   await connected.promise;

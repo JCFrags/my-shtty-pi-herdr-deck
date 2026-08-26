@@ -131,7 +131,7 @@ PACKAGE_ROOT=$(pwd)
 pi install -l "$PACKAGE_ROOT"
 ```
 
-Open a new Pi session inside Herdr after startup verification. Pi loads `./dist/extensions/pi-herdr-orchestrator.js` from the package manifest. The extension uses the standard Herdr socket and pane context. It attaches to the session broker and registers the current Pi pane as the adopted root. A reload reuses the same adopted root.
+Open a new Pi session inside Herdr after startup verification. Pi loads `./dist/extensions/pi-herdr-orchestrator.js` from the package manifest. The extension uses the standard Herdr socket and pane context. It attaches to the session broker and registers the current Pi pane as the adopted root. A reload reuses the same adopted root after the old client disconnects and Herdr verifies the new Pi session. The broker rejects a replacement while the old client remains connected.
 
 Do not set a broker socket, client secret, session key, token, terminal ID, or Herdr binary path for normal installed use. Ordinary Pi panes do not need the binary value. The broker never searches `PATH` for Herdr.
 
@@ -256,7 +256,7 @@ Canonical state uses a verified event chain and authenticated snapshots. Recover
 
 The extension does not serialize credentials, environment variables, prompts, tool output, file contents, session-file paths, or working directories into the deck state. This package is a same-user control plane, not a sandbox. Its processes have the permissions of the account that runs Pi and Herdr.
 
-Retained registration files have count, size, age, type, ownership, mode, symlink, replacement, and hard-link admission checks. Normal uninstall preserves state. Data deletion is a separate owner-approved operation after the broker and managed agents stop.
+Registration files have count, size, age, type, ownership, mode, symlink, replacement, and hard-link admission checks. After successful registration, the broker moves verified prompt and token files from `prompts/` to the owner-only `registration-archive/` directory. This keeps the active admission directory below its 128-file limit without deleting registration evidence. If agent creation reports `HERDR_REGISTRATION_RETENTION_BUDGET_EXCEEDED`, check for files that remained in `prompts/` before you retry. Normal uninstall preserves state. Data deletion is a separate owner-approved operation after the broker and managed agents stop.
 
 See [docs/OPERATIONS_M7.md](docs/OPERATIONS_M7.md) for recovery, export, retention, and operation-plan details. See [docs/OPERATIONS_M7_RELEASE.md](docs/OPERATIONS_M7_RELEASE.md) for the non-live release rehearsal. See [docs/INSTALL_CONFIG_ARCHIVE.md](docs/INSTALL_CONFIG_ARCHIVE.md) for concise local install, reload, configuration, and legacy archive rules.
 

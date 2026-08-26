@@ -1057,7 +1057,7 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
     );
     assert.equal(
       ok(await send(p1.socket, "agent.get", { agentId: childId })).state,
-      "stopping",
+      "stopped",
     );
     await Promise.all(
       eventReceipts.map((receipt, index) =>

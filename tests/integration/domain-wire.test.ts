@@ -415,6 +415,125 @@ async function bounded<T>(
   }
 }
 
+test("adopted root accepts a verified Pi session replacement after the old client disconnects", async () => {
+  const root = await mkdtemp(join(tmpdir(), "domain-adopted-session-"));
+  const runtime = await mkdtemp(
+    join(tmpdir(), "domain-adopted-session-runtime-"),
+  );
+  const paths = {
+    sessionKey: sessionKey(join(runtime, "broker.sock")),
+    root,
+    runtime,
+    events: join(root, "events.jsonl"),
+    snapshot: join(root, "snapshot.json"),
+    lock: join(runtime, "lock"),
+    socket: join(runtime, "broker.sock"),
+    secret: join(runtime, "secret"),
+  };
+  const broker = new Broker(paths, {
+    herdrFactory: async (store) => new DomainHerdr(store) as any,
+  });
+  await broker.start();
+  let first: Socket | undefined;
+  let duplicate: Socket | undefined;
+  let replacement: Socket | undefined;
+  const registration = (sessionId: string) => ({
+    adapterVersion: "0.1.0",
+    herdr: {
+      paneId: "adopted-pane",
+      terminalId: "adopted-terminal",
+      detectedKind: "pi",
+      sessionReference: {
+        source: "herdr:pi",
+        agent: "pi",
+        kind: "id",
+        value: sessionId,
+      },
+      name: "adopted-root",
+    },
+    pi: {
+      sessionId,
+      sessionName: "adopted-root",
+      capabilities: {},
+      state: {
+        model: { provider: "openai-codex", modelId: "gpt-5.6-luna" },
+        thinkingLevel: "low",
+      },
+    },
+  });
+  try {
+    const secret = (await readFile(paths.secret, "utf8")).trim();
+    first = await connect(paths, secret);
+    const initial = resultOf(
+      await request(
+        first,
+        "agent.register_adopted",
+        registration("pi-session-a"),
+      ),
+    );
+    assert.equal(
+      broker.store.state.agents[initial.agentId]?.piSessionId,
+      "pi-session-a",
+    );
+
+    duplicate = await connect(paths, secret);
+    const activeReplacement = await request(
+      duplicate,
+      "agent.register_adopted",
+      registration("pi-session-b"),
+    );
+    assert.equal(activeReplacement.ok, false);
+    assert.equal(activeReplacement.error?.code, "AGENT_REPLACED");
+    assert.equal(
+      broker.store.state.agents[initial.agentId]?.piSessionId,
+      "pi-session-a",
+    );
+    duplicate.destroy();
+    duplicate = undefined;
+
+    const firstClosed = new Promise<void>((resolve) =>
+      first!.once("close", () => resolve()),
+    );
+    first.destroy();
+    await bounded(firstClosed, "first adopted client close timeout");
+    first = undefined;
+
+    replacement = await connect(paths, secret);
+    const reloaded = resultOf(
+      await request(
+        replacement,
+        "agent.register_adopted",
+        registration("pi-session-b"),
+      ),
+    );
+    assert.equal(reloaded.agentId, initial.agentId);
+    assert.equal(
+      reloaded.connectionGeneration,
+      initial.connectionGeneration + 1,
+    );
+    assert.equal(
+      broker.store.state.agents[initial.agentId]?.piSessionId,
+      "pi-session-b",
+    );
+    assert.equal(
+      Object.values(broker.store.state.agents).filter(
+        (agent) =>
+          !agent.managed &&
+          agent.paneId === "adopted-pane" &&
+          agent.terminalId === "adopted-terminal",
+      ).length,
+      1,
+    );
+  } finally {
+    first?.destroy();
+    duplicate?.destroy();
+    replacement?.destroy();
+    await broker.stop().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+    await rm(runtime, { recursive: true, force: true });
+  }
+});
+
 test("broker domain wire persists correlated result, question, workflow, and replay across restart", async () => {
   const root = await mkdtemp(join(tmpdir(), "domain-wire-"));
   const runtime = await mkdtemp(join(tmpdir(), "domain-wire-runtime-"));
@@ -2535,10 +2654,10 @@ test("production strict managed child task.cancel-versus-timeout race", async ()
   }
 });
 
-test("production settled managed run times out without adapter abort", async () => {
-  const root = await mkdtemp(join(tmpdir(), "domain-settled-timeout-"));
+test("production settled managed run gets one recovery prompt then fails RESULT_MISSING", async () => {
+  const root = await mkdtemp(join(tmpdir(), "domain-result-missing-"));
   const runtime = await mkdtemp(
-    join(tmpdir(), "domain-settled-timeout-runtime-"),
+    join(tmpdir(), "domain-result-missing-runtime-"),
   );
   const paths = {
     sessionKey: sessionKey(join(runtime, "broker.sock")),
@@ -2622,22 +2741,28 @@ test("production settled managed run times out without adapter abort", async () 
     const piSettled = new Promise<void>((resolve) => {
       resolvePiSettled = resolve;
     });
-    let resolveRunTimedOut!: () => void;
-    const runTimedOut = new Promise<void>((resolve) => {
-      resolveRunTimedOut = resolve;
+    let resolveRecoveryRequested!: () => void;
+    const recoveryRequested = new Promise<void>((resolve) => {
+      resolveRecoveryRequested = resolve;
+    });
+    let resolveResultMissing!: () => void;
+    const resultMissing = new Promise<void>((resolve) => {
+      resolveResultMissing = resolve;
+    });
+    let resolveRecoveryPrompt!: () => void;
+    const recoveryPrompt = new Promise<void>((resolve) => {
+      resolveRecoveryPrompt = resolve;
     });
     removeEvents = broker.store.onAppend((event) => {
       if (event.entityRefs?.runId !== item.runId) return;
       if (event.type === "assignment.accepted") resolveAssignmentAccepted();
       if (event.type === "run.pi_started") resolvePiStarted();
       if (event.type === "run.pi_settled") resolvePiSettled();
-      if (
-        event.type === "run.state_changed" &&
-        (event.payload as Record<string, unknown>).state === "timed_out"
-      )
-        resolveRunTimedOut();
+      if (event.type === "run.result_recovery_requested")
+        resolveRecoveryRequested();
+      if (event.type === "run.result_missing") resolveResultMissing();
     });
-    let abortCount = 0;
+    let recoveryPromptCount = 0;
     child = await connectManaged(
       paths,
       token,
@@ -2656,8 +2781,10 @@ test("production settled managed run times out without adapter abort", async () 
           );
           return;
         }
-        if (frame.method === "control.abort") {
-          abortCount++;
+        if (frame.method === "control.prompt") {
+          recoveryPromptCount++;
+          assert.equal(frame.params?.delivery, "normal");
+          assert.match(String(frame.params?.message), /orchestrator_result/u);
           socket.write(
             encodeFrame({
               v: 1,
@@ -2667,6 +2794,7 @@ test("production settled managed run times out without adapter abort", async () 
               result: { ok: true },
             }),
           );
+          resolveRecoveryPrompt();
           return;
         }
         throw new Error(`unexpected adapter request ${frame.method}`);
@@ -2736,19 +2864,89 @@ test("production settled managed run times out without adapter abort", async () 
       }),
     );
     await bounded(piSettled, "run.pi_settled timeout");
-    assert.equal(broker.store.state.runs[item.runId]?.state, "settled");
-    await bounded(runTimedOut, "settled wall timeout event timeout", 5_000);
-    assert.deepEqual(broker.store.state.runs[item.runId]?.terminalReason, {
-      code: "TIMEOUT",
-      message: "The task wall deadline expired.",
+    await bounded(recoveryRequested, "result recovery event timeout");
+    await bounded(recoveryPrompt, "result recovery prompt timeout");
+    assert.equal(
+      broker.store.state.runs[item.runId]?.state,
+      "result_pending_missing",
+    );
+    assert.equal(
+      broker.store.state.runs[item.runId]?.resultRecoveryCount,
+      1,
+    );
+    assert.equal(broker.store.state.agents[item.agentId]?.state, "idle");
+    let redundantIdleEvents = 0;
+    const removeIdleListener = broker.store.onAppend((event) => {
+      if (
+        event.type === "agent.state_changed" &&
+        event.entityRefs?.agentId === item.agentId &&
+        (event.payload as Record<string, unknown>).state === "idle"
+      )
+        redundantIdleEvents++;
     });
-    assert.deepEqual(broker.store.state.tasks[item.taskId]?.terminalReason, {
-      code: "TIMEOUT",
-      message: "The task wall deadline expired.",
-    });
-    assert.equal(broker.store.state.runs[item.runId]?.state, "timed_out");
-    assert.equal(broker.store.state.tasks[item.taskId]?.state, "timed_out");
-    assert.equal(abortCount, 0);
+    const manualLifecycle = resultOf(
+      await request(child, "agent.lifecycle_event", {
+        agentId: item.agentId,
+        connectionGeneration: registration.connectionGeneration,
+        adapterSeq: 3,
+        event: "agent_end",
+        piSessionId: "settled-timeout",
+        assignment: null,
+        safeData: { toolName: null, contextPercent: 0 },
+      }),
+    );
+    removeIdleListener();
+    assert.equal(manualLifecycle.accepted, false);
+    assert.equal(manualLifecycle.manual, true);
+    assert.equal(redundantIdleEvents, 0);
+    resultOf(
+      await request(child, "agent.lifecycle_event", {
+        agentId: item.agentId,
+        connectionGeneration: registration.connectionGeneration,
+        adapterSeq: 4,
+        event: "turn_start",
+        piSessionId: "settled-timeout",
+        turnIndex: 2,
+        agentCycleId: "settled-recovery-cycle",
+        assignment: {
+          assignmentId: run.assignmentId,
+          generation: run.assignmentGeneration,
+        },
+        safeData: { toolName: null, contextPercent: 0 },
+      }),
+    );
+    resultOf(
+      await request(child, "agent.lifecycle_event", {
+        agentId: item.agentId,
+        connectionGeneration: registration.connectionGeneration,
+        adapterSeq: 5,
+        event: "agent_settled",
+        piSessionId: "settled-timeout",
+        turnIndex: 2,
+        agentCycleId: "settled-recovery-cycle",
+        assignment: {
+          assignmentId: run.assignmentId,
+          generation: run.assignmentGeneration,
+        },
+        safeData: { toolName: null, contextPercent: 0 },
+      }),
+    );
+    await bounded(resultMissing, "RESULT_MISSING event timeout");
+    const expectedReason = {
+      code: "RESULT_MISSING",
+      message: "The managed agent settled without a structured result.",
+    };
+    assert.deepEqual(
+      broker.store.state.runs[item.runId]?.terminalReason,
+      expectedReason,
+    );
+    assert.deepEqual(
+      broker.store.state.tasks[item.taskId]?.terminalReason,
+      expectedReason,
+    );
+    assert.equal(broker.store.state.runs[item.runId]?.state, "failed");
+    assert.equal(broker.store.state.tasks[item.taskId]?.state, "failed");
+    assert.equal(recoveryPromptCount, 1);
     assert.deepEqual(herdr.stops, []);
   } finally {
     removeEvents();

@@ -458,6 +458,11 @@ export default async function piHerdrOrchestrator(
     !!process.env.PI_HERDR_ORCH_BROKER_SOCKET &&
     !!process.env.PI_HERDR_ORCH_SESSION_KEY;
   const adoptedContext = herdrActive;
+  binding.parentAuthorized = false;
+  if (!managed && adoptedContext) {
+    registerParentTools(pi, binding);
+    parentToolsRegistered = true;
+  }
   const runtime: Runtime = {
     cleanup(reason) {
       const preserveCredential = ["reload", "new", "resume", "fork"].includes(
@@ -474,6 +479,7 @@ export default async function piHerdrOrchestrator(
       if (adapter) binding.correlationState = adapter.correlationState();
       binding.adapter = undefined;
       binding.client = undefined;
+      binding.parentAuthorized = false;
       client?.close();
       for (const pending of pendingClients) pending.close();
       pendingClients.clear();
@@ -517,6 +523,7 @@ export default async function piHerdrOrchestrator(
     adapter = undefined;
     binding.adapter = undefined;
     binding.client = undefined;
+    binding.parentAuthorized = false;
     lifecycleInFlight = false;
     if (managed ? !managedContext : !adoptedContext) {
       inactive(next);

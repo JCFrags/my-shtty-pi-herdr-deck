@@ -171,7 +171,7 @@ test("M2 production broker and CLI registration proves proof, late deadline, and
       },
     );
     assert.deepEqual(registered, { registered: true });
-    assert.equal((await readdir(prompts)).length, 2);
+    assert.equal((await readdir(prompts)).length, 0);
 
     const lateId = "agent-broker-late";
     currentAgent = lateId;
