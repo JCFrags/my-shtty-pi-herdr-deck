@@ -48,8 +48,9 @@ async function fixture(t: TestContext): Promise<string> {
 
 const replacement = "held replacement bytes\n";
 
-test("broker startup forwards only the exact compact rollback switch", () => {
+test("broker startup forwards the config path and only the exact compact rollback switch", () => {
   const prior = process.env.PI_HERDR_COMPACT_DELEGATION;
+  const priorConfigPath = process.env.PI_HERDR_ORCH_CONFIG_PATH;
   const identity = {
     path: "/run/user/1000/herdr.sock",
     dev: 1n,
@@ -60,10 +61,12 @@ test("broker startup forwards only the exact compact rollback switch", () => {
   };
   try {
     process.env.PI_HERDR_COMPACT_DELEGATION = "0";
+    process.env.PI_HERDR_ORCH_CONFIG_PATH = "/home/user/orchestrator.json";
+    const forwarded = minimalBrokerEnvironment(identity, "/usr/bin/herdr");
+    assert.equal(forwarded.PI_HERDR_COMPACT_DELEGATION, "0");
     assert.equal(
-      minimalBrokerEnvironment(identity, "/usr/bin/herdr")
-        .PI_HERDR_COMPACT_DELEGATION,
-      "0",
+      forwarded.PI_HERDR_ORCH_CONFIG_PATH,
+      "/home/user/orchestrator.json",
     );
     process.env.PI_HERDR_COMPACT_DELEGATION = "1";
     assert.equal(
@@ -80,6 +83,9 @@ test("broker startup forwards only the exact compact rollback switch", () => {
   } finally {
     if (prior === undefined) delete process.env.PI_HERDR_COMPACT_DELEGATION;
     else process.env.PI_HERDR_COMPACT_DELEGATION = prior;
+    if (priorConfigPath === undefined)
+      delete process.env.PI_HERDR_ORCH_CONFIG_PATH;
+    else process.env.PI_HERDR_ORCH_CONFIG_PATH = priorConfigPath;
   }
 });
 

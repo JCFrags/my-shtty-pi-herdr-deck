@@ -117,6 +117,7 @@ export function planWorkflow(
     readonly objective: string;
     readonly dryRun?: boolean;
     readonly maxActiveAgents?: number;
+    readonly maxTasks?: number;
     readonly dependencyResults?: Readonly<Record<string, ResultProjection>>;
   },
 ): WorkflowPlan {
@@ -143,7 +144,10 @@ export function planWorkflow(
     dryRun: input.dryRun === true,
     steps,
     estimatedAgentCount: new Set(steps.map((step) => step.profileId)).size,
-    limits: { maxActiveAgents: input.maxActiveAgents ?? 4, maxTasks: 8 },
+    limits: {
+      maxActiveAgents: input.maxActiveAgents ?? 4,
+      maxTasks: input.maxTasks ?? 8,
+    },
   };
 }
 export function aggregateResults(

@@ -69,7 +69,7 @@ import {
   workflowReadiness,
   fanInWorkflow,
 } from "../scheduler/workflow-engine.js";
-import type { SchedulerTask } from "../scheduler/types.js";
+import type { SchedulerLimits, SchedulerTask } from "../scheduler/types.js";
 import {
   planWorkflow,
   validateWorkflow,
@@ -530,6 +530,7 @@ export interface BrokerOptions {
     paths: CanonicalResolvedPaths,
   ) => Promise<HerdrService>;
   modelPolicy?: ModelPolicyConfig;
+  schedulerLimits?: Partial<SchedulerLimits>;
   lifecyclePolicy?: { autoCloseCompletedTemporary?: boolean };
   persistModelPolicy?: (policy: ModelPolicyConfig) => Promise<void>;
   persistLifecyclePolicy?: (policy: {
@@ -570,6 +571,7 @@ export class Broker {
   #clearTimeout: (timer: NodeJS.Timeout) => void;
   #herdr?: HerdrService;
   #modelPolicy: ModelPolicyConfig;
+  readonly #scheduler: DeterministicScheduler;
   readonly #piCapabilities = new InstalledPiCapabilities();
   readonly #persistModelPolicy:
     ((policy: ModelPolicyConfig) => Promise<void>) | undefined;
@@ -605,6 +607,7 @@ export class Broker {
       ((callback, delayMs) => setTimeout(callback, delayMs));
     this.#clearTimeout = options.clearTimeout ?? clearTimeout;
     this.#modelPolicy = options.modelPolicy ?? {};
+    this.#scheduler = new DeterministicScheduler(options.schedulerLimits);
     this.#persistModelPolicy = options.persistModelPolicy;
     this.#persistLifecyclePolicy = options.persistLifecyclePolicy;
     this.#autoCloseCompletedTemporary =
@@ -1483,7 +1486,7 @@ export class Broker {
               parentDepth++;
               ancestorId = ancestor.parentAgentId;
             }
-            const limits = new DeterministicScheduler().limits;
+            const limits = this.#scheduler.limits;
             const delegatedDepth = parentDepth + 1;
             if (delegatedDepth > limits.maxDelegationDepth)
               throw new OrchestratorError(
@@ -5174,7 +5177,7 @@ export class Broker {
               : "Delegation workflow is invalid.",
           );
         }
-        const scheduler = new DeterministicScheduler();
+        const scheduler = this.#scheduler;
         if (
           Object.values(this.store.state.tasks).filter(
             (task) => task.state === "queued",
@@ -5398,6 +5401,8 @@ export class Broker {
         const plan = planWorkflow(p.definition as WorkflowDefinition, {
           objective: p.objective as string,
           dryRun: p.dryRun === true,
+          maxActiveAgents: this.#scheduler.limits.maxActiveAgents,
+          maxTasks: this.#scheduler.limits.maxTasksPerDelegate,
         });
         const resolvedPlan = plan.steps.map((step) => ({
           ...step,
@@ -5419,7 +5424,7 @@ export class Broker {
         const taskIds = resolvedPlan.map((step) => step.taskId);
         const creationNow = this.#now();
         const createdAt = new Date(creationNow).toISOString();
-        const queueLimit = new DeterministicScheduler().limits.maxQueuedTasks;
+        const queueLimit = this.#scheduler.limits.maxQueuedTasks;
         if (
           !p.dryRun &&
           Object.values(this.store.state.tasks).filter(
@@ -7120,7 +7125,7 @@ export class Broker {
     const tasks = workflow.taskIds
       .map((id) => this.store.state.tasks[id])
       .filter((task): task is NonNullable<typeof task> => Boolean(task));
-    const scheduler = new DeterministicScheduler();
+    const scheduler = this.#scheduler;
     const plan = {
       workflowId,
       mode: "dag" as const,

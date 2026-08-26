@@ -371,6 +371,9 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     ...(brokerConfig?.modelPolicy
       ? { modelPolicy: brokerConfig.modelPolicy }
       : {}),
+    ...(brokerConfig?.scheduler
+      ? { schedulerLimits: brokerConfig.scheduler }
+      : {}),
     ...(brokerConfig?.lifecyclePolicy
       ? { lifecyclePolicy: brokerConfig.lifecyclePolicy }
       : {}),
