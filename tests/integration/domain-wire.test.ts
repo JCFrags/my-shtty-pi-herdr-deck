@@ -2870,10 +2870,7 @@ test("production settled managed run gets one recovery prompt then fails RESULT_
       broker.store.state.runs[item.runId]?.state,
       "result_pending_missing",
     );
-    assert.equal(
-      broker.store.state.runs[item.runId]?.resultRecoveryCount,
-      1,
-    );
+    assert.equal(broker.store.state.runs[item.runId]?.resultRecoveryCount, 1);
     assert.equal(broker.store.state.agents[item.agentId]?.state, "idle");
     let redundantIdleEvents = 0;
     const removeIdleListener = broker.store.onAppend((event) => {

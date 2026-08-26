@@ -6923,10 +6923,7 @@ export class Broker {
         continue;
       }
       if (!run || isTerminal(run.state) || published) continue;
-      if (
-        (run.resultRecoveryCount ?? 0) === 1 &&
-        run.state !== "settled"
-      ) {
+      if ((run.resultRecoveryCount ?? 0) === 1 && run.state !== "settled") {
         this.#scheduleResultRecoveryTimeout(run.id, workflowId, actor);
         continue;
       }
