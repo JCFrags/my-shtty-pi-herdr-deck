@@ -16,6 +16,8 @@ export interface EndpointMapping {
   readonly provider: string;
   readonly modelId?: string;
   readonly endpointId: string;
+  readonly canonicalModelId?: string;
+  readonly quantization?: string;
 }
 
 export interface ModelIntelligenceConfig {
@@ -125,10 +127,24 @@ export function validateEndpointPolicyConfig(
       if (
         Object.keys(mapping).some(
           (key) =>
-            key !== "provider" && key !== "modelId" && key !== "endpointId",
+            key !== "provider" &&
+            key !== "modelId" &&
+            key !== "endpointId" &&
+            key !== "canonicalModelId" &&
+            key !== "quantization",
         ) ||
         !boundedText(mapping.provider, 128) ||
         (mapping.modelId !== undefined && !boundedText(mapping.modelId, 256)) ||
+        (mapping.canonicalModelId !== undefined &&
+          (typeof mapping.canonicalModelId !== "string" ||
+            !/^[a-z0-9][a-z0-9._/-]{0,255}$/u.test(
+              mapping.canonicalModelId,
+            ))) ||
+        (mapping.quantization !== undefined &&
+          !boundedText(mapping.quantization, 64)) ||
+        ((mapping.canonicalModelId !== undefined ||
+          mapping.quantization !== undefined) &&
+          mapping.modelId === undefined) ||
         !validConfiguredEndpointId(mapping.endpointId) ||
         !endpoints[mapping.endpointId]
       )
@@ -141,6 +157,12 @@ export function validateEndpointPolicyConfig(
         provider: mapping.provider,
         ...(mapping.modelId !== undefined ? { modelId: mapping.modelId } : {}),
         endpointId: mapping.endpointId,
+        ...(mapping.canonicalModelId !== undefined
+          ? { canonicalModelId: mapping.canonicalModelId }
+          : {}),
+        ...(mapping.quantization !== undefined
+          ? { quantization: mapping.quantization }
+          : {}),
       });
     }
     modelIntelligence = { schemaVersion: 1, mappings };

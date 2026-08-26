@@ -309,9 +309,22 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["provider", "endpointId"],
+      "dependentRequired": {
+        "canonicalModelId": ["modelId"],
+        "quantization": ["modelId"]
+      },
       "properties": {
         "provider": { "type": "string", "minLength": 1, "maxLength": 128 },
         "modelId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "canonicalModelId": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._/-]{0,255}$"
+        },
+        "quantization": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
         "endpointId": {
           "type": "string",
           "allOf": [
