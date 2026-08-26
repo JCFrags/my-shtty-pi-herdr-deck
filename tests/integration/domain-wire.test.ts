@@ -209,9 +209,19 @@ function request(
   socket: Socket,
   method: string,
   params: Record<string, unknown>,
+  idempotencyKey?: string,
 ): Promise<Frame> {
   const id = createId("evt");
-  socket.write(encodeFrame({ v: 1, type: "request", id, method, params }));
+  socket.write(
+    encodeFrame({
+      v: 1,
+      type: "request",
+      id,
+      method,
+      params,
+      ...(idempotencyKey ? { idempotencyKey } : {}),
+    }),
+  );
   return new Promise((resolve, reject) => {
     const decoder = new NdjsonDecoder<Frame>((value) => value as Frame);
     const timer = setTimeout(
@@ -4476,4 +4486,545 @@ async function runHeldGuardCase(guardCase: HeldGuardCase): Promise<void> {
 
 test("held abort skips stop for each individual guarded identity mutation", async () => {
   for (const guardCase of heldGuardCases) await runHeldGuardCase(guardCase);
+});
+
+test("authorized M4 evidence producers bind immutable results, independent identity, human correction, and restart recovery", async () => {
+  const root = await mkdtemp(join(tmpdir(), "domain-model-evidence-"));
+  const runtime = await mkdtemp(
+    join(tmpdir(), "domain-model-evidence-runtime-"),
+  );
+  const paths = {
+    sessionKey: sessionKey(join(runtime, "broker.sock")),
+    root,
+    runtime,
+    events: join(root, "events.jsonl"),
+    snapshot: join(root, "snapshot.json"),
+    lock: join(runtime, "lock"),
+    socket: join(runtime, "broker.sock"),
+    secret: join(runtime, "secret"),
+  };
+  const luna = {
+    provider: "openai-codex",
+    modelId: "gpt-5.6-luna",
+    thinkingLevel: "medium" as const,
+  };
+  const distinct = {
+    provider: "test-provider",
+    modelId: "reviewer-v1",
+    thinkingLevel: "high" as const,
+  };
+  let herdr!: DomainHerdr;
+  const options = {
+    modelPolicy: {
+      defaults: { global: luna },
+      allowlist: [luna, distinct],
+    },
+    herdrFactory: async (store: EventStore) =>
+      (herdr = new DomainHerdr(store)) as any,
+  };
+  let broker = new Broker(paths, options);
+  let parent: Socket | undefined;
+  let human: Socket | undefined;
+  const children: Socket[] = [];
+  try {
+    await broker.start();
+    const secret = (await readFile(paths.secret, "utf8")).trim();
+    parent = await connect(paths, secret);
+    const adopted = resultOf(
+      await request(parent, "agent.register_adopted", {
+        adapterVersion: "0.1.0",
+        herdr: {
+          paneId: "evidence-root",
+          terminalId: "evidence-root",
+          detectedKind: "pi",
+          sessionReference: {
+            source: "herdr:pi",
+            agent: "pi",
+            kind: "id",
+            value: "evidence-root-session",
+          },
+          name: "evidence-root",
+        },
+        pi: {
+          sessionId: "evidence-root-session",
+          sessionName: "evidence-root",
+          capabilities: {},
+          state: {
+            model: { provider: luna.provider, modelId: luna.modelId },
+            thinkingLevel: luna.thinkingLevel,
+          },
+        },
+      }),
+    );
+    const producerSpawn = resultOf(
+      await request(parent, "agent.spawn", {
+        parentAgentId: adopted.agentId,
+        task: {
+          title: "reviewed output",
+          objective: "produce reviewed output",
+        },
+        profileId: "implementer",
+        model: luna,
+        placement: "current-workspace",
+        isolation: { mode: "worktree" },
+        budget: { wallTimeMs: 60_000 },
+        wait: false,
+        dryRun: false,
+      }),
+    );
+    const reviewedTask = {
+      taskId: producerSpawn.tasks[0].taskId as string,
+    };
+    const reviewedRunId =
+      broker.store.state.tasks[reviewedTask.taskId]!.currentRunId!;
+    const producerRun = broker.store.state.runs[reviewedRunId]!;
+    const reviewedRun = { runId: reviewedRunId };
+    const producerSession = "evidence-producer-session";
+    let resolveProducerAssignment!: () => void;
+    const producerAssignment = new Promise<void>(
+      (resolve) => (resolveProducerAssignment = resolve),
+    );
+    const removeProducerAssignment = broker.store.onAppend((event) => {
+      if (
+        event.type === "assignment.accepted" &&
+        event.entityRefs?.runId === reviewedRunId
+      )
+        resolveProducerAssignment();
+    });
+    const producer = await connectManaged(
+      paths,
+      herdr.tokens.get(producerRun.agentId!)!,
+      producerRun.agentId!,
+      producerSession,
+      (frame, socket) => {
+        if (frame.method !== "assignment.deliver") return;
+        socket.write(
+          encodeFrame({
+            v: 1,
+            type: "server_response",
+            id: frame.id,
+            ok: true,
+            result: { status: "accepted" },
+          }),
+        );
+      },
+    );
+    children.push(producer);
+    const producerRegistration = resultOf(
+      await request(producer, "agent.register_managed", {
+        agentId: producerRun.agentId,
+        generation: 1,
+        adapterVersion: "0.1.0",
+        herdr: {
+          paneId:
+            broker.store.state.herdrResources?.[producerRun.agentId!]?.paneId,
+          terminalId:
+            broker.store.state.herdrResources?.[producerRun.agentId!]
+              ?.terminalId,
+          detectedKind: "pi",
+          sessionReference: {
+            source: "herdr:pi",
+            agent: "pi",
+            kind: "id",
+            value: producerSession,
+          },
+          name: "evidence-producer",
+        },
+        pi: {
+          sessionId: producerSession,
+          sessionName: "evidence-producer",
+          capabilities: {},
+          state: {
+            model: { provider: luna.provider, modelId: luna.modelId },
+            thinkingLevel: luna.thinkingLevel,
+          },
+        },
+      }),
+    );
+    await bounded(producerAssignment, "producer assignment timeout");
+    removeProducerAssignment();
+    const published = resultOf(
+      await request(producer, "result.publish", {
+        agentId: producerRun.agentId,
+        taskId: reviewedTask.taskId,
+        runId: reviewedRun.runId,
+        assignmentGeneration: producerRun.assignmentGeneration,
+        result: body,
+      }),
+    );
+    await broker.store.append({
+      type: "run.pi_settled",
+      actor: {
+        principalId: "prn_00000000000000000000000000",
+        kind: "system",
+      },
+      entityRefs: {
+        agentId: producerRun.agentId!,
+        taskId: reviewedTask.taskId,
+        runId: reviewedRun.runId,
+      },
+      payload: {
+        agentId: producerRun.agentId,
+        runId: reviewedRun.runId,
+        piSessionId: producerSession,
+        state: "settled",
+        turnIndex: 1,
+        agentCycleId: "evidence-producer-cycle",
+        terminalError: false,
+        adapterSeq: 1,
+        connectionGeneration: producerRegistration.connectionGeneration,
+      },
+    });
+    await broker.store.append({
+      type: "run.state_changed",
+      actor: {
+        principalId: "prn_00000000000000000000000000",
+        kind: "system",
+      },
+      entityRefs: {
+        taskId: reviewedTask.taskId,
+        runId: reviewedRun.runId,
+      },
+      payload: { runId: reviewedRun.runId, state: "succeeded" },
+    });
+    assert.equal(
+      broker.store.state.results?.[published.resultId]?.piSettled,
+      true,
+    );
+
+    const spawnReviewer = async (
+      label: string,
+      model: typeof luna | typeof distinct,
+    ) => {
+      const response = resultOf(
+        await request(parent!, "agent.spawn", {
+          parentAgentId: adopted.agentId,
+          task: { title: label, objective: `Review ${label}` },
+          profileId: "reviewer",
+          model,
+          placement: "current-workspace",
+          isolation: { mode: "shared-readonly" },
+          budget: { wallTimeMs: 60_000 },
+          review: {
+            taskId: reviewedTask.taskId,
+            runId: reviewedRun.runId,
+            resultId: published.resultId,
+            rubricVersion: "quality-v1",
+          },
+          wait: false,
+          dryRun: false,
+        }),
+      );
+      const taskId = response.tasks[0].taskId as string;
+      const runId = broker.store.state.tasks[taskId]!.currentRunId!;
+      const run = broker.store.state.runs[runId]!;
+      const contractEvent = broker.store.events.find(
+        (event) =>
+          event.type === "review.contract_issued" &&
+          event.entityRefs?.reviewContractId === response.reviewContractId,
+      );
+      const provisioningEvent = broker.store.events.find(
+        (event) =>
+          event.type === "run.created" && event.entityRefs?.runId === runId,
+      );
+      assert.ok(contractEvent);
+      assert.ok(provisioningEvent);
+      assert.ok(contractEvent.seq < provisioningEvent.seq);
+      assert.deepEqual(contractEvent.entityRefs, {
+        reviewContractId: response.reviewContractId,
+        taskId,
+        reviewedTaskId: reviewedTask.taskId,
+        runId: reviewedRun.runId,
+        resultId: published.resultId,
+      });
+      const contractPayload = contractEvent.payload as Record<string, unknown>;
+      assert.equal(
+        contractPayload.resultDigest,
+        broker.store.state.results?.[published.resultId]?.payloadHash,
+      );
+      assert.equal(contractPayload.rubricVersion, "quality-v1");
+      assert.equal(contractPayload.taskProfile, "implementer");
+      const sessionId = `${label}-session`;
+      let resolveAssignment!: () => void;
+      const assignmentAccepted = new Promise<void>(
+        (resolve) => (resolveAssignment = resolve),
+      );
+      const removeAssignmentListener = broker.store.onAppend((event) => {
+        if (
+          event.type === "assignment.accepted" &&
+          event.entityRefs?.runId === runId
+        )
+          resolveAssignment();
+      });
+      const child = await connectManaged(
+        paths,
+        herdr.tokens.get(run.agentId!)!,
+        run.agentId!,
+        sessionId,
+        (frame, socket) => {
+          if (frame.method !== "assignment.deliver") return;
+          socket.write(
+            encodeFrame({
+              v: 1,
+              type: "server_response",
+              id: frame.id,
+              ok: true,
+              result: { status: "accepted" },
+            }),
+          );
+        },
+      );
+      children.push(child);
+      resultOf(
+        await request(child, "agent.register_managed", {
+          agentId: run.agentId,
+          generation: 1,
+          adapterVersion: "0.1.0",
+          herdr: {
+            paneId: broker.store.state.herdrResources?.[run.agentId!]?.paneId,
+            terminalId:
+              broker.store.state.herdrResources?.[run.agentId!]?.terminalId,
+            detectedKind: "pi",
+            sessionReference: {
+              source: "herdr:pi",
+              agent: "pi",
+              kind: "id",
+              value: sessionId,
+            },
+            name: label,
+          },
+          pi: {
+            sessionId,
+            sessionName: label,
+            capabilities: {},
+            state: {
+              model: { provider: model.provider, modelId: model.modelId },
+              thinkingLevel: model.thinkingLevel,
+            },
+          },
+        }),
+      );
+      await bounded(assignmentAccepted, `${label} assignment timeout`);
+      removeAssignmentListener();
+      return {
+        child,
+        contractId: response.reviewContractId as string,
+        taskId,
+        runId,
+        agentId: run.agentId!,
+        assignmentGeneration: run.assignmentGeneration,
+      };
+    };
+
+    const self = await spawnReviewer("self-review", luna);
+    assert.ok(
+      broker.store.state.agents[self.agentId]?.actualModel,
+      JSON.stringify(broker.store.state.agents[self.agentId]),
+    );
+    assert.ok(
+      broker.store.state.runs[self.runId]?.endpointId,
+      JSON.stringify(broker.store.state.runs[self.runId]),
+    );
+    assert.ok(
+      broker.store.state.agents[producerRun.agentId!]?.actualModel,
+      JSON.stringify(broker.store.state.agents[producerRun.agentId!]),
+    );
+    assert.ok(
+      broker.store.state.runs[reviewedRun.runId]?.endpointId,
+      JSON.stringify(broker.store.state.runs[reviewedRun.runId]),
+    );
+    const selfResponse = await request(self.child, "review.submit", {
+      agentId: self.agentId,
+      taskId: self.taskId,
+      runId: self.runId,
+      assignmentGeneration: self.assignmentGeneration,
+      valuePpm: 500_000,
+      confidencePpm: 900_000,
+    });
+    assert.equal(selfResponse.ok, false);
+    assert.equal(
+      selfResponse.error?.code,
+      "PERMISSION_DENIED",
+      JSON.stringify(selfResponse),
+    );
+
+    const independent = await spawnReviewer("independent-review", distinct);
+    const unbound = await request(self.child, "review.submit", {
+      agentId: self.agentId,
+      taskId: independent.taskId,
+      runId: independent.runId,
+      assignmentGeneration: independent.assignmentGeneration,
+      valuePpm: 500_000,
+      confidencePpm: 900_000,
+    });
+    assert.equal(unbound.ok, false);
+    assert.equal(unbound.error?.code, "PERMISSION_DENIED");
+    const targetResult = broker.store.state.results?.[published.resultId];
+    assert.ok(targetResult);
+    const immutableDigest = targetResult.payloadHash;
+    targetResult.payloadHash = "f".repeat(64);
+    const changed = await request(independent.child, "review.submit", {
+      agentId: independent.agentId,
+      taskId: independent.taskId,
+      runId: independent.runId,
+      assignmentGeneration: independent.assignmentGeneration,
+      valuePpm: 800_000,
+      confidencePpm: 900_000,
+    });
+    assert.equal(changed.ok, false);
+    assert.equal(changed.error?.code, "INVALID_REQUEST");
+    targetResult.payloadHash = immutableDigest;
+    const acceptedReview = resultOf(
+      await request(independent.child, "review.submit", {
+        agentId: independent.agentId,
+        taskId: independent.taskId,
+        runId: independent.runId,
+        assignmentGeneration: independent.assignmentGeneration,
+        valuePpm: 800_000,
+        confidencePpm: 900_000,
+      }),
+    );
+    assert.equal(acceptedReview.state, "recorded");
+    const duplicateReview = await request(independent.child, "review.submit", {
+      agentId: independent.agentId,
+      taskId: independent.taskId,
+      runId: independent.runId,
+      assignmentGeneration: independent.assignmentGeneration,
+      valuePpm: 800_000,
+      confidencePpm: 900_000,
+    });
+    assert.equal(duplicateReview.ok, false);
+    assert.equal(duplicateReview.error?.code, "INVALID_REQUEST");
+    const independentContract =
+      broker.store.state.reviewContracts![independent.contractId]!;
+    const originalExpiresAt = independentContract.expiresAt;
+    independentContract.expiresAt = new Date(0).toISOString();
+    const lateReview = await request(independent.child, "review.submit", {
+      agentId: independent.agentId,
+      taskId: independent.taskId,
+      runId: independent.runId,
+      assignmentGeneration: independent.assignmentGeneration,
+      valuePpm: 800_000,
+      confidencePpm: 900_000,
+    });
+    assert.equal(lateReview.ok, false);
+    assert.equal(lateReview.error?.code, "PERMISSION_DENIED");
+    independentContract.expiresAt = originalExpiresAt;
+
+    human = await connect(paths, secret, "human");
+    const feedbackParams = {
+      runId: reviewedRun.runId,
+      dimension: "reviewed_output_quality",
+      valuePpm: 700_000,
+      confidencePpm: 600_000,
+    };
+    const feedback = resultOf(
+      await request(
+        human,
+        "model.feedback.record",
+        feedbackParams,
+        "human-feedback-1",
+      ),
+    );
+    assert.equal(feedback.state, "recorded");
+    const replayedFeedback = resultOf(
+      await request(
+        human,
+        "model.feedback.record",
+        feedbackParams,
+        "human-feedback-1",
+      ),
+    );
+    assert.equal(replayedFeedback.state, "already_recorded");
+    assert.equal(replayedFeedback.evidenceId, feedback.evidenceId);
+    const idempotencyConflict = await request(
+      human,
+      "model.feedback.record",
+      { ...feedbackParams, valuePpm: 700_001 },
+      "human-feedback-1",
+    );
+    assert.equal(idempotencyConflict.ok, false);
+    assert.equal(idempotencyConflict.error?.code, "IDEMPOTENCY_CONFLICT");
+    const unauthorized = await request(
+      parent,
+      "model.feedback.record",
+      feedbackParams,
+      "human-feedback-parent",
+    );
+    assert.equal(unauthorized.ok, false);
+    assert.equal(unauthorized.error?.code, "PERMISSION_DENIED");
+    const corrected = resultOf(
+      await request(human, "model.feedback.supersede", {
+        evidenceId: feedback.evidenceId,
+        action: "correct",
+        valuePpm: 900_000,
+        confidencePpm: 800_000,
+      }),
+    );
+    assert.equal(corrected.state, "corrected");
+    assert.equal(
+      broker.store.state.modelEvidence?.supersededBy[feedback.evidenceId],
+      corrected.replacementEvidenceId,
+    );
+    const retracted = resultOf(
+      await request(human, "model.feedback.supersede", {
+        evidenceId: corrected.replacementEvidenceId,
+        action: "retract",
+      }),
+    );
+    assert.equal(retracted.state, "retracted");
+
+    await broker.store.append({
+      type: "run.state_changed",
+      actor: {
+        principalId: "prn_00000000000000000000000000",
+        kind: "system",
+      },
+      entityRefs: {
+        taskId: independent.taskId,
+        runId: independent.runId,
+      },
+      payload: { runId: independent.runId, state: "succeeded" },
+    });
+    assert.equal(
+      Object.values(broker.store.state.modelEvidence?.records ?? {}).some(
+        (stored) =>
+          stored.record.sourceKind === "broker_lifecycle" &&
+          stored.record.sourceKey === independent.runId,
+      ),
+      false,
+    );
+    for (const child of children) child.destroy();
+    children.length = 0;
+    parent.destroy();
+    parent = undefined;
+    human.destroy();
+    human = undefined;
+    await broker.stop();
+
+    broker = new Broker(paths, options);
+    await broker.start();
+    assert.equal(
+      Object.values(broker.store.state.modelEvidence?.records ?? {}).some(
+        (stored) =>
+          stored.record.sourceKind === "broker_lifecycle" &&
+          stored.record.sourceKey === independent.runId,
+      ),
+      true,
+    );
+    assert.ok(broker.store.state.reviewContracts?.[self.contractId]);
+    assert.equal(
+      broker.store.state.modelEvidence?.supersededBy[
+        corrected.replacementEvidenceId
+      ],
+      null,
+    );
+  } finally {
+    for (const child of children) child.destroy();
+    parent?.destroy();
+    human?.destroy();
+    await broker.stop().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+    await rm(runtime, { recursive: true, force: true });
+  }
 });

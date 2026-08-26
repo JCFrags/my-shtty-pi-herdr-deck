@@ -57,12 +57,21 @@ import {
   payloadHash,
 } from "../results/validation.js";
 import type { ResultBody, QuestionBody } from "../results/types.js";
+import {
+  automaticEvidenceForRun,
+  correctedHumanEvidence,
+  humanEvidenceForRun,
+  independentReviewEvidence,
+  modelFamily,
+  runtimeSubjectForRun,
+} from "../model-intelligence/evidence-producers.js";
 import type {
   HerdrTaskMetadata,
   HerdrMetadataState,
   QuestionRecord,
   StoredEvent,
   Task,
+  Run,
 } from "../state/types.js";
 import { DeterministicScheduler } from "../scheduler/scheduler.js";
 import {
@@ -571,6 +580,7 @@ export class Broker {
   #questionTimers = new Map<string, NodeJS.Timeout>();
   #deadlineTimers = new Map<string, NodeJS.Timeout>();
   #resultRecoveryTimers = new Map<string, NodeJS.Timeout>();
+  #pendingAutomaticEvidenceRunIds = new Set<string>();
   #coordinationSignals = new Map<string, number>();
   #now: () => number;
   #setTimeout: (callback: () => void, delayMs: number) => NodeJS.Timeout;
@@ -650,6 +660,7 @@ export class Broker {
       ) {
         const run = this.store.state.runs[event.entityRefs.runId];
         if (run) this.#clearTaskDeadline(run.taskId);
+        this.#pendingAutomaticEvidenceRunIds.add(event.entityRefs.runId);
       }
       for (const subscriber of this.#clients) {
         if (
@@ -852,6 +863,10 @@ export class Broker {
             // Keep the durable intent. A later recovery can retry exact proof.
           }
         }
+      if (!this.store.readOnly) {
+        const evidenceEvent = await this.#reconcileAutomaticModelEvidence();
+        if (evidenceEvent) await this.#writeSnapshotBestEffort();
+      }
       this.#server = createServer((socket) => this.#connect(socket));
       await new Promise<void>((resolve, reject) =>
         this.#server
@@ -3270,6 +3285,200 @@ export class Broker {
             };
           }
         }
+      } else if (request.method === "model.feedback.record") {
+        if (!["human", "cli", "deck"].includes(principal.kind))
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "Human feedback requires an operator client.",
+          );
+        requirePermission(principal, "manage:all");
+        const p = request.params;
+        if (
+          Object.keys(p).some(
+            (key) =>
+              ![
+                "runId",
+                "dimension",
+                "valuePpm",
+                "confidencePpm",
+                "expiresAt",
+              ].includes(key),
+          ) ||
+          !isEntityId(p.runId, "run") ||
+          (p.dimension !== "preference" &&
+            p.dimension !== "reviewed_output_quality") ||
+          !Number.isSafeInteger(p.valuePpm) ||
+          Number(p.valuePpm) < 0 ||
+          Number(p.valuePpm) > 1_000_000 ||
+          !Number.isSafeInteger(p.confidencePpm) ||
+          Number(p.confidencePpm) < 0 ||
+          Number(p.confidencePpm) > 1_000_000 ||
+          (p.expiresAt !== undefined &&
+            (!safeText(p.expiresAt, 64) ||
+              !Number.isFinite(Date.parse(String(p.expiresAt))))) ||
+          !request.idempotencyKey
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Human feedback parameters or idempotency key are invalid.",
+          );
+        const run = this.store.state.runs[p.runId];
+        if (!run)
+          throw new OrchestratorError("NOT_FOUND", "Rated run was not found.");
+        if (
+          p.dimension === "reviewed_output_quality" &&
+          !Object.values(this.store.state.results ?? {}).some(
+            (item) => item.runId === run.id && item.piSettled,
+          )
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Reviewed quality requires a settled immutable result.",
+          );
+        const idempotencyPrefix = `human-v1:${sha256(
+          `${principal.id}:${request.idempotencyKey}`,
+        )}:`;
+        const sourceKey = `${idempotencyPrefix}${sha256(
+          canonicalJson({ runId: p.runId, ...p }),
+        )}`;
+        const prior = Object.values(
+          this.store.state.modelEvidence?.records ?? {},
+        ).find(
+          (stored) =>
+            stored.record.sourceKind === "human" &&
+            stored.record.sourceName === `operator:${principal.id}` &&
+            stored.record.sourceKey.startsWith(idempotencyPrefix),
+        );
+        if (prior && prior.record.sourceKey !== sourceKey)
+          throw new OrchestratorError(
+            "IDEMPOTENCY_CONFLICT",
+            "Idempotency key is already bound.",
+          );
+        if (prior) {
+          result = {
+            evidenceId: prior.record.evidenceId,
+            state: "already_recorded",
+          };
+        } else {
+          const observedAt = new Date(this.#now()).toISOString();
+          let record;
+          try {
+            record = humanEvidenceForRun({
+              state: this.store.state,
+              run,
+              sourceName: `operator:${principal.id}`,
+              sourceKey,
+              dimension: p.dimension,
+              valuePpm: Number(p.valuePpm),
+              confidencePpm: Number(p.confidencePpm),
+              observedAt,
+              ...(p.expiresAt !== undefined
+                ? { expiresAt: String(p.expiresAt) }
+                : {}),
+            });
+          } catch (error) {
+            throw new OrchestratorError(
+              "INVALID_REQUEST",
+              error instanceof Error
+                ? error.message
+                : "Human feedback is invalid.",
+            );
+          }
+          committedEvent = await this.store.append({
+            type: "model.evidence_recorded",
+            actor: { principalId: principal.id, kind: principal.kind },
+            entityRefs: {},
+            payload: { record },
+          });
+          result = { evidenceId: record.evidenceId, state: "recorded" };
+        }
+      } else if (request.method === "model.feedback.supersede") {
+        if (!["human", "cli", "deck"].includes(principal.kind))
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "Human feedback correction requires an operator client.",
+          );
+        requirePermission(principal, "manage:all");
+        const p = request.params;
+        const correction = p.action === "correct";
+        if (
+          !/^[a-f0-9]{64}$/u.test(String(p.evidenceId)) ||
+          (p.action !== "correct" && p.action !== "retract") ||
+          Object.keys(p).some(
+            (key) =>
+              ![
+                "evidenceId",
+                "action",
+                "valuePpm",
+                "confidencePpm",
+                "expiresAt",
+              ].includes(key),
+          ) ||
+          (correction &&
+            (!Number.isSafeInteger(p.valuePpm) ||
+              Number(p.valuePpm) < 0 ||
+              Number(p.valuePpm) > 1_000_000 ||
+              !Number.isSafeInteger(p.confidencePpm) ||
+              Number(p.confidencePpm) < 0 ||
+              Number(p.confidencePpm) > 1_000_000)) ||
+          (!correction && Object.keys(p).length !== 2)
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Human feedback supersession is invalid.",
+          );
+        const stored =
+          this.store.state.modelEvidence?.records[String(p.evidenceId)];
+        if (
+          !stored ||
+          stored.record.sourceKind !== "human" ||
+          stored.record.sourceName !== `operator:${principal.id}` ||
+          Object.hasOwn(
+            this.store.state.modelEvidence?.supersededBy ?? {},
+            String(p.evidenceId),
+          )
+        )
+          throw new OrchestratorError(
+            "NOT_FOUND",
+            "Active owned human feedback was not found.",
+          );
+        const supersededAt = new Date(this.#now()).toISOString();
+        let replacement = null;
+        if (correction)
+          try {
+            replacement = correctedHumanEvidence(stored.record, {
+              valuePpm: Number(p.valuePpm),
+              confidencePpm: Number(p.confidencePpm),
+              observedAt: supersededAt,
+              ...(p.expiresAt !== undefined
+                ? { expiresAt: String(p.expiresAt) }
+                : {}),
+            });
+          } catch (error) {
+            throw new OrchestratorError(
+              "INVALID_REQUEST",
+              error instanceof Error
+                ? error.message
+                : "Human feedback correction is invalid.",
+            );
+          }
+        committedEvent = await this.store.append({
+          type: "model.evidence_superseded",
+          actor: { principalId: principal.id, kind: principal.kind },
+          entityRefs: {},
+          payload: {
+            schemaVersion: 1,
+            evidenceId: String(p.evidenceId),
+            replacement,
+            reason: correction ? "corrected" : "retracted",
+            supersededAt,
+          },
+        });
+        result = {
+          evidenceId: String(p.evidenceId),
+          replacementEvidenceId: replacement?.evidenceId ?? null,
+          state: correction ? "corrected" : "retracted",
+        };
       } else if (request.method === "model.capabilities") {
         requirePermission(principal, "read:state");
         result = await this.#piCapabilities.snapshot();
@@ -4051,6 +4260,136 @@ export class Broker {
             result = { ...this.store.state.groups![group.id], outcomes };
           }
         }
+      } else if (request.method === "review.submit") {
+        requirePermission(principal, "manage:self");
+        const p = request.params;
+        if (
+          !exactKeys(p, [
+            "agentId",
+            "taskId",
+            "runId",
+            "assignmentGeneration",
+            "valuePpm",
+            "confidencePpm",
+          ]) ||
+          principal.kind !== "pi_child" ||
+          principal.agentId !== p.agentId ||
+          !isEntityId(p.taskId, "tsk") ||
+          !isEntityId(p.runId, "run") ||
+          !Number.isSafeInteger(p.assignmentGeneration) ||
+          !Number.isSafeInteger(p.valuePpm) ||
+          Number(p.valuePpm) < 0 ||
+          Number(p.valuePpm) > 1_000_000 ||
+          !Number.isSafeInteger(p.confidencePpm) ||
+          Number(p.confidencePpm) < 0 ||
+          Number(p.confidencePpm) > 1_000_000
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Independent review submission is invalid.",
+          );
+        const reviewerRun = this.store.state.runs[p.runId];
+        const contract = Object.values(
+          this.store.state.reviewContracts ?? {},
+        ).find((item) => item.reviewTaskId === p.taskId);
+        if (
+          !reviewerRun ||
+          !contract ||
+          reviewerRun.taskId !== p.taskId ||
+          reviewerRun.agentId !== principal.agentId ||
+          reviewerRun.assignmentGeneration !== p.assignmentGeneration ||
+          reviewerRun.settled ||
+          ["succeeded", "failed", "cancelled", "timed_out", "lost"].includes(
+            reviewerRun.state,
+          ) ||
+          Date.parse(contract.expiresAt) <= this.#now()
+        )
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "Review contract is late, unbound, or outside this assignment.",
+          );
+        const reviewedRun = this.store.state.runs[contract.reviewedRunId];
+        const reviewedResult =
+          this.store.state.results?.[contract.reviewedResultId];
+        if (
+          !reviewedRun ||
+          !reviewedResult ||
+          reviewedResult.taskId !== contract.reviewedTaskId ||
+          reviewedResult.runId !== contract.reviewedRunId ||
+          reviewedResult.payloadHash !== contract.resultDigest ||
+          !reviewedResult.piSettled
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Reviewed result bytes or binding changed.",
+          );
+        const reviewerSubject = runtimeSubjectForRun(
+          this.store.state,
+          reviewerRun,
+        );
+        const reviewedSubject = runtimeSubjectForRun(
+          this.store.state,
+          reviewedRun,
+        );
+        if (!reviewerSubject || !reviewedSubject)
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Review model identity is not attested.",
+          );
+        const reviewerModelFamily = modelFamily(
+          reviewerSubject,
+          this.#endpointPolicy,
+        );
+        if (
+          reviewerModelFamily ===
+          modelFamily(reviewedSubject, this.#endpointPolicy)
+        )
+          throw new OrchestratorError(
+            "PERMISSION_DENIED",
+            "A model family cannot review its own output.",
+          );
+        if (
+          Object.values(this.store.state.modelEvidence?.records ?? {}).some(
+            (stored) =>
+              stored.record.sourceKind === "independent_review" &&
+              stored.record.sourceKey === contract.id,
+          )
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Review contract was already submitted.",
+          );
+        const observedAt = new Date(this.#now()).toISOString();
+        let record;
+        try {
+          record = independentReviewEvidence({
+            state: this.store.state,
+            reviewedRun,
+            sourceKey: contract.id,
+            reviewerAgentId: principal.agentId!,
+            reviewerModelFamily,
+            resultId: reviewedResult.id,
+            resultDigest: reviewedResult.payloadHash,
+            rubricVersion: contract.rubricVersion,
+            valuePpm: Number(p.valuePpm),
+            confidencePpm: Number(p.confidencePpm),
+            observedAt,
+          });
+        } catch (error) {
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            error instanceof Error
+              ? error.message
+              : "Independent review evidence is invalid.",
+          );
+        }
+        committedEvent = await this.store.append({
+          type: "model.evidence_recorded",
+          actor: { principalId: principal.id, kind: principal.kind },
+          entityRefs: {},
+          payload: { record },
+        });
+        result = { evidenceId: record.evidenceId, state: "recorded" };
       } else if (request.method === "result.publish") {
         requirePermission(principal, "manage:self");
         const p = request.params;
@@ -4882,6 +5221,7 @@ export class Broker {
                 "project",
                 "isolation",
                 "budget",
+                "review",
                 "parentAgentId",
                 "wait",
                 "dryRun",
@@ -5015,6 +5355,64 @@ export class Broker {
           creationNow,
           request.method === "delegate.execute" ? p.timeoutMs : undefined,
         );
+        let reviewTarget:
+          | {
+              taskId: string;
+              runId: string;
+              resultId: string;
+              resultDigest: string;
+              rubricVersion: string;
+              taskProfile: string;
+            }
+          | undefined;
+        if (request.method === "agent.spawn" && p.review !== undefined) {
+          const review =
+            p.review && typeof p.review === "object" && !Array.isArray(p.review)
+              ? (p.review as Record<string, unknown>)
+              : undefined;
+          if (
+            !review ||
+            !exactKeys(review, [
+              "taskId",
+              "runId",
+              "resultId",
+              "rubricVersion",
+            ]) ||
+            !isEntityId(review.taskId, "tsk") ||
+            !isEntityId(review.runId, "run") ||
+            !isEntityId(review.resultId, "res") ||
+            !safeText(review.rubricVersion, 64)
+          )
+            throw new OrchestratorError(
+              "INVALID_REQUEST",
+              "Review target is invalid.",
+            );
+          const reviewedTask = this.store.state.tasks[review.taskId];
+          const reviewedRun = this.store.state.runs[review.runId];
+          const reviewedResult = this.store.state.results?.[review.resultId];
+          if (
+            !reviewedTask?.profileId ||
+            !reviewedRun ||
+            !reviewedResult ||
+            reviewedRun.taskId !== reviewedTask.id ||
+            reviewedResult.taskId !== reviewedTask.id ||
+            reviewedResult.runId !== reviewedRun.id ||
+            !reviewedResult.piSettled
+          )
+            throw new OrchestratorError(
+              "INVALID_REQUEST",
+              "Review target is not a settled immutable result.",
+            );
+          reviewTarget = {
+            taskId: reviewedTask.id,
+            runId: reviewedRun.id,
+            resultId: reviewedResult.id,
+            resultDigest: reviewedResult.payloadHash,
+            rubricVersion: review.rubricVersion as string,
+            taskProfile: reviewedTask.profileId,
+          };
+        }
+        const reviewContractId = reviewTarget ? createId("rvc") : undefined;
         const steps =
           request.method === "agent.spawn"
             ? [
@@ -5360,6 +5758,32 @@ export class Broker {
             });
             this.#scheduleTaskDeadline(this.store.state.tasks[taskId]!);
           }
+          if (reviewTarget && reviewContractId) {
+            const reviewTaskId = taskIds[0]!;
+            await this.store.append({
+              type: "review.contract_issued",
+              actor: { principalId: principal.id, kind: principal.kind },
+              entityRefs: {
+                reviewContractId,
+                taskId: reviewTaskId,
+                reviewedTaskId: reviewTarget.taskId,
+                runId: reviewTarget.runId,
+                resultId: reviewTarget.resultId,
+              },
+              payload: {
+                id: reviewContractId,
+                reviewTaskId,
+                reviewedTaskId: reviewTarget.taskId,
+                reviewedRunId: reviewTarget.runId,
+                reviewedResultId: reviewTarget.resultId,
+                resultDigest: reviewTarget.resultDigest,
+                rubricVersion: reviewTarget.rubricVersion,
+                taskProfile: reviewTarget.taskProfile,
+                issuedAt: createdAt,
+                expiresAt: wallDeadline,
+              },
+            });
+          }
           await this.#advanceWorkflow(workflowId, {
             principalId: principal.id,
             kind: principal.kind,
@@ -5390,6 +5814,7 @@ export class Broker {
             workflowId,
             state: this.store.state.workflows[workflowId]?.state ?? "running",
             tasks: currentTasks,
+            ...(reviewContractId ? { reviewContractId } : {}),
           };
         }
       } else if (request.method === "workflow.create") {
@@ -6033,6 +6458,13 @@ export class Broker {
           });
         }
       } else throw new OrchestratorError("NOT_FOUND", "Method was not found.");
+      if (this.#pendingAutomaticEvidenceRunIds.size > 0) {
+        const pendingRunIds = [...this.#pendingAutomaticEvidenceRunIds];
+        this.#pendingAutomaticEvidenceRunIds.clear();
+        const evidenceEvent =
+          await this.#reconcileAutomaticModelEvidence(pendingRunIds);
+        if (evidenceEvent) committedEvent = evidenceEvent;
+      }
       assertInvariants(this.store.state);
       if (committedEvent) await this.#writeSnapshotBestEffort();
       await responseBoundary?.();
@@ -7016,6 +7448,60 @@ export class Broker {
       await this.#writeSnapshotBestEffort();
     });
   }
+  async #reconcileAutomaticModelEvidence(
+    runIds?: readonly string[],
+  ): Promise<StoredEvent | undefined> {
+    let last: StoredEvent | undefined;
+    const runs = runIds
+      ? [...new Set(runIds)]
+          .map((runId) => this.store.state.runs[runId])
+          .filter((run): run is Run => Boolean(run))
+      : Object.values(this.store.state.runs);
+    for (const run of runs.sort((left, right) =>
+      left.id.localeCompare(right.id),
+    )) {
+      let records;
+      try {
+        records = automaticEvidenceForRun(this.store.state, run);
+      } catch {
+        continue;
+      }
+      for (const record of records) {
+        if (this.store.state.modelEvidence?.records[record.evidenceId])
+          continue;
+        const duplicate = Object.values(
+          this.store.state.modelEvidence?.records ?? {},
+        ).some(
+          (stored) =>
+            !Object.hasOwn(
+              this.store.state.modelEvidence?.supersededBy ?? {},
+              stored.record.evidenceId,
+            ) &&
+            stored.record.sourceKind === record.sourceKind &&
+            stored.record.sourceName === record.sourceName &&
+            stored.record.sourceKey === record.sourceKey,
+        );
+        if (duplicate) continue;
+        try {
+          last = await this.store.append({
+            type: "model.evidence_recorded",
+            actor: {
+              principalId: "prn_00000000000000000000000000",
+              kind: "system",
+            },
+            entityRefs: {},
+            payload: { record },
+          });
+        } catch (error) {
+          this.#pendingAutomaticEvidenceRunIds.add(run.id);
+          this.#observeBackgroundFailure(error);
+          return last;
+        }
+      }
+    }
+    return last;
+  }
+
   #endpointIdForTask(task: Task, agentId?: string): string {
     const run = task.currentRunId
       ? this.store.state.runs[task.currentRunId]

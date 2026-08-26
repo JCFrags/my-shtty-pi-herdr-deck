@@ -42,6 +42,7 @@ export const emptyState = (): OrchestrationState => ({
   questions: {},
   groups: {},
   herdrMetadata: {},
+  reviewContracts: {},
   herdrResources: {},
   idempotency: {},
 });
@@ -113,6 +114,7 @@ const known = new Set([
   "scheduler.admitted",
   "scheduler.blocked",
   "task.collected",
+  "review.contract_issued",
   "model.evidence_recorded",
   "model.evidence_superseded",
   "model.evidence_compacted",
@@ -134,6 +136,7 @@ export function reduce(
     questions: state.questions ?? {},
     groups: state.groups ?? {},
     herdrMetadata: state.herdrMetadata ?? {},
+    reviewContracts: state.reviewContracts ?? {},
   };
   const p = event.payload as Record<string, unknown>;
   const taskId = event.entityRefs?.taskId;
@@ -688,6 +691,10 @@ export function reduce(
         ...(typeof p.terminalId === "string"
           ? { terminalId: p.terminalId }
           : {}),
+        startedAt:
+          "timestamp" in event && typeof event.timestamp === "string"
+            ? event.timestamp
+            : task.createdAt,
         settled: false,
         resultRecoveryCount: 0,
         ...(typeof runTimeoutAt === "string"
@@ -778,6 +785,18 @@ export function reduce(
           ...(state ? { state } : {}),
           settled,
           ...(reason ? { terminalReason: reason } : {}),
+          ...(event.type === "run.state_changed" &&
+          state !== undefined &&
+          runSharedTerminal.has(state) &&
+          (("timestamp" in event && typeof event.timestamp === "string") ||
+            run.terminalAt)
+            ? {
+                terminalAt:
+                  "timestamp" in event && typeof event.timestamp === "string"
+                    ? event.timestamp
+                    : run.terminalAt!,
+              }
+            : {}),
           ...(typeof p.piSessionId === "string"
             ? { piSessionId: p.piSessionId }
             : {}),
@@ -983,7 +1002,20 @@ export function reduce(
       };
       next.runs = {
         ...next.runs,
-        [id]: { ...run, state: "failed", terminalReason: reason },
+        [id]: {
+          ...run,
+          state: "failed",
+          terminalReason: reason,
+          ...(("timestamp" in event && typeof event.timestamp === "string") ||
+          run.terminalAt
+            ? {
+                terminalAt:
+                  "timestamp" in event && typeof event.timestamp === "string"
+                    ? event.timestamp
+                    : run.terminalAt!,
+              }
+            : {}),
+        },
       };
       next.tasks = {
         ...next.tasks,
@@ -1408,6 +1440,38 @@ export function reduce(
           "Herdr metadata identity or terminal state changed.",
         );
       next.herdrMetadata = { ...next.herdrMetadata, [id]: { ...metadata } };
+      break;
+    }
+    case "review.contract_issued": {
+      const contract = p as unknown as import("./types.js").ReviewContract;
+      const reviewTask = next.tasks[contract.reviewTaskId];
+      const reviewedTask = next.tasks[contract.reviewedTaskId];
+      const reviewedRun = next.runs[contract.reviewedRunId];
+      const reviewedResult = next.results?.[contract.reviewedResultId];
+      if (
+        !contract.id ||
+        next.reviewContracts![contract.id] ||
+        Object.values(next.reviewContracts!).some(
+          (item) => item.reviewTaskId === contract.reviewTaskId,
+        ) ||
+        !reviewTask ||
+        !reviewedTask?.profileId ||
+        !reviewedRun ||
+        !reviewedResult ||
+        reviewedRun.taskId !== reviewedTask.id ||
+        reviewedResult.taskId !== reviewedTask.id ||
+        reviewedResult.runId !== reviewedRun.id ||
+        reviewedResult.payloadHash !== contract.resultDigest ||
+        contract.taskProfile !== reviewedTask.profileId
+      )
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          "Review contract is invalid or already exists.",
+        );
+      next.reviewContracts = {
+        ...next.reviewContracts,
+        [contract.id]: { ...contract },
+      };
       break;
     }
     case "model.evidence_recorded": {

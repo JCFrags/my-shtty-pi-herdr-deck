@@ -31,9 +31,13 @@ import { resolveHerdrPaths } from "../src/shared/paths.js";
 import { ProviderProjectionCollector } from "../src/pi/provider-projection-collector.js";
 import { ProviderEventAdapters } from "../src/pi/provider-event-adapters.js";
 import { openAgentSettings } from "../src/pi/agent-settings.js";
-export const ORCHESTRATION_TOOLS = new Set([
+const MANAGED_TOOL_NAMES = [
   "orchestrator_result",
   "orchestrator_ask",
+  "orchestrator_review_submit",
+] as const;
+export const ORCHESTRATION_TOOLS = new Set<string>([
+  ...MANAGED_TOOL_NAMES,
   ...PARENT_TOOL_NAMES,
 ]);
 const LEGACY_ORCHESTRATION_TOOLS = new Set([
@@ -943,7 +947,7 @@ export default async function piHerdrOrchestrator(
         parentToolsRegistered = true;
       }
       reconcileActiveTools(pi, [
-        ...(managed ? ["orchestrator_result", "orchestrator_ask"] : []),
+        ...(managed ? MANAGED_TOOL_NAMES : []),
         ...(parentAuthorized ? PARENT_TOOL_NAMES : []),
       ]);
       candidateClient.markRegistrationReady();
@@ -1084,8 +1088,7 @@ export default async function piHerdrOrchestrator(
     },
   });
   api.on("session_start", (_event, next) => {
-    if (managed)
-      reconcileActiveTools(pi, ["orchestrator_result", "orchestrator_ask"]);
+    if (managed) reconcileActiveTools(pi, MANAGED_TOOL_NAMES);
     void start(next as PiContextLike);
   });
   api.on("session_shutdown", (event) =>
