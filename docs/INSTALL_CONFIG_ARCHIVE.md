@@ -20,7 +20,7 @@ Linking the Herdr plugin does not run its startup hook. Use the authorized Herdr
 ./bin/pi-herdr-orchestrator doctor --json
 ```
 
-Pi `/reload` reloads the extension and reconnects it to an existing broker. It does not start a missing broker. A resumed Pi session is valid only after Herdr identity and broker reconciliation succeed.
+Pi `/reload` reconnects the currently loaded extension to an existing broker. Pi 0.84.2 can retain an old module factory after a deployed multi-module `dist/` changes. Fully exit and restart Pi after each extension deployment. Do not use `/reload` as the deployment activation step. It does not start a missing broker. A resumed Pi session is valid only after Herdr identity and broker reconciliation succeed.
 
 ## Configuration
 
