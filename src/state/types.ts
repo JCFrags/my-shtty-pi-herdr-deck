@@ -1,4 +1,5 @@
 import type { EntityKind } from "../shared/ids.js";
+import type { ModelEvidenceState } from "../model-intelligence/model-evidence.js";
 export type AgentState =
   | "provisioning"
   | "starting"
@@ -243,6 +244,7 @@ export interface OrchestrationState {
   questions?: Record<string, QuestionRecord>;
   groups?: Record<string, AgentGroup>;
   herdrMetadata?: Record<string, HerdrTaskMetadata>;
+  modelEvidence?: ModelEvidenceState;
   herdrResources?: Record<
     string,
     {

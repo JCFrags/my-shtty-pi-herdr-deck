@@ -10,6 +10,11 @@ import {
 import { createId, isEntityId } from "../shared/ids.js";
 import { canonicalJson, sha256 } from "../shared/canonical-json.js";
 import { OrchestratorError } from "../shared/errors.js";
+import {
+  validateModelEvidenceCompaction,
+  validateModelEvidenceRecord,
+  validateModelEvidenceSupersession,
+} from "../model-intelligence/model-evidence.js";
 import { emptyState, reduce } from "./reducer.js";
 import type {
   ErrorSummary,
@@ -689,7 +694,28 @@ export class EventStore {
 
     const p = payload as Record<string, unknown>;
     let valid = false;
-    if (event.type === "task.created_m3") {
+    if (event.type === "model.evidence_recorded") {
+      try {
+        valid =
+          exactKeys(refs, []) &&
+          exactKeys(p, ["record"]) &&
+          !!validateModelEvidenceRecord(p.record);
+      } catch {
+        valid = false;
+      }
+    } else if (event.type === "model.evidence_superseded") {
+      try {
+        valid = exactKeys(refs, []) && !!validateModelEvidenceSupersession(p);
+      } catch {
+        valid = false;
+      }
+    } else if (event.type === "model.evidence_compacted") {
+      try {
+        valid = exactKeys(refs, []) && !!validateModelEvidenceCompaction(p);
+      } catch {
+        valid = false;
+      }
+    } else if (event.type === "task.created_m3") {
       const taskKeyVariants: string[][] = [];
       const optionalTaskKeys = [
         "parentAgentId",

@@ -1,5 +1,13 @@
 import { OrchestratorError } from "../shared/errors.js";
 import { canonicalJson, sha256 } from "../shared/canonical-json.js";
+import {
+  applyModelEvidenceCompaction,
+  applyModelEvidenceRecord,
+  applyModelEvidenceSupersession,
+  validateModelEvidenceCompaction,
+  validateModelEvidenceRecord,
+  validateModelEvidenceSupersession,
+} from "../model-intelligence/model-evidence.js";
 import type { HerdrTaskMetadata } from "./types.js";
 import type { EventInput, OrchestrationState, StoredEvent } from "./types.js";
 import type {
@@ -105,6 +113,9 @@ const known = new Set([
   "scheduler.admitted",
   "scheduler.blocked",
   "task.collected",
+  "model.evidence_recorded",
+  "model.evidence_superseded",
+  "model.evidence_compacted",
 ]);
 export function reduce(
   state: OrchestrationState,
@@ -1397,6 +1408,51 @@ export function reduce(
           "Herdr metadata identity or terminal state changed.",
         );
       next.herdrMetadata = { ...next.herdrMetadata, [id]: { ...metadata } };
+      break;
+    }
+    case "model.evidence_recorded": {
+      try {
+        const record = validateModelEvidenceRecord(p.record);
+        next.modelEvidence = applyModelEvidenceRecord(
+          next.modelEvidence,
+          record,
+          "seq" in event ? event.seq : state.lastEventSeq + 1,
+        );
+      } catch (error) {
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          `Model evidence record is invalid: ${(error as Error).message}`,
+        );
+      }
+      break;
+    }
+    case "model.evidence_superseded": {
+      try {
+        next.modelEvidence = applyModelEvidenceSupersession(
+          next.modelEvidence,
+          validateModelEvidenceSupersession(p),
+          "seq" in event ? event.seq : state.lastEventSeq + 1,
+        );
+      } catch (error) {
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          `Model evidence supersession is invalid: ${(error as Error).message}`,
+        );
+      }
+      break;
+    }
+    case "model.evidence_compacted": {
+      try {
+        next.modelEvidence = applyModelEvidenceCompaction(
+          next.modelEvidence,
+          validateModelEvidenceCompaction(p),
+        );
+      } catch (error) {
+        throw new OrchestratorError(
+          "STATE_CORRUPT",
+          `Model evidence compaction is invalid: ${(error as Error).message}`,
+        );
+      }
       break;
     }
     case "herdr.provision.intent": {
