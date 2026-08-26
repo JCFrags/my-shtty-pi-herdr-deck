@@ -13,6 +13,7 @@ import {
   createManagedToken,
   createManagedTokenFile,
   createPromptFile,
+  archiveManagedFileForCleanup,
   retainManagedFileForCleanup,
   verifyManagedTokenFile,
   type ManagedToken,
@@ -661,6 +662,28 @@ export class HerdrProvisioner {
       ? "retained_registration_files"
       : "registration_files_missing";
   }
+  async archiveRegistration(
+    result: ProvisionResult,
+  ): Promise<"retained_registration_files" | "registration_files_missing"> {
+    const outcomes = [];
+    if (result.promptPath)
+      outcomes.push(
+        await archiveManagedFileForCleanup(
+          result.promptPath,
+          result.promptFileIdentity,
+        ),
+      );
+    if (result.tokenFilePath)
+      outcomes.push(
+        await archiveManagedFileForCleanup(
+          result.tokenFilePath,
+          result.tokenFileIdentity,
+        ),
+      );
+    return outcomes.includes("retained")
+      ? "retained_registration_files"
+      : "registration_files_missing";
+  }
   async verifyRegistration(
     result: ProvisionResult,
     identity: {
@@ -691,11 +714,11 @@ export class HerdrProvisioner {
       throw new Error("HERDR_REGISTRATION_IDENTITY_MISMATCH");
     if (cleanup) {
       if (result.promptPath)
-        await retainManagedFileForCleanup(
+        await archiveManagedFileForCleanup(
           result.promptPath,
           result.promptFileIdentity,
         );
-      await retainManagedFileForCleanup(
+      await archiveManagedFileForCleanup(
         result.tokenFilePath,
         result.tokenFileIdentity,
       );

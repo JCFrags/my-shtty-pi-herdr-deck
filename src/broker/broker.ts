@@ -301,6 +301,13 @@ const DEFAULT_TASK_WALL_MS = 15 * 60_000;
 const MAX_TASK_WALL_MS = 24 * 60 * 60_000;
 const MAX_BROKER_CLIENTS = 64;
 const ADAPTER_ABORT_TIMEOUT_MS = 10_000;
+const RESULT_RECOVERY_TIMEOUT_MS = 10_000;
+const RESULT_RECOVERY_PROMPT =
+  "This run settled without an accepted structured result. Publish the final result now with orchestrator_result. Do not do more task work.";
+const RESULT_MISSING_REASON = {
+  code: "RESULT_MISSING" as const,
+  message: "The managed agent settled without a structured result.",
+};
 const WALL_TIMEOUT_REASON = {
   code: "TIMEOUT" as const,
   message: "The task wall deadline expired.",
@@ -554,6 +561,7 @@ export class Broker {
   >();
   #questionTimers = new Map<string, NodeJS.Timeout>();
   #deadlineTimers = new Map<string, NodeJS.Timeout>();
+  #resultRecoveryTimers = new Map<string, NodeJS.Timeout>();
   #coordinationSignals = new Map<string, number>();
   #now: () => number;
   #setTimeout: (callback: () => void, delayMs: number) => NodeJS.Timeout;
@@ -966,6 +974,9 @@ export class Broker {
       for (const timer of this.#deadlineTimers.values())
         this.#clearTimeout(timer);
       this.#deadlineTimers.clear();
+      for (const timer of this.#resultRecoveryTimers.values())
+        this.#clearTimeout(timer);
+      this.#resultRecoveryTimers.clear();
       if (typeof this.#herdr?.shutdown === "function") this.#herdr.shutdown();
       await this.#drainAdmittedWork();
       recordBackgroundFailure();
@@ -1016,6 +1027,9 @@ export class Broker {
       for (const timer of this.#deadlineTimers.values())
         this.#clearTimeout(timer);
       this.#deadlineTimers.clear();
+      for (const timer of this.#resultRecoveryTimers.values())
+        this.#clearTimeout(timer);
+      this.#resultRecoveryTimers.clear();
       if (this.#processRecord)
         try {
           await removeBrokerProcessRecord(this.paths.pid, this.#processRecord);
@@ -2449,11 +2463,6 @@ export class Broker {
               "Adopted root claim is ambiguous.",
             );
           existing = roots[0];
-          if (existing && existing.piSessionId !== pi.sessionId)
-            throw new OrchestratorError(
-              "AGENT_REPLACED",
-              "Pi session does not match the adopted root.",
-            );
           if (
             existing &&
             [...this.#clients].some(
@@ -2545,6 +2554,7 @@ export class Broker {
           }
         }
         if (
+          request.method === "agent.register_managed" &&
           existing &&
           existing.piSessionId !== undefined &&
           existing.piSessionId !== pi.sessionId
@@ -3084,16 +3094,19 @@ export class Broker {
               ].includes(key),
           )
         ) {
-          committedEvent = await this.store.append({
-            type: "agent.state_changed",
-            actor: { principalId: principal.id, kind: principal.kind },
-            entityRefs: { agentId: agent.id },
-            payload: {
-              agentId: agent.id,
-              state: p.event === "blocked" ? "blocked" : "idle",
-            },
-          });
-          result = { accepted: false, manual: true, state: "idle" };
+          const nextAgentState = p.event === "blocked" ? "blocked" : "idle";
+          if (agent.state !== nextAgentState)
+            committedEvent = await this.store.append({
+              type: "agent.state_changed",
+              actor: { principalId: principal.id, kind: principal.kind },
+              entityRefs: { agentId: agent.id },
+              payload: { agentId: agent.id, state: nextAgentState },
+            });
+          result = {
+            accepted: false,
+            manual: true,
+            state: nextAgentState,
+          };
         } else {
           if (
             !exactKeys(assignment, ["assignmentId", "generation"]) ||
@@ -3148,12 +3161,13 @@ export class Broker {
               "Run start lifecycle is duplicated.",
             );
           if (progressEvent && !exactTurn) {
-            committedEvent = await this.store.append({
-              type: "agent.state_changed",
-              actor: { principalId: principal.id, kind: principal.kind },
-              entityRefs: { agentId: agent.id },
-              payload: { agentId: agent.id, state: "idle" },
-            });
+            if (agent.state !== "idle")
+              committedEvent = await this.store.append({
+                type: "agent.state_changed",
+                actor: { principalId: principal.id, kind: principal.kind },
+                entityRefs: { agentId: agent.id },
+                payload: { agentId: agent.id, state: "idle" },
+              });
             result = {
               accepted: false,
               manual: true,
@@ -3220,15 +3234,14 @@ export class Broker {
               state: this.store.state.runs[run.id]?.state,
             };
           } else {
-            committedEvent = await this.store.append({
-              type: "agent.state_changed",
-              actor: { principalId: principal.id, kind: principal.kind },
-              entityRefs: { agentId: agent.id },
-              payload: {
-                agentId: agent.id,
-                state: p.event === "blocked" ? "blocked" : "idle",
-              },
-            });
+            const nextAgentState = p.event === "blocked" ? "blocked" : "idle";
+            if (agent.state !== nextAgentState)
+              committedEvent = await this.store.append({
+                type: "agent.state_changed",
+                actor: { principalId: principal.id, kind: principal.kind },
+                entityRefs: { agentId: agent.id },
+                payload: { agentId: agent.id, state: nextAgentState },
+              });
             result = {
               accepted: false,
               manual: true,
@@ -3483,20 +3496,14 @@ export class Broker {
             ...(resource.terminalId ? { terminalId: resource.terminalId } : {}),
             ...(resource.sessionId ? { sessionId: resource.sessionId } : {}),
           } as never;
+          const controlActor = {
+            principalId: principal.id,
+            kind: principal.kind,
+          };
+          await this.#markAgentStopping(target, controlActor);
           if (request.method === "agent.stop") await this.#herdr.stop(guard);
           else await this.#herdr.close(guard);
-          const closedAgent = this.store.state.agents[target];
-          if (
-            request.method === "agent.close" &&
-            closedAgent &&
-            ["idle", "working", "blocked"].includes(closedAgent.state)
-          )
-            await this.store.append({
-              type: "agent.state_changed",
-              actor: { principalId: principal.id, kind: principal.kind },
-              entityRefs: { agentId: target },
-              payload: { agentId: target, state: "stopping" },
-            });
+          await this.#markAgentStopped(target, controlActor);
           result = {
             agentId: target,
             state: request.method === "agent.stop" ? "stopped" : "closed",
@@ -3938,8 +3945,14 @@ export class Broker {
                   ? { sessionId: resource.sessionId }
                   : {}),
               } as never;
+              const controlActor = {
+                principalId: principal.id,
+                kind: principal.kind,
+              };
+              await this.#markAgentStopping(agentId, controlActor);
               if (close) await this.#herdr.close(guard);
               else await this.#herdr.stop(guard);
+              await this.#markAgentStopped(agentId, controlActor);
               outcomes.push({ agentId, state: close ? "closed" : "stopped" });
             }
             const type = close ? "group.closed" : "group.stopped";
@@ -4612,6 +4625,11 @@ export class Broker {
               !resource?.paneId
             )
               continue;
+            const controlActor = {
+              principalId: principal.id,
+              kind: principal.kind,
+            };
+            await this.#markAgentStopping(agent.id, controlActor);
             await this.#herdr.close({
               paneId: resource.paneId,
               ...(resource.terminalId
@@ -4619,17 +4637,7 @@ export class Broker {
                 : {}),
               ...(resource.sessionId ? { sessionId: resource.sessionId } : {}),
             } as never);
-            if (
-              ["idle", "working", "blocked"].includes(
-                this.store.state.agents[agent.id]?.state ?? "",
-              )
-            )
-              await this.store.append({
-                type: "agent.state_changed",
-                actor: { principalId: principal.id, kind: principal.kind },
-                entityRefs: { agentId: agent.id },
-                payload: { agentId: agent.id, state: "stopping" },
-              });
+            await this.#markAgentStopped(agent.id, controlActor);
           }
         }
         result = collection;
@@ -6463,6 +6471,50 @@ export class Broker {
     }
     this.#clearTaskDeadline(task.id);
   }
+  async #terminalizeMissingResult(
+    runId: string,
+    actor: { principalId: string; kind: string },
+  ): Promise<boolean> {
+    const run = this.store.state.runs[runId];
+    if (
+      !run ||
+      isTerminal(run.state) ||
+      run.resultId !== undefined ||
+      (run.resultRecoveryCount ?? 0) !== 1
+    )
+      return false;
+    await this.store.append({
+      type: "run.result_missing",
+      actor,
+      entityRefs: {
+        runId: run.id,
+        taskId: run.taskId,
+        ...(run.agentId ? { agentId: run.agentId } : {}),
+      },
+      payload: {
+        runId: run.id,
+        code: RESULT_MISSING_REASON.code,
+        message: RESULT_MISSING_REASON.message,
+      },
+    });
+    return true;
+  }
+  #scheduleResultRecoveryTimeout(
+    runId: string,
+    workflowId: string,
+    actor: { principalId: string; kind: string },
+  ): void {
+    if (this.#resultRecoveryTimers.has(runId)) return;
+    const timer = this.#setTimeout(() => {
+      this.#resultRecoveryTimers.delete(runId);
+      void this.#enqueueMutation(async () => {
+        if (await this.#terminalizeMissingResult(runId, actor))
+          await this.#advanceWorkflow(workflowId, actor);
+      }).catch((error: unknown) => this.#observeBackgroundFailure(error));
+    }, RESULT_RECOVERY_TIMEOUT_MS);
+    timer.unref();
+    this.#resultRecoveryTimers.set(runId, timer);
+  }
   #scheduleTaskDeadline(task: {
     id: string;
     state: string;
@@ -6623,6 +6675,33 @@ export class Broker {
       )
         this.#queueAudit("question_terminal_delivery_rejected");
     };
+  }
+  async #markAgentStopping(
+    agentId: string,
+    actor: { principalId: string; kind: string },
+  ): Promise<void> {
+    const agent = this.store.state.agents[agentId];
+    if (!agent || !["idle", "working", "blocked"].includes(agent.state)) return;
+    await this.store.append({
+      type: "agent.state_changed",
+      actor,
+      entityRefs: { agentId },
+      payload: { agentId, state: "stopping" },
+    });
+  }
+  async #markAgentStopped(
+    agentId: string,
+    actor: { principalId: string; kind: string },
+  ): Promise<void> {
+    const agent = this.store.state.agents[agentId];
+    if (!agent || ["stopped", "failed", "replaced"].includes(agent.state))
+      return;
+    await this.store.append({
+      type: "agent.state_changed",
+      actor,
+      entityRefs: { agentId },
+      payload: { agentId, state: "stopped", clearCurrentRun: true },
+    });
   }
   async #sendAdapterRequest(
     agentId: string,
@@ -6834,13 +6913,75 @@ export class Broker {
             (candidate) => candidate.runId === run.id,
           )
         : undefined;
-      if (run?.settled && !isTerminal(run.state) && published)
+      if (run?.settled && !isTerminal(run.state) && published) {
         await this.store.append({
           type: "run.state_changed",
           actor,
           entityRefs: { runId: run.id, taskId },
           payload: { runId: run.id, state: published.status },
         });
+        continue;
+      }
+      if (!run || isTerminal(run.state) || published) continue;
+      if ((run.resultRecoveryCount ?? 0) === 1 && run.state !== "settled") {
+        this.#scheduleResultRecoveryTimeout(run.id, workflowId, actor);
+        continue;
+      }
+      if (!run.settled) continue;
+      if ((run.resultRecoveryCount ?? 0) === 0) {
+        await this.store.append({
+          type: "run.result_recovery_requested",
+          actor,
+          entityRefs: {
+            runId: run.id,
+            taskId,
+            ...(run.agentId ? { agentId: run.agentId } : {}),
+          },
+          payload: { runId: run.id, attempt: 1 },
+        });
+        const agent = run.agentId
+          ? this.store.state.agents[run.agentId]
+          : undefined;
+        try {
+          if (!agent || !run.agentId)
+            throw new OrchestratorError(
+              "AGENT_DISCONNECTED",
+              "The result recovery agent is unavailable.",
+            );
+          const recovered = await this.#sendAdapterRequest(
+            run.agentId,
+            "control.prompt",
+            { message: RESULT_RECOVERY_PROMPT, delivery: "normal" },
+            {
+              generation: agent.generation,
+              ...(agent.connectionGeneration !== undefined
+                ? { connectionGeneration: agent.connectionGeneration }
+                : {}),
+              ...(agent.piSessionId ? { piSessionId: agent.piSessionId } : {}),
+              runId: run.id,
+            },
+            RESULT_RECOVERY_TIMEOUT_MS,
+          );
+          if (
+            !recovered ||
+            typeof recovered !== "object" ||
+            (recovered as Record<string, unknown>).ok !== true
+          )
+            throw new OrchestratorError(
+              "RESULT_MISSING",
+              "The result recovery prompt was rejected.",
+            );
+        } catch (error) {
+          this.#queueAudit(
+            error instanceof OrchestratorError
+              ? `result_recovery_failed:${error.code}`
+              : "result_recovery_failed",
+          );
+        }
+        this.#scheduleResultRecoveryTimeout(run.id, workflowId, actor);
+        continue;
+      }
+      await this.#terminalizeMissingResult(run.id, actor);
     }
     for (const taskId of workflow.taskIds) {
       const candidate = this.store.state.tasks[taskId];

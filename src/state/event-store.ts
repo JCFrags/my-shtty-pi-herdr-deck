@@ -210,6 +210,7 @@ const ACTOR_KINDS = new Set([
 const ERROR_SUMMARY_MESSAGES = new Map<string, string>([
   ["TIMEOUT", "The task wall deadline expired."],
   ["BUDGET_EXCEEDED", "The configured budget was exceeded."],
+  ["RESULT_MISSING", "The managed agent settled without a structured result."],
 ]);
 function isErrorSummary(value: unknown): value is ErrorSummary {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;

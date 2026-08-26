@@ -561,8 +561,6 @@ export class HerdrService {
         tokenProof,
         false,
       );
-      const cleanupOutcome =
-        await this.#provisioner.cleanupRegistration(result);
       let finalIdentity: ExactPiPaneIdentity;
       try {
         finalIdentity = exactPiPane(
@@ -606,13 +604,34 @@ export class HerdrService {
           generation: result.token.generation,
           tokenDigest: result.token.digest,
           registrationDeadline: undefined,
-          cleanupOutcome,
+          cleanupOutcome: "registration_cleanup_pending",
         },
       });
       this.#pending.delete(agentId);
       const timer = this.#expiryTimers.get(agentId);
       if (timer) clearTimeout(timer);
       this.#expiryTimers.delete(agentId);
+      let cleanupOutcome:
+        | "retained_registration_files"
+        | "registration_files_missing"
+        | "registration_archive_failed";
+      try {
+        cleanupOutcome = await this.#provisioner.archiveRegistration(result);
+      } catch {
+        cleanupOutcome = "registration_archive_failed";
+      }
+      await this.#store
+        .append({
+          type: "herdr.reconciled",
+          actor: this.#actor,
+          entityRefs: { agentId },
+          payload: {
+            agentId,
+            state: "registered",
+            cleanupOutcome,
+          },
+        })
+        .catch(() => undefined);
       return finalIdentity;
     });
   }

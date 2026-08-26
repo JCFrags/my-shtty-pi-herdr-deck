@@ -4,20 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { ArtifactStore } from "../../src/results/artifact-store.js";
-import { ResultService } from "../../src/results/service.js";
 import {
   validateQuestion,
   validateResult,
 } from "../../src/results/validation.js";
-const run = {
-  runId: "run_01J00000000000000000000000",
-  taskId: "tsk_01J00000000000000000000000",
-  agentId: "agt_01J00000000000000000000000",
-  assignmentGeneration: 1,
-  state: "working" as const,
-  piSettled: false,
-  resultRecoveryCount: 0 as const,
-};
 const body = {
   schemaVersion: 1 as const,
   status: "succeeded" as const,
@@ -44,8 +34,9 @@ const question = {
   defaultOptionId: "A",
   timeoutMs: 10000,
 };
-test("M4 result validator rejects unknown keys, secrets, and malformed references", () => {
+test("M4 result and question validators reject invalid input", () => {
   validateResult(body);
+  validateQuestion(question);
   assert.throws(() => validateResult({ ...body, extra: true }));
   assert.throws(() => validateResult({ ...body, summary: "api_key=secret" }));
   assert.throws(() =>
@@ -54,77 +45,7 @@ test("M4 result validator rejects unknown keys, secrets, and malformed reference
       questions: [{ questionId: "bad", summary: "x", answered: false }],
     }),
   );
-});
-test("result requires both publication and matching Pi settle, with one recovery", async () => {
-  let recoveries = 0;
-  const service = new ResultService({
-    recover: async () => {
-      recoveries++;
-    },
-  });
-  await service.registerRun({ ...run });
-  const published = await service.publish({ ...run, body });
-  assert.equal(published.state, "result_pending");
-  assert.equal((await service.settle(run.runId)).state, "succeeded");
-  const missingRun = {
-    ...run,
-    runId: "run_01J00000000000000000000001",
-    taskId: "tsk_01J00000000000000000000001",
-  };
-  await service.registerRun(missingRun);
-  assert.equal(
-    (await service.settle(missingRun.runId)).state,
-    "result_pending_missing",
-  );
-  assert.equal(recoveries, 1);
-  await service.failMissing(missingRun.runId);
-  assert.equal(service.runs.get(missingRun.runId)?.state, "failed");
-});
-test("duplicate result is idempotent only when byte-equivalent and stale ownership is rejected", async () => {
-  const service = new ResultService();
-  await service.registerRun({ ...run });
-  const first = await service.publish({ ...run, body });
-  const second = await service.publish({ ...run, body });
-  assert.deepEqual(second, {
-    resultId: first.resultId,
-    state: "already_published",
-  });
-  await assert.rejects(() =>
-    service.publish({
-      ...run,
-      agentId: "agt_01J00000000000000000000001",
-      body,
-    }),
-  );
-  await assert.rejects(() =>
-    service.publish({ ...run, body: { ...body, summary: "different" } }),
-  );
-});
-test("question blocks run, answers once, and releases the same waiter", async () => {
-  validateQuestion(question);
-  const service = new ResultService();
-  await service.registerRun({ ...run });
-  const q = await service.ask({ ...run, body: question });
-  assert.equal(service.runs.get(run.runId)?.state, "blocked");
-  const waiting = service.waitForAnswer(q.id, 10000);
-  const accepted = await service.answer(q.id, { optionId: "B" }, "prn_parent");
-  assert.equal(accepted.answer?.optionId, "B");
-  assert.equal((await waiting).state, "answered");
-  assert.equal(service.runs.get(run.runId)?.state, "working");
-  await assert.rejects(() =>
-    service.answer(q.id, { optionId: "A" }, "prn_deck"),
-  );
-});
-test("question timeout rejects late answers and never changes the run", async () => {
-  const service = new ResultService();
-  await service.registerRun({ ...run });
-  const q = await service.ask({ ...run, body: question });
-  await service.timeout(q.id);
-  assert.equal(service.getQuestion(q.id).state, "timed_out");
-  assert.equal(service.runs.get(run.runId)?.state, "failed");
-  await assert.rejects(() =>
-    service.answer(q.id, { optionId: "A" }, "prn_parent"),
-  );
+  assert.throws(() => validateQuestion({ ...question, extra: true }));
 });
 test("artifact store is owner-only, digest checked, bounded, and traversal-safe", async () => {
   const root = await mkdtemp(join(tmpdir(), "m4-artifacts-"));

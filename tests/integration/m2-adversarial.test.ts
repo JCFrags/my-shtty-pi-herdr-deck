@@ -124,7 +124,7 @@ test("M2 production registration rejects every wrong identity and proof without 
     undefined,
     result.token.digest,
   );
-  assert.equal((await readdir(prompts)).length, 2);
+  assert.equal((await readdir(prompts)).length, 0);
 });
 
 test("M2 registration rechecks the occupant before committing registration", async () => {

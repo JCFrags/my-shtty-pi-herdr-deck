@@ -73,12 +73,9 @@ test("M2 fake registration retains files until verified and records lifecycle", 
     store.state.herdrResources?.["agent-1"]?.cleanupOutcome,
     "retained_registration_files",
   );
-  assert.equal((await readdir(prompts)).length, 2);
-  assert.equal(await readFile(result.promptPath!, "utf8"), "fake prompt");
-  assert.equal(
-    await readFile(result.tokenFilePath!, "utf8"),
-    result.token.token + "\n",
-  );
+  assert.equal((await readdir(prompts)).length, 0);
+  await assert.rejects(() => readFile(result.promptPath!, "utf8"), /ENOENT/);
+  await assert.rejects(() => readFile(result.tokenFilePath!, "utf8"), /ENOENT/);
   await service.close({
     paneId: "pane-1",
     terminalId: "terminal-1",
@@ -98,6 +95,63 @@ test("M2 fake registration retains files until verified and records lifecycle", 
     store.state.herdrResources?.["agent-1"]?.cleanupOutcome,
     "close_succeeded",
   );
+});
+
+test("M2 registration remains durable when registration archival fails", async () => {
+  const root = await mkdtemp(join(tmpdir(), "m2-archive-failure-"));
+  const prompts = join(root, "prompts");
+  const cli = {
+    requireMutationCapabilities: () => undefined,
+    createTab: async () => ({ tab_id: "tab-1", root_pane_id: "pane-1" }),
+    startPi: async () => ({ pane_id: "pane-1" }),
+    snapshot: async () => ({
+      panes: [
+        {
+          id: "pane-1",
+          terminalId: "terminal-1",
+          occupant: {
+            agentId: "agent-1",
+            terminalId: "terminal-1",
+            sessionId: "session-1",
+            generation: 1,
+          },
+        },
+      ],
+      tabs: [],
+      workspaces: [],
+      agents: [],
+      worktrees: [],
+    }),
+  } as never;
+  const store = new EventStore(join(root, "events.ndjson"));
+  await store.open();
+  const provisioner = new HerdrProvisioner(cli, prompts, () => [], true);
+  provisioner.archiveRegistration = async () => {
+    throw new Error("archive unavailable");
+  };
+  const service = new HerdrService({ store, cli, provisioner });
+  await service.provision({
+    agentId: "agent-1",
+    parentAgentId: "parent-1",
+    role: "worker",
+    workspaceId: "workspace-1",
+    cwd: root,
+    profileId: "test-runner",
+    isolation: "shared-readonly",
+    prompt: "fake prompt",
+  });
+  await service.register("agent-1", {
+    paneId: "pane-1",
+    terminalId: "terminal-1",
+    sessionId: "session-1",
+    generation: 1,
+  });
+  assert.equal(store.state.herdrResources?.["agent-1"]?.state, "registered");
+  assert.equal(
+    store.state.herdrResources?.["agent-1"]?.cleanupOutcome,
+    "registration_archive_failed",
+  );
+  assert.equal((await readdir(prompts)).length, 2);
 });
 
 test("M2 fake registration refuses a replaced occupant before token deletion", async () => {
@@ -237,7 +291,7 @@ test("M2 registration reconstructs pending files after service restart", async (
     secondStore.state.herdrResources?.["agent-r"]?.state,
     "registered",
   );
-  assert.equal((await readdir(prompts)).length, 2);
+  assert.equal((await readdir(prompts)).length, 0);
 });
 
 test("M2 restart expiry durably times out pending registration", async () => {
