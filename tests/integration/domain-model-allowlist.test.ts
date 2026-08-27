@@ -36,6 +36,85 @@ function pathsFor(root: string, runtime: string) {
   };
 }
 
+test("broker round-trips an empty endpoint settings batch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "operator-settings-empty-"));
+  const runtime = await mkdtemp(
+    join(tmpdir(), "operator-settings-empty-runtime-"),
+  );
+  const paths = pathsFor(root, runtime);
+  const persisted: BrokerOperatorSettings[] = [];
+  const broker = new Broker(paths, {
+    modelPolicy: { defaults: { global: luna }, allowlist: [luna] },
+    persistOperatorSettings: async (settings) => {
+      persisted.push(structuredClone(settings));
+    },
+  });
+  try {
+    await broker.start();
+    const before = (await brokerRequest(
+      paths.socket,
+      paths.secret,
+      "model.policy.get",
+      {},
+      paths.sessionKey,
+    )) as {
+      policy: ModelPolicyConfig;
+      operatorSettings: {
+        endpoints: Record<string, { maxConcurrentAgents: number }>;
+        modelIntelligence: {
+          schemaVersion: 1;
+          routingMode: "current_default" | "advisory" | "rated_auto";
+          mappings: [];
+        };
+      };
+    };
+    assert.deepEqual(before.operatorSettings.endpoints, {});
+    assert.equal(
+      before.operatorSettings.modelIntelligence.routingMode,
+      "current_default",
+    );
+
+    const modelIntelligence = {
+      ...before.operatorSettings.modelIntelligence,
+      routingMode: "rated_auto" as const,
+    };
+    const accepted = (await brokerRequest(
+      paths.socket,
+      paths.secret,
+      "model.operator.settings.set",
+      {
+        allowlist: before.policy.allowlist,
+        endpoints: before.operatorSettings.endpoints,
+        modelIntelligence,
+      },
+      paths.sessionKey,
+    )) as {
+      persisted: boolean;
+      operatorSettings: {
+        endpoints: Record<string, { maxConcurrentAgents: number }>;
+        modelIntelligence: { routingMode: string };
+      };
+    };
+
+    assert.equal(accepted.persisted, true);
+    assert.deepEqual(accepted.operatorSettings.endpoints, {});
+    assert.equal(
+      accepted.operatorSettings.modelIntelligence.routingMode,
+      "rated_auto",
+    );
+    assert.deepEqual(persisted, [
+      {
+        modelPolicy: before.policy,
+        modelIntelligence,
+      },
+    ]);
+  } finally {
+    await broker.stop().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+    await rm(runtime, { recursive: true, force: true });
+  }
+});
+
 test("broker persists one validated operator settings batch before runtime apply", async () => {
   const root = await mkdtemp(join(tmpdir(), "operator-settings-"));
   const runtime = await mkdtemp(join(tmpdir(), "operator-settings-runtime-"));
