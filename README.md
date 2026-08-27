@@ -154,6 +154,18 @@ Restart the broker after a configuration change. Use these operator commands to 
 
 A refresh runs outside agent admission and the broker mutation queue. Missing credentials, source outages, rate limits, or rejected data report `failed` or `stale` status. They do not block agent creation and do not replace the last validated snapshot. Source evidence records its Artificial Analysis attribution, observation time, expiry, canonical model, task profile, and content-derived identity in the existing hash-chained event store. It does not change model selection in this release.
 
+### Advisory model options and shadow receipts
+
+The read-only `agent_model_options` parent tool ranks only exact provider, model, and thinking pairs that Pi reports as installed and that the current task profile, placement, and broker allowlist permit. It calls broker method `model.options`. The request requires `profileId`. It can also include `placement`, `modelProfileId`, `projectKey`, and a result `limit` from 1 to 16. The broker rejects an eligible scope above 256 exact pairs.
+
+Version 1 uses fixed integer weights: 45% task capability, 25% protocol reliability, 10% endpoint speed, 5% effective cost, and 15% human preference. Missing confidence can subtract up to 10 score points. A two-point tie band uses provider, model ID, thinking level, and endpoint ID as the stable tie order. The response includes component scores, confidence, source dates, exclusions, and digests.
+
+Endpoint capacity is separate from quality. Each option reports endpoint limit, active count, queued count, and current availability. Capacity cannot change a quality score, rank group, or ranking digest.
+
+Every created agent task stores one bounded `advisoryModelReceipt` inside its existing durable project payload. This applies to `agent_spawn`, `delegate`, accepted compact delegation, and workflow creation. The receipt freezes the model that the broker selected, the top advisory option, alternatives, capacity, evidence and policy digests, and whether the caller used an explicit override. A selected model that is outside the installed advisory scope stays selected and is marked ineligible with a null advisory rank. This preserves existing spawn behavior.
+
+These options and receipts are shadow data only. `resolveSpawnPolicy` remains the only model-selection authority. The broker does not automatically replace the selected model with the recommended model in this release.
+
 ## Compact delegation rollback switch
 
 The `delegate_compact` parent tool previews compact todo text without mutation. Scheduling requires `accept: true` and the exact preview digest. Accepted work uses the existing broker workflow, task, result, question, model, authority, and cleanup paths.

@@ -4,6 +4,7 @@ export const PARENT_TOOL_NAMES = [
   "delegate_compact",
   "delegate",
   "agent_spawn",
+  "agent_model_options",
   "agent_list",
   "agent_get",
   "agent_prompt",
@@ -61,6 +62,13 @@ const METADATA: Record<ParentToolName, ParentToolMetadata> = {
     requiresTarget: false,
     requiresDelegation: false,
     mutating: true,
+  },
+  agent_model_options: {
+    method: "model.options",
+    targetParameters: [],
+    requiresTarget: false,
+    requiresDelegation: false,
+    mutating: false,
   },
   agent_list: {
     method: "agent.list",

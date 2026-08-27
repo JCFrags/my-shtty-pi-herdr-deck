@@ -2,6 +2,7 @@ export type ParentToolName =
   | "delegate_compact"
   | "delegate"
   | "agent_spawn"
+  | "agent_model_options"
   | "agent_list"
   | "agent_get"
   | "agent_prompt"

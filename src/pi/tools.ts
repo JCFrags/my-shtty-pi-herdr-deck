@@ -268,6 +268,13 @@ const parentInputKeys: Readonly<Record<ParentToolName, readonly string[]>> =
       "review",
       "wait",
     ],
+    agent_model_options: [
+      "profileId",
+      "placement",
+      "modelProfileId",
+      "projectKey",
+      "limit",
+    ],
     agent_list: [
       "ids",
       "managed",
@@ -390,6 +397,7 @@ const parentRequired: Readonly<
     "dryRun",
   ],
   agent_spawn: ["task", "profileId", "project", "isolation", "budget", "wait"],
+  agent_model_options: ["profileId"],
   agent_get: ["agentId"],
   agent_prompt: ["agentId", "message", "delivery", "timeoutMs"],
   agent_steer: ["agentId", "message", "delivery"],
@@ -937,6 +945,8 @@ function schemaForKey(key: string): unknown {
     return { type: "string", enum: ["normal", "steer", "follow_up"] };
   if (key === "profileId")
     return { type: "string", enum: [...SHIPPED_TASK_PROFILES] };
+  if (key === "projectKey")
+    return { type: "string", minLength: 1, maxLength: 4096 };
   if (key === "modelProfileId")
     return { type: "string", enum: ["manager", "subagent"] };
   if (key === "model")

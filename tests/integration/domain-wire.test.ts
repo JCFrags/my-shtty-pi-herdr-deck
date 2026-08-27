@@ -10,6 +10,7 @@ import type { EventStore } from "../../src/state/event-store.js";
 import { sessionKey, type ResolvedPaths } from "../../src/shared/paths.js";
 import { createId } from "../../src/shared/ids.js";
 import { encodeFrame, NdjsonDecoder } from "../../src/shared/protocol/codec.js";
+import { validateAdvisoryModelReceipt } from "../../src/model-intelligence/model-ranking.js";
 
 type Frame = {
   type?: string;
@@ -659,7 +660,13 @@ test("broker domain wire persists correlated result, question, workflow, and rep
         },
       }),
     );
-    void workflow;
+    const workflowTaskId = workflow.tasks[0].taskId as string;
+    assert.equal(
+      validateAdvisoryModelReceipt(
+        broker.store.state.tasks[workflowTaskId]?.project?.advisoryModelReceipt,
+      ).mode,
+      "advisory",
+    );
     const manualTask = resultOf(
       await request(socket, "task.create_m3", {
         title: "manual question task",

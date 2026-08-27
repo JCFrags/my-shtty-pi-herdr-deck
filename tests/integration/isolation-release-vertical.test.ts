@@ -17,6 +17,7 @@ import { HerdrProvisioner } from "../../src/herdr/provisioner.js";
 import { HerdrService } from "../../src/herdr/service.js";
 import { normalizeSnapshot } from "../../src/herdr/normalizers.js";
 import type { SchedulerLimits } from "../../src/scheduler/types.js";
+import { validateAdvisoryModelReceipt } from "../../src/model-intelligence/model-ranking.js";
 
 const actor = {
   principalId: "prn_00000000000000000000000000",
@@ -649,6 +650,13 @@ test("production agent.spawn preserves explicit worktree through exact receipts"
   });
   const owned: Array<ReturnType<typeof boundedReceipt>> = [taskReceipt];
   try {
+    const modelOptions = (await h.client.request("model.options", {
+      profileId: "implementer",
+      limit: 5,
+    })) as Record<string, unknown>;
+    assert.equal(modelOptions.mode, "advisory");
+    assert.ok(Array.isArray(modelOptions.candidates));
+    assert.ok(modelOptions.candidates.length >= 1);
     const responsePromise = h.client.request("agent.spawn", {
       task: {
         title: "owned-spawn-worktree",
@@ -694,6 +702,15 @@ test("production agent.spawn preserves explicit worktree through exact receipts"
     );
     const task = h.broker.store.state.tasks[taskId];
     assert.equal(task?.project?.isolation, "worktree");
+    const advisory = validateAdvisoryModelReceipt(
+      task?.project?.advisoryModelReceipt,
+    );
+    assert.deepEqual(
+      advisory.selectedModel,
+      task?.project?.effectiveSpawnPolicy &&
+        (task.project.effectiveSpawnPolicy as Record<string, unknown>).model,
+    );
+    assert.equal(advisory.mode, "advisory");
     assert.equal(
       task?.currentRunId
         ? h.broker.store.state.runs[task.currentRunId]?.agentId
@@ -773,6 +790,13 @@ test("compact broker preview is mutation-free and acceptance uses the existing d
         ?.compact as Record<string, unknown> | undefined;
       assert.equal(compact?.workflowDigest, preview.workflowDigest);
       assert.equal(compact?.transcriptPolicy, "retain-tab");
+      assert.equal(
+        validateAdvisoryModelReceipt(
+          h.broker.store.state.tasks[task.taskId]?.project
+            ?.advisoryModelReceipt,
+        ).mode,
+        "advisory",
+      );
     }
   } finally {
     await h.cleanup();
@@ -1538,6 +1562,14 @@ test("delegate.execute provisions both defaults through exact owned receipts", a
       ),
       ["worktree", "shared-readonly"],
     );
+    for (const task of response.tasks)
+      assert.equal(
+        validateAdvisoryModelReceipt(
+          h.broker.store.state.tasks[task.taskId]?.project
+            ?.advisoryModelReceipt,
+        ).mode,
+        "advisory",
+      );
   } finally {
     for (const receipt of receipts) receipt.remove();
     await h.cleanup();
