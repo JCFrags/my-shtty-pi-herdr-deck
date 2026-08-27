@@ -703,9 +703,12 @@ export function validateAdvisoryModelReceipt(
     !exactKeys(receipt, keys) ||
     receipt.schemaVersion !== 1 ||
     receipt.scorerVersion !== 1 ||
-    !["current_default", "advisory", "rated_auto"].includes(
-      String(receipt.mode),
-    ) ||
+    ![
+      "current_default",
+      "advisory",
+      "rated_auto",
+      "explicit_required",
+    ].includes(String(receipt.mode)) ||
     typeof receipt.taskProfile !== "string" ||
     !/^[a-z][a-z0-9_-]{0,63}$/u.test(receipt.taskProfile) ||
     typeof receipt.asOf !== "string" ||

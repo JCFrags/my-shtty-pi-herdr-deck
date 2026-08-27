@@ -63,7 +63,8 @@ test("broker round-trips an empty endpoint settings batch", async () => {
         endpoints: Record<string, { maxConcurrentAgents: number }>;
         modelIntelligence: {
           schemaVersion: 1;
-          routingMode: "current_default" | "advisory" | "rated_auto";
+          routingMode:
+            "current_default" | "advisory" | "rated_auto" | "explicit_required";
           mappings: [];
         };
       };
