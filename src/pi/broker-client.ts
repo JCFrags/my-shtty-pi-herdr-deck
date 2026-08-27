@@ -3,6 +3,8 @@ import { createId } from "../shared/ids.js";
 import { encodeFrame, NdjsonDecoder } from "../shared/protocol/codec.js";
 import type { PiSafeState } from "./types.js";
 
+const MAX_RECENT_RESPONSE_IDS = 4096;
+
 export interface PiBrokerPrincipal {
   id: string;
   kind: "human" | "pi_parent" | "pi_child";
@@ -455,9 +457,14 @@ export class PiBrokerClient {
           this.failClosed();
           continue;
         }
-        if (waiter.method !== frame.method || this.#responseIds.size >= 4096) {
+        if (waiter.method !== frame.method) {
           this.failClosed(new Error("BROKER_PROTOCOL_INVALID"));
           return;
+        }
+        if (this.#responseIds.size >= MAX_RECENT_RESPONSE_IDS) {
+          const oldestResponseId = this.#responseIds.values().next().value;
+          if (oldestResponseId !== undefined)
+            this.#responseIds.delete(oldestResponseId);
         }
         this.#responseIds.add(frame.id);
         this.#pending.delete(frame.id);

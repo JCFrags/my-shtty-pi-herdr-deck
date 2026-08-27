@@ -177,6 +177,41 @@ test("PiBrokerClient accepts real hello_result and binds adopted registration id
   await fake.close();
 });
 
+test("PiBrokerClient keeps a bounded response replay window during parallel rollover", async () => {
+  const fake = await server((frame, socket) => {
+    if (frame.type === "hello") {
+      socket.write(encodeFrame(hello(frame)));
+      return;
+    }
+    socket.write(
+      encodeFrame({
+        v: 1,
+        type: "response",
+        id: frame.id,
+        method: frame.method,
+        ok: true,
+        result: {},
+      }),
+    );
+  });
+  const client = new PiBrokerClient({
+    socketPath: fake.path,
+    sessionKey: "session",
+    piSessionId: "pi-session",
+    secret: "secret",
+  });
+  await client.connect();
+  for (let index = 0; index < 4095; index++)
+    await client.request("state.get", {});
+  await Promise.all([
+    client.request("state.get", {}),
+    client.request("state.get", {}),
+  ]);
+  assert.equal(client.connected, true);
+  client.close();
+  await fake.close();
+});
+
 test("PiBrokerClient delivers bounded subscribed events without closing the connection", async () => {
   let resolveEvent!: (value: {
     event: string;
