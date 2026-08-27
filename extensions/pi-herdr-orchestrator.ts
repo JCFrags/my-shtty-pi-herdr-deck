@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { PiAdapter, piSessionId } from "../src/pi/adapter.js";
 import {
   PiBrokerClient,
+  type PiBrokerEvent,
   type PiHerdrSessionReference,
 } from "../src/pi/broker-client.js";
 import { isAbsolute, resolve } from "node:path";
@@ -31,6 +32,7 @@ import { resolveHerdrPaths } from "../src/shared/paths.js";
 import { ProviderProjectionCollector } from "../src/pi/provider-projection-collector.js";
 import { ProviderEventAdapters } from "../src/pi/provider-event-adapters.js";
 import { openAgentSettings } from "../src/pi/agent-settings.js";
+import { TerminalResultDelivery } from "../src/pi/terminal-result-delivery.js";
 const MANAGED_TOOL_NAMES = [
   "orchestrator_result",
   "orchestrator_ask",
@@ -386,48 +388,7 @@ export default async function piHerdrOrchestrator(
   let parentToolsRegistered = false;
   let adapter: PiAdapter | undefined;
   let client: PiBrokerClient | undefined;
-  const notifiedTerminalTasks = new Set<string>();
-  const handleBrokerEvent = (
-    event: import("../src/pi/broker-client.js").PiBrokerEvent,
-  ): void => {
-    if (
-      event.event !== "task.state_changed" ||
-      typeof event.refs.taskId !== "string" ||
-      !["succeeded", "failed", "cancelled", "timed_out", "blocked"].includes(
-        String(event.data.to ?? ""),
-      ) ||
-      notifiedTerminalTasks.has(event.refs.taskId)
-    )
-      return;
-    const activeClient = client;
-    const activeAdapter = adapter;
-    if (!activeClient?.connected || !activeAdapter) return;
-    const taskId = event.refs.taskId;
-    void activeClient
-      .request("task.get", { taskId }, { timeoutMs: 10_000 })
-      .then((value) => {
-        if (!value || typeof value !== "object" || Array.isArray(value)) return;
-        const task = value as Record<string, unknown>;
-        if (task.parentAgentId !== activeAdapter.safeState().agentId) return;
-        notifiedTerminalTasks.add(taskId);
-        if (notifiedTerminalTasks.size > 1_024)
-          notifiedTerminalTasks.delete(
-            notifiedTerminalTasks.values().next().value as string,
-          );
-        const state = String(task.state ?? event.data.to ?? "terminal");
-        const title = typeof task.title === "string" ? task.title : taskId;
-        pi.sendMessage?.(
-          {
-            customType: "pi-herdr-task-terminal",
-            content: `Managed task ${taskId} (${title}) reached ${state}. Collect its result now and continue the remaining work without waiting for a user prompt.`,
-            display: true,
-            details: { taskId, state },
-          },
-          { deliverAs: "followUp", triggerTurn: true },
-        );
-      })
-      .catch(() => undefined);
-  };
+  const terminalResultDelivery = new TerminalResultDelivery(pi);
   const providerCollector = new ProviderProjectionCollector(
     pi.events,
     async (projection) => {
@@ -514,6 +475,7 @@ export default async function piHerdrOrchestrator(
       reconnectDelay = 1_000;
     }
     const epoch = ++startEpoch;
+    terminalResultDelivery.beginEpoch(epoch);
     if (adapter) binding.correlationState = adapter.correlationState();
     stateReporter?.dispose();
     stateReporter = undefined;
@@ -845,7 +807,21 @@ export default async function piHerdrOrchestrator(
       scheduleAttachRetry();
       return;
     }
-    const candidateClient =
+    let candidateClient: PiBrokerClient;
+    const handleCandidateEvent = (event: PiBrokerEvent): void => {
+      terminalResultDelivery.handle(event, {
+        epoch,
+        parentAgentId: () => candidateAdapter.safeState().agentId,
+        request: (method, params, options) =>
+          candidateClient.request(method, params, options),
+        isCurrent: () => epoch === startEpoch && candidateClient.connected,
+        retry: () => {
+          candidateClient.close();
+          scheduleAttachRetry();
+        },
+      });
+    };
+    candidateClient =
       managed && token
         ? new PiBrokerClient({
             socketPath,
@@ -856,7 +832,7 @@ export default async function piHerdrOrchestrator(
             token,
             onServerRequest: handleServerRequest,
             onControlRequest: handleControlRequest,
-            onEvent: handleBrokerEvent,
+            onEvent: handleCandidateEvent,
           })
         : new PiBrokerClient({
             socketPath,
@@ -865,18 +841,18 @@ export default async function piHerdrOrchestrator(
             secret: secret!,
             onServerRequest: handleServerRequest,
             onControlRequest: handleControlRequest,
-            onEvent: handleBrokerEvent,
+            onEvent: handleCandidateEvent,
           });
     pendingClients.add(candidateClient);
     try {
       const connected = (await candidateClient.connect()) as {
         broker?: { lastEventSeq?: unknown };
       };
-      const subscriptionCursor = Number.isSafeInteger(
-        connected.broker?.lastEventSeq,
-      )
-        ? (connected.broker?.lastEventSeq as number)
-        : 0;
+      const subscriptionCursor = terminalResultDelivery.subscriptionCursor(
+        Number.isSafeInteger(connected.broker?.lastEventSeq)
+          ? (connected.broker?.lastEventSeq as number)
+          : 0,
+      );
       if (epoch !== startEpoch) {
         pendingClients.delete(candidateClient);
         candidateClient.close();
@@ -1089,7 +1065,9 @@ export default async function piHerdrOrchestrator(
   });
   api.on("session_start", (_event, next) => {
     if (managed) reconcileActiveTools(pi, MANAGED_TOOL_NAMES);
-    void start(next as PiContextLike);
+    const context = next as PiContextLike;
+    terminalResultDelivery.restore(context.sessionManager.getEntries?.() ?? []);
+    void start(context);
   });
   api.on("session_shutdown", (event) =>
     runtime.cleanup(
