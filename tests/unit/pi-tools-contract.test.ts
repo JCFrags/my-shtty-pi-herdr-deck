@@ -208,6 +208,12 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
     "scout",
     "test-runner",
   ]);
+  const agentListProperties = (
+    tools.find((item) => item.name === "agent_list")?.parameters as {
+      properties?: Record<string, unknown>;
+    }
+  ).properties;
+  assert.equal(Object.hasOwn(agentListProperties ?? {}, "include"), false);
 });
 
 test("delegate wait polls task state through automatic execution", async () => {

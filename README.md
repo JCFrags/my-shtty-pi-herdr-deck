@@ -64,6 +64,10 @@ The broker sends narrower task rules through its identity-tracked temporary syst
 
 A task agent uses `current-workspace` placement by default. A caller can request `new-workspace` placement. Herdr creates the visible workspace before Pi starts. A worktree task uses the new workspace that Herdr creates for the worktree. Legacy `manager` and `subagent` model profiles remain only for rollback compatibility.
 
+The read-only `agent_list` parent tool authorizes descendant scope before it applies filters. It supports exact agent IDs, managed state, agent lifecycle state, profile, assigned task, workspace, and live managed-client connection filters. Results use stable agent-ID order, a numeric cursor, a limit, and an output byte bound. `connected` means that the broker has one authenticated live child connection for the current agent generation and Pi session. The tool does not advertise expanded `include` sections. A direct broker request with a nonempty `include` receives a clear `INVALID_REQUEST` response.
+
+`agent_result` reads an accepted structured result. It does not mark that result as collected and cannot make a temporary agent eligible for close. `task_collect` returns bounded result summaries and appends `task.collected` only for each complete, untruncated result that it returns. Collection can change the broker-owned close recommendation after the task is terminal. Use `agent_result` for inspection and `task_collect` for collection.
+
 Example configuration:
 
 ```json

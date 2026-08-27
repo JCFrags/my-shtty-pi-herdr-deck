@@ -283,7 +283,6 @@ const parentInputKeys: Readonly<Record<ParentToolName, readonly string[]>> =
       "taskId",
       "workspaceId",
       "connected",
-      "include",
       "maxBytes",
       "cursor",
       "limit",

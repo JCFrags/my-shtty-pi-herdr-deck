@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { projectAgentLifecycle } from "../../src/broker/agent-lifecycle.js";
+import {
+  agentWithLifecycle,
+  projectAgentLifecycle,
+} from "../../src/broker/agent-lifecycle.js";
 import type { Agent, OrchestrationState, Task } from "../../src/state/types.js";
 import { emptyState, reduce } from "../../src/state/reducer.js";
 
@@ -116,4 +119,25 @@ test("active, blocked, uncollected, reusable, retained, and pinned agents never 
         .closeRecommendation,
       "close",
     );
+});
+
+test("working agents do not retain a stale provisioning progress view", () => {
+  const candidate = agent({ state: "working", currentRunId: "run_1" });
+  const candidateTask = task({
+    state: "provisioning",
+    currentRunId: "run_1",
+  });
+  delete candidateTask.resultId;
+  delete candidateTask.resultCollectedAt;
+  const current = state(candidate, candidateTask);
+  current.runs.run_1 = {
+    id: "run_1",
+    taskId: candidateTask.id,
+    agentId: candidate.id,
+    state: "working",
+    assignmentGeneration: 1,
+    settled: false,
+    startedAt: candidateTask.createdAt,
+  };
+  assert.equal(agentWithLifecycle(candidate, current).progress, undefined);
 });

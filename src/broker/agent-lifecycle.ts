@@ -189,7 +189,10 @@ export function agentWithLifecycle(
   now = Date.now(),
 ): AgentLifecycleView {
   const task = taskForAgent(agent, state);
-  const progress = task ? projectTaskProgress(task, state, now) : undefined;
+  const progress =
+    task && ["provisioning", "starting"].includes(agent.state)
+      ? projectTaskProgress(task, state, now)
+      : undefined;
   return {
     ...agent,
     ...projectAgentLifecycle(agent, state),
