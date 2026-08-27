@@ -853,6 +853,107 @@ test("rated automatic spawn selects only an evidenced unique leader and keeps ex
   }
 });
 
+test("explicit-required spawn rejects before mutation and retries with only model", async () => {
+  const luna = {
+    provider: "openai-codex",
+    modelId: "gpt-5.6-luna",
+    thinkingLevel: "medium" as const,
+  };
+  const sol = {
+    provider: "openai-codex",
+    modelId: "gpt-5.6-sol",
+    thinkingLevel: "medium" as const,
+  };
+  const h = await productionParent({
+    holdProvisions: true,
+    modelPolicy: {
+      defaults: { global: luna },
+      allowlist: [luna, sol],
+    },
+    modelIntelligence: {
+      schemaVersion: 1,
+      routingMode: "explicit_required",
+      mappings: [],
+    },
+  });
+  try {
+    const request = {
+      task: {
+        title: "explicit-required",
+        objective: "prove pre-mutation rejection",
+        constraints: ["preserve these validated arguments"],
+      },
+      profileId: "implementer",
+      isolation: { mode: "worktree" },
+      wait: false,
+      dryRun: false,
+    };
+    const before = {
+      seq: h.broker.store.state.lastEventSeq,
+      tasks: Object.keys(h.broker.store.state.tasks),
+      runs: Object.keys(h.broker.store.state.runs),
+      agents: Object.keys(h.broker.store.state.agents),
+      resources: Object.keys(h.broker.store.state.herdrResources ?? {}),
+      provisions: h.provisions.length,
+    };
+    await assert.rejects(
+      h.client.request("agent.spawn", request),
+      (error: unknown) => {
+        const failure = error as {
+          code?: string;
+          message?: string;
+          retryable?: boolean;
+          details?: Record<string, unknown>;
+          remediation?: string;
+        };
+        assert.equal(failure.code, "MODEL_SELECTION_REQUIRED");
+        assert.equal(failure.retryable, true);
+        assert.match(failure.message ?? "", /agent_model_options/u);
+        assert.match(failure.message ?? "", /add only model/u);
+        assert.deepEqual(failure.details, {
+          missingField: "model",
+          retryTool: "agent_spawn",
+          modelOptionsTool: "agent_model_options",
+          validatedArgumentsRetained: true,
+        });
+        assert.match(failure.remediation ?? "", /add only the model field/u);
+        return true;
+      },
+    );
+    assert.deepEqual(
+      {
+        seq: h.broker.store.state.lastEventSeq,
+        tasks: Object.keys(h.broker.store.state.tasks),
+        runs: Object.keys(h.broker.store.state.runs),
+        agents: Object.keys(h.broker.store.state.agents),
+        resources: Object.keys(h.broker.store.state.herdrResources ?? {}),
+        provisions: h.provisions.length,
+      },
+      before,
+    );
+
+    const accepted = h.client.request("agent.spawn", {
+      ...request,
+      model: sol,
+    }) as Promise<{ tasks: Array<{ taskId: string }> }>;
+    const entered = await h.nextProvision();
+    const provisionedModel = entered.input.model;
+    entered.release();
+    const response = await accepted;
+    assert.deepEqual(provisionedModel, sol);
+    assert.equal(response.tasks.length, 1);
+    assert.equal(h.provisions.length, before.provisions + 1);
+    const receipt = validateAdvisoryModelReceipt(
+      h.broker.store.state.tasks[response.tasks[0]!.taskId]?.project
+        ?.advisoryModelReceipt,
+    );
+    assert.equal(receipt.mode, "explicit_required");
+    assert.equal(receipt.selectionReason, "explicit_override");
+  } finally {
+    await h.cleanup();
+  }
+});
+
 test("compact rollback switch rejects new work without task or resource creation", async () => {
   const h = await productionParent({ compactEnabled: false });
   try {

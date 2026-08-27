@@ -137,6 +137,16 @@ test("routing and scoring config default safely and validate exact PPM totals", 
       version: 1,
       modelIntelligence: {
         schemaVersion: 1,
+        routingMode: "explicit_required",
+        mappings: [],
+      },
+    }),
+  );
+  assert.doesNotThrow(() =>
+    validateConfig({
+      version: 1,
+      modelIntelligence: {
+        schemaVersion: 1,
         routingMode: "rated_auto",
         mappings: [],
         profiles: {

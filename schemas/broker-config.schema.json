@@ -241,7 +241,12 @@
       "properties": {
         "schemaVersion": { "const": 1 },
         "routingMode": {
-          "enum": ["current_default", "advisory", "rated_auto"],
+          "enum": [
+            "current_default",
+            "advisory",
+            "rated_auto",
+            "explicit_required"
+          ],
           "default": "current_default"
         },
         "mappings": {

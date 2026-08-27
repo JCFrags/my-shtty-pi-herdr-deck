@@ -5883,6 +5883,27 @@ export class Broker {
             "INVALID_REQUEST",
             "Delegation steps are invalid.",
           );
+        if (
+          request.method === "agent.spawn" &&
+          !dryRun &&
+          p.model === undefined &&
+          this.#modelIntelligence?.routingMode === "explicit_required"
+        )
+          throw new OrchestratorError(
+            "MODEL_SELECTION_REQUIRED",
+            "The model field is required in explicit_required mode. Call agent_model_options, then retry agent_spawn with the same visible arguments and add only model.",
+            {
+              retryable: true,
+              details: {
+                missingField: "model",
+                retryTool: "agent_spawn",
+                modelOptionsTool: "agent_model_options",
+                validatedArgumentsRetained: true,
+              },
+              remediation:
+                "Call agent_model_options, then retry agent_spawn with the same visible arguments and add only the model field.",
+            },
+          );
         const workflowId = createId("wfl");
         let planned = steps.map((raw) => {
           const record = raw as Record<string, unknown>;
@@ -7062,6 +7083,12 @@ export class Broker {
           code: typed.code,
           message: typed.message,
           retryable: typed.retryable,
+          ...(typed.details && safeBoundedRecord(typed.details)
+            ? { details: typed.details }
+            : {}),
+          ...(typed.remediation && safeText(typed.remediation, 512)
+            ? { remediation: typed.remediation }
+            : {}),
         },
       });
     }

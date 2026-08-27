@@ -13,7 +13,8 @@ export const MAX_MODEL_RANKING_PROFILES = 32;
 export const PPM_TOTAL = 1_000_000;
 
 export type ArtificialAnalysisMetric = "coding" | "intelligence" | "agentic";
-export type ModelRoutingMode = "current_default" | "advisory" | "rated_auto";
+export type ModelRoutingMode =
+  "current_default" | "advisory" | "rated_auto" | "explicit_required";
 
 export interface ModelRankingWeightsPpm {
   readonly taskCapability: number;
@@ -157,9 +158,12 @@ export function validateEndpointPolicyConfig(
       ) ||
       input.schemaVersion !== 1 ||
       (input.routingMode !== undefined &&
-        !["current_default", "advisory", "rated_auto"].includes(
-          String(input.routingMode),
-        )) ||
+        ![
+          "current_default",
+          "advisory",
+          "rated_auto",
+          "explicit_required",
+        ].includes(String(input.routingMode))) ||
       !Array.isArray(input.mappings) ||
       input.mappings.length > MAX_ENDPOINT_MAPPINGS
     )

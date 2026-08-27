@@ -276,6 +276,7 @@ function createLevelSubmenu(
   model: CatalogModel,
   selected: Map<string, Set<ThinkingLevel>>,
   requiredKeys: ReadonlySet<string>,
+  routingMode: ModelRoutingMode,
   ui: AgentSettingsUi,
   listTheme: SettingsListTheme,
   done: (selectedValue?: string) => void,
@@ -298,7 +299,12 @@ function createLevelSubmenu(
         currentValue: draft.has(level) ? "allowed" : "not allowed",
         ...(required ? {} : { values: ["allowed", "not allowed"] }),
         ...(required
-          ? { description: "This level is required by an effective default." }
+          ? {
+              description:
+                routingMode === "explicit_required"
+                  ? "An effective default requires this level for non-direct creation. Direct agent_spawn calls must still select a model."
+                  : "This level is required by an effective default.",
+            }
           : {}),
       };
     }),
@@ -654,9 +660,14 @@ async function editPolicy(
           id: ROUTING_ID,
           label: "Model routing",
           currentValue: routingMode,
-          values: ["current_default", "advisory", "rated_auto"],
+          values: [
+            "current_default",
+            "advisory",
+            "rated_auto",
+            "explicit_required",
+          ],
           description:
-            "rated_auto applies only to direct agent creation when no model is explicit.",
+            "explicit_required rejects a direct agent_spawn without a model. rated_auto selects only with sufficient evidence.",
         },
         {
           id: MODE_ID,
@@ -730,6 +741,7 @@ async function editPolicy(
               model,
               selected,
               requiredKeys,
+              routingMode,
               ui,
               listTheme,
               close,

@@ -163,6 +163,28 @@ test("agent settings saves exact per-model thinking selections as one batch", as
   ]);
 });
 
+test("agent settings saves explicit-required routing", async () => {
+  const requests: Array<{ method: string; params: unknown }> = [];
+  const notifications: string[] = [];
+  const context = contextFor((component) => {
+    component.handleInput?.(" ");
+    component.handleInput?.(" ");
+    component.handleInput?.(" ");
+    for (let index = 0; index < 8; index++) component.handleInput?.("\x1b[B");
+    component.handleInput?.("\r");
+  }, notifications);
+
+  await openAgentSettings(clientFor(requests), context);
+
+  const batch = requests[2]?.params as {
+    modelIntelligence?: { routingMode?: string };
+  };
+  assert.equal(batch.modelIntelligence?.routingMode, "explicit_required");
+  assert.deepEqual(notifications, [
+    "Agent settings were saved for new agents.",
+  ]);
+});
+
 test("agent settings escape cancels without changing broker policy", async () => {
   const requests: Array<{ method: string; params: unknown }> = [];
   const notifications: string[] = [];
