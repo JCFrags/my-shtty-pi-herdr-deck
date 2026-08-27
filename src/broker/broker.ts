@@ -114,6 +114,8 @@ import {
 import {
   agentWithLifecycle,
   projectAgentLifecycle,
+  projectTaskProgress,
+  taskWithProgress,
 } from "./agent-lifecycle.js";
 import { InstalledPiCapabilities } from "../pi/model-capabilities.js";
 import {
@@ -2366,6 +2368,7 @@ export class Broker {
         client.subscribed = false;
         client.subscriptionId = subscriptionId();
         client.eventFilter = filter;
+        const progressNow = this.#now();
         result = {
           subscriptionId: client.subscriptionId,
           ...(includeSnapshot
@@ -2376,10 +2379,16 @@ export class Broker {
                     .filter((item) =>
                       this.#canAccessAgentSync(principal, item.id),
                     )
-                    .map((item) => agentWithLifecycle(item, this.store.state)),
-                  tasks: Object.values(this.store.state.tasks).filter((item) =>
-                    this.#canAccessTaskSync(principal, item.id),
-                  ),
+                    .map((item) =>
+                      agentWithLifecycle(item, this.store.state, progressNow),
+                    ),
+                  tasks: Object.values(this.store.state.tasks)
+                    .filter((item) =>
+                      this.#canAccessTaskSync(principal, item.id),
+                    )
+                    .map((item) =>
+                      taskWithProgress(item, this.store.state, progressNow),
+                    ),
                   runs: Object.values(this.store.state.runs).filter(
                     (item) =>
                       this.#canAccessTaskSync(principal, item.taskId) &&
@@ -3929,12 +3938,13 @@ export class Broker {
         };
       } else if (request.method === "agent.list") {
         requirePermission(principal, "read:state");
+        const progressNow = this.#now();
         const items = (
           await Promise.all(
             Object.values(this.store.state.agents).map(async (agent) =>
               (await this.#canAccessAgent(principal, agent.id))
                 ? {
-                    ...agentWithLifecycle(agent, this.store.state),
+                    ...agentWithLifecycle(agent, this.store.state, progressNow),
                     tokenDigest: undefined,
                   }
                 : undefined,
@@ -3965,7 +3975,7 @@ export class Broker {
             "Agent is outside the descendant scope.",
           );
         result = {
-          ...agentWithLifecycle(agent, this.store.state),
+          ...agentWithLifecycle(agent, this.store.state, this.#now()),
           tokenDigest: undefined,
         };
       } else if (
@@ -6177,6 +6187,9 @@ export class Broker {
             const run = task?.currentRunId
               ? this.store.state.runs[task.currentRunId]
               : undefined;
+            const progress = task
+              ? projectTaskProgress(task, this.store.state, this.#now())
+              : undefined;
             return {
               key: step.key,
               taskId: taskIds[index],
@@ -6192,6 +6205,7 @@ export class Broker {
               ...(task?.admissionReason
                 ? { admissionReason: task.admissionReason }
                 : {}),
+              ...(progress ? { progress } : {}),
             };
           });
           result = {
@@ -6754,7 +6768,10 @@ export class Broker {
         const offset = p.cursor === undefined ? 0 : Number(p.cursor);
         const limit =
           p.limit === undefined ? accessible.length : Number(p.limit);
-        const items = accessible.slice(offset, offset + limit);
+        const progressNow = this.#now();
+        const items = accessible
+          .slice(offset, offset + limit)
+          .map((task) => taskWithProgress(task, this.store.state, progressNow));
         result = {
           items,
           nextCursor:
@@ -6785,7 +6802,9 @@ export class Broker {
             "PERMISSION_DENIED",
             "Task is outside the descendant scope.",
           );
-        result = task ?? null;
+        result = task
+          ? taskWithProgress(task, this.store.state, this.#now())
+          : null;
       } else if (request.method === "task.create") {
         requirePermission(principal, "delegate");
         if (

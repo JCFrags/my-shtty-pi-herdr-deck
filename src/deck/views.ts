@@ -60,6 +60,44 @@ const text = (...values: unknown[]): string | undefined =>
     (value): value is string => typeof value === "string" && value.length > 0,
   );
 
+function duration(milliseconds: unknown): string | undefined {
+  if (
+    typeof milliseconds !== "number" ||
+    !Number.isFinite(milliseconds) ||
+    milliseconds < 0
+  )
+    return undefined;
+  const seconds = Math.floor(milliseconds / 1_000);
+  return seconds < 60
+    ? `${seconds}s`
+    : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
+function progressText(value: unknown): string {
+  const progress = record(record(value).progress);
+  const phase = text(progress.phase);
+  const elapsed = duration(progress.elapsedMs);
+  if (!phase || !elapsed) return "unavailable";
+  const remaining = duration(progress.remainingMs);
+  const overdue = duration(progress.overdueMs);
+  const deadline = text(progress.deadlineAt);
+  const deadlineKind = text(progress.deadlineKind);
+  return [
+    phase,
+    `elapsed ${elapsed}`,
+    ...(deadline
+      ? [
+          `${deadlineKind ?? "operation"} deadline ${deadline}`,
+          overdue
+            ? `overdue ${overdue}`
+            : remaining
+              ? `${remaining} remaining`
+              : "deadline reached",
+        ]
+      : []),
+  ].join("; ");
+}
+
 export interface DeckModelChoice {
   provider: string;
   id: string;
@@ -536,6 +574,7 @@ export function renderAgentInspector(
       "AGENT DETAIL",
       `Identity: ${agent.id} (generation ${agent.generation})`,
       `State: ${stateIcon(agent.state)} ${agent.state}; detected: ${agent.coarseStatus ?? "unavailable"}`,
+      `Progress: ${progressText(agent)}`,
       `Profile: ${agent.profileId ?? "default"}`,
       `Lifecycle: ${agent.lifecycleClass ?? (agent.parentAgentId ? "temporary" : "retained")}; keep for reuse: ${agent.keepForReuse === true ? "yes" : "no"}`,
       `Close recommendation: ${agent.closeRecommendation ?? "keep"} — ${agent.closeReason ?? "No lifecycle reason was supplied."}`,
@@ -569,6 +608,7 @@ export function renderTaskDetail(
       "TASK DETAIL",
       `ID: ${task.id}`,
       `State: ${stateIcon(task.state)} ${task.state}`,
+      `Progress: ${progressText(task)}`,
       `Title: ${task.title}`,
       `Objective: ${task.objective}`,
       `Assignee: ${task.assignedAgentId ?? run?.agentId ?? "unassigned"}`,
