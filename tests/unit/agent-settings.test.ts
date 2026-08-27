@@ -102,7 +102,7 @@ test("agent settings saves exact per-model thinking selections as one batch", as
   const requests: Array<{ method: string; params: unknown }> = [];
   const notifications: string[] = [];
   const context = contextFor((component) => {
-    component.handleInput?.("\x1b[B");
+    for (let index = 0; index < 6; index++) component.handleInput?.("\x1b[B");
     component.handleInput?.("\r");
     component.handleInput?.(" ");
     component.handleInput?.("\x1b[B");
@@ -117,24 +117,49 @@ test("agent settings saves exact per-model thinking selections as one batch", as
 
   assert.deepEqual(
     requests.map((request) => request.method),
-    ["model.capabilities", "model.policy.get", "model.policy.allowlist.set"],
+    ["model.capabilities", "model.policy.get", "model.operator.settings.set"],
   );
-  assert.deepEqual(requests[2]?.params, {
-    allowlist: [
-      {
-        provider: luna.provider,
-        modelId: luna.modelId,
-        thinkingLevel: "low",
-      },
-      {
-        provider: luna.provider,
-        modelId: luna.modelId,
-        thinkingLevel: "medium",
-      },
-    ],
-  });
+  const batch = requests[2]?.params as Record<string, unknown>;
+  assert.deepEqual(batch.allowlist, [
+    {
+      provider: luna.provider,
+      modelId: luna.modelId,
+      thinkingLevel: "low",
+    },
+    {
+      provider: luna.provider,
+      modelId: luna.modelId,
+      thinkingLevel: "medium",
+    },
+  ]);
+  assert.deepEqual(batch.endpoints, null);
+  const intelligence = batch.modelIntelligence as {
+    routingMode: string;
+    mappings: unknown[];
+    profiles: Record<
+      string,
+      { weightsPpm: Record<string, number>; tieBandPpm: number }
+    >;
+  };
+  assert.equal(intelligence.routingMode, "current_default");
+  assert.deepEqual(intelligence.mappings, []);
+  assert.deepEqual(Object.keys(intelligence.profiles).sort(), [
+    "implementer",
+    "planner",
+    "reviewer",
+    "scout",
+    "test-runner",
+  ]);
+  assert.equal(
+    Object.values(intelligence.profiles.implementer!.weightsPpm).reduce(
+      (sum, weight) => sum + weight,
+      0,
+    ),
+    1_000_000,
+  );
+  assert.equal(intelligence.profiles.implementer!.tieBandPpm, 20_000);
   assert.deepEqual(notifications, [
-    "Agent model settings were saved for new agents.",
+    "Agent settings were saved for new agents.",
   ]);
 });
 

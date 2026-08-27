@@ -50,13 +50,15 @@ The broker resolves one exact provider, model, and thinking selection before pro
 
 The broker reads `~/.config/pi-herdr-orchestrator/config.json` by default. Set `PI_HERDR_ORCH_CONFIG_PATH` to use a different owner-controlled file. Use `modelPolicy.defaults.global`, `modelPolicy.defaults.projects`, and `modelPolicy.defaults.roles` for scoped defaults. An optional allowlist can restrict the effective selection. The broker and provisioner validate the model and its exact thinking levels against the installed Pi catalog before they create a Herdr resource. This includes `xhigh` and `max` only when the installed model reports support.
 
-Run `/agent-settings` in Pi to edit this same broker allowlist. The searchable list starts with Pi's current model scope. Open one model to choose its allowed thinking levels. The broker saves all changes as one batch. Restricted mode must retain every effective model default and supports at most 64 exact model-level pairs. Escape cancels the draft. Unrestricted mode removes the allowlist. Changes apply only to new agents.
+Run `/agent-settings` in Pi to edit the broker-owned agent settings. The main screen keeps model scope, routing mode, endpoint capacity, exact model-to-endpoint mappings, task-profile scoring, and foundation-source status in one draft. Open one scoped model to choose its allowed thinking levels. Open a task profile to edit capability, protocol reliability, speed, effective cost, human preference, uncertainty penalty, and tie band values. Profile weights must total 1,000,000 parts per million. Endpoint IDs must already exist in the owner configuration before the screen can map models to them. One Save action validates and persists the complete batch before it changes broker runtime state. Escape cancels the draft. Changes apply only to new agents.
+
+Restricted scope must retain every effective model default and supports at most 64 exact model and thinking-level pairs. Unrestricted scope removes the allowlist. Endpoint limits are hard concurrent-agent limits. Lowering a limit below current use does not stop an active agent. It blocks new admission until use falls below the new limit. A manual foundation refresh remains bounded to the configured scoped models and does not block agent creation.
 
 The Agent Board Settings overlay also shows installed choices. Press `d` in Settings to save a scoped default. Open Agents and press `n` to create an agent with a lifecycle class and either an explicit identity-bound selection or broker selection. The `agent_spawn` tool supports the same optional override. After resolution, Pi starts with explicit `--provider`, provider-qualified `--model`, and `--thinking` arguments. Managed registration must report the same selection.
 
 Lifecycle classes are `temporary`, `reusable`, `retained`, and `pinned`. Agent lists and the inspector show the class and close recommendation. A temporary agent is recommended for close only after its task is terminal and its result is collected. Reusable agents stay idle and marked for reuse. Press `o` in Settings to enable or disable safe automatic closure. Automatic closure never closes a pinned, retained, reusable, blocked, or active agent. It also never closes an agent with an uncollected result.
 
-The parent extension subscribes to broker-owned task state events. A succeeded, failed, cancelled, or timed-out child task injects a `pi-herdr-task-terminal` follow-up message and starts a parent turn when the parent is idle. A blocked task does not count as terminal. The extension stores a small event cursor and exact task, state, and result delivery key in the Pi session. After a broker reconnect or Pi reload, it replays only the missed event suffix and does not suppress a later terminal result. Structured broker state remains completion truth. The extension does not infer completion from final prose.
+The parent extension subscribes to broker-owned state events. Normal child settlement arrives through terminal `run.state_changed`. Direct task terminal paths can arrive through `task.state_changed`. A succeeded, failed, cancelled, or timed-out child task injects a `pi-herdr-task-terminal` follow-up message and starts a parent turn when the parent is idle. A blocked task does not count as terminal. The extension stores a small event cursor and exact task, state, and result delivery key in the Pi session. After a broker reconnect or Pi reload, it replays only the missed event suffix and does not suppress a later terminal result. Structured broker state remains completion truth. The extension does not infer completion from final prose.
 
 The broker sends narrower task rules through its identity-tracked temporary system-prompt file. It does not create or copy `AGENTS.md`. A project-owned `AGENTS.md` remains under user control and is inherited from the selected cwd. If a task requires a custom task-local `AGENTS.md`, place it only in that task's broker-created isolated worktree. Its lifecycle is the worktree lifecycle. An authorized close removes the exact clean owned worktree. A dirty, replaced, missing, or ambiguous worktree is retained with a cleanup reason instead of being removed. Do not create permanent per-worker instruction directories outside broker-owned workspaces.
 
@@ -160,13 +162,41 @@ A refresh runs outside agent admission and the broker mutation queue. Missing cr
 
 The read-only `agent_model_options` parent tool ranks only exact provider, model, and thinking pairs that Pi reports as installed and that the current task profile, placement, and broker allowlist permit. It calls broker method `model.options`. The request requires `profileId`. It can also include `placement`, `modelProfileId`, `projectKey`, and a result `limit` from 1 to 16. The broker rejects an eligible scope above 256 exact pairs.
 
-Version 1 uses fixed integer weights: 45% task capability, 25% protocol reliability, 10% endpoint speed, 5% effective cost, and 15% human preference. Missing confidence can subtract up to 10 score points. A two-point tie band uses provider, model ID, thinking level, and endpoint ID as the stable tie order. The response includes component scores, confidence, source dates, exclusions, and digests.
+Version 1 defaults to integer weights of 45% task capability, 25% protocol reliability, 10% endpoint speed, 5% effective cost, and 15% human preference. Each task profile can override these parts-per-million weights, the uncertainty penalty, and the tie band. Missing confidence can subtract up to the configured penalty. The default two-point tie band uses provider, model ID, thinking level, and endpoint ID as the stable tie order. The response includes component scores, confidence, source dates, exclusions, and digests.
 
 Endpoint capacity is separate from quality. Each option reports endpoint limit, active count, queued count, and current availability. Capacity cannot change a quality score, rank group, or ranking digest.
 
-Every created agent task stores one bounded `advisoryModelReceipt` inside its existing durable project payload. This applies to `agent_spawn`, `delegate`, accepted compact delegation, and workflow creation. The receipt freezes the model that the broker selected, the top advisory option, alternatives, capacity, evidence and policy digests, and whether the caller used an explicit override. A selected model that is outside the installed advisory scope stays selected and is marked ineligible with a null advisory rank. This preserves existing spawn behavior.
+Every created agent task stores one bounded `advisoryModelReceipt` inside its existing durable project payload. This applies to `agent_spawn`, `delegate`, accepted compact delegation, and workflow creation. The receipt freezes the model that the broker selected, the top option, alternatives, capacity, evidence and policy digests, routing mode, and selection reason. A selected model that is outside the installed ranking scope stays selected and is marked ineligible with a null rank.
 
-These options and receipts are shadow data only. `resolveSpawnPolicy` remains the only model-selection authority. The broker does not automatically replace the selected model with the recommended model in this release.
+`modelIntelligence.routingMode` controls application. A missing value and `current_default` preserve the configured default. `advisory` reports rankings without applying them. `rated_auto` can replace the model only for a direct `agent_spawn` request that omitted an explicit model. The first candidate must have nonzero confidence. The next candidate must also be outside the configured tie band. Otherwise, the broker keeps the configured default and records `insufficient_evidence`. Explicit model selections always have precedence after normal policy validation. Delegate, compact delegation, workflow, retry, and replay paths do not select independently.
+
+Set routing mode to `current_default` to roll back automatic selection without deleting evidence, endpoint limits, or mappings. Ranking never changes endpoint capacity. The existing scheduler remains the only admission authority.
+
+A scoring override uses exact parts-per-million totals:
+
+```json
+{
+  "version": 1,
+  "modelIntelligence": {
+    "schemaVersion": 1,
+    "routingMode": "rated_auto",
+    "mappings": [],
+    "profiles": {
+      "implementer": {
+        "weightsPpm": {
+          "taskCapability": 450000,
+          "protocolReliability": 250000,
+          "speed": 100000,
+          "effectiveCost": 50000,
+          "humanPreference": 150000
+        },
+        "uncertaintyPenaltyPpm": 100000,
+        "tieBandPpm": 20000
+      }
+    }
+  }
+}
+```
 
 ## Compact delegation rollback switch
 
@@ -212,7 +242,7 @@ PACKAGE_ROOT=$(pwd)
 pi install -l "$PACKAGE_ROOT"
 ```
 
-Open a new Pi session inside Herdr after startup verification. Pi loads `./dist/extensions/pi-herdr-orchestrator.js` from the package manifest. The extension uses the standard Herdr socket and pane context. It attaches to the session broker and registers the current Pi pane as the adopted root. A reload reuses the same adopted root after the old client disconnects and Herdr verifies the new Pi session. The broker rejects a replacement while the old client remains connected.
+Open a new Pi session inside Herdr after startup verification. Pi loads `./dist/extensions/pi-herdr-orchestrator.js` from the package manifest. The extension uses the standard Herdr socket and pane context. It attaches to the session broker and registers the current Pi pane as the adopted root. A reload reuses the same adopted root after the old client disconnects and Herdr verifies the new Pi session. The broker rejects a replacement while the old client remains connected. A normal extension reload can retain stale dependency bytes after a deployed package build. Fully exit and restart the Pi process for final acceptance of changed extension dependencies.
 
 Do not set a broker socket, client secret, session key, token, terminal ID, or Herdr binary path for normal installed use. Ordinary Pi panes do not need the binary value. The broker never searches `PATH` for Herdr.
 

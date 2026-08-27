@@ -78,7 +78,7 @@ function priorityValue(priority: SchedulerTask["priority"]): number {
 
 export class DeterministicScheduler {
   readonly limits: SchedulerLimits;
-  readonly endpointLimits: Readonly<Record<string, number>>;
+  endpointLimits: Readonly<Record<string, number>>;
   #tasks = new Map<string, SchedulerTask>();
   #provisioning = 0;
   constructor(
@@ -86,6 +86,11 @@ export class DeterministicScheduler {
     endpointLimits: Readonly<Record<string, number>> = {},
   ) {
     this.limits = clampLimits(limits);
+    this.endpointLimits = clampEndpointLimits(endpointLimits);
+  }
+  replaceEndpointLimits(
+    endpointLimits: Readonly<Record<string, number>>,
+  ): void {
     this.endpointLimits = clampEndpointLimits(endpointLimits);
   }
   enqueue(task: SchedulerTask): void {

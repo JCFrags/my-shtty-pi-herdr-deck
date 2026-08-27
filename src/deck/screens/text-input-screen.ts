@@ -23,7 +23,7 @@ export function renderTextInputScreen(
   );
   if (state.purpose === "create") {
     surface.addLine(
-      "Format: title|objective|profile|provider|model|thinking|lifecycle.",
+      "Format: title|objective|profile|auto|lifecycle, or include provider|model|thinking.",
     );
     surface.addLine("Lifecycle is temporary, reusable, retained, or pinned.");
   } else if (state.purpose === "default") {

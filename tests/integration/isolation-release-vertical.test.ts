@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { Broker } from "../../src/broker/broker.js";
-import type { EndpointPolicyConfig } from "../../src/broker/endpoint-policy.js";
+import {
+  derivedEndpointId,
+  type EndpointPolicyConfig,
+  type ModelIntelligenceConfig,
+} from "../../src/broker/endpoint-policy.js";
 import type { ModelPolicyConfig } from "../../src/broker/model-policy.js";
 import { digest } from "../../src/broker/authentication.js";
 import { PiAdapter } from "../../src/pi/adapter.js";
@@ -18,6 +22,7 @@ import { HerdrService } from "../../src/herdr/service.js";
 import { normalizeSnapshot } from "../../src/herdr/normalizers.js";
 import type { SchedulerLimits } from "../../src/scheduler/types.js";
 import { validateAdvisoryModelReceipt } from "../../src/model-intelligence/model-ranking.js";
+import { normalizeModelEvidence } from "../../src/model-intelligence/model-evidence.js";
 
 const actor = {
   principalId: "prn_00000000000000000000000000",
@@ -80,6 +85,7 @@ async function productionParent(
     restartModelPolicy?: ModelPolicyConfig;
     schedulerLimits?: Partial<SchedulerLimits>;
     endpointPolicy?: EndpointPolicyConfig;
+    modelIntelligence?: ModelIntelligenceConfig;
     realReconcileWorktree?:
       | "exact"
       | "missing"
@@ -381,6 +387,9 @@ async function productionParent(
     ...(options.endpointPolicy
       ? { endpointPolicy: options.endpointPolicy }
       : {}),
+    ...(options.modelIntelligence
+      ? { modelIntelligence: options.modelIntelligence }
+      : {}),
   });
   await broker.start();
   const secret = (await readFile(paths.secret, "utf8")).trim();
@@ -433,6 +442,9 @@ async function productionParent(
         : {}),
       ...(options.endpointPolicy
         ? { endpointPolicy: options.endpointPolicy }
+        : {}),
+      ...(options.modelIntelligence
+        ? { modelIntelligence: options.modelIntelligence }
         : {}),
     });
     await broker.start();
@@ -654,7 +666,7 @@ test("production agent.spawn preserves explicit worktree through exact receipts"
       profileId: "implementer",
       limit: 5,
     })) as Record<string, unknown>;
-    assert.equal(modelOptions.mode, "advisory");
+    assert.equal(modelOptions.mode, "current_default");
     assert.ok(Array.isArray(modelOptions.candidates));
     assert.ok(modelOptions.candidates.length >= 1);
     const responsePromise = h.client.request("agent.spawn", {
@@ -710,7 +722,7 @@ test("production agent.spawn preserves explicit worktree through exact receipts"
       task?.project?.effectiveSpawnPolicy &&
         (task.project.effectiveSpawnPolicy as Record<string, unknown>).model,
     );
-    assert.equal(advisory.mode, "advisory");
+    assert.equal(advisory.mode, "current_default");
     assert.equal(
       task?.currentRunId
         ? h.broker.store.state.runs[task.currentRunId]?.agentId
@@ -719,6 +731,124 @@ test("production agent.spawn preserves explicit worktree through exact receipts"
     );
   } finally {
     for (const receipt of owned) receipt.remove();
+    await h.cleanup();
+  }
+});
+
+test("rated automatic spawn selects only an evidenced unique leader and keeps explicit precedence", async () => {
+  const luna = {
+    provider: "openai-codex",
+    modelId: "gpt-5.6-luna",
+    thinkingLevel: "medium" as const,
+  };
+  const sol = {
+    provider: "openai-codex",
+    modelId: "gpt-5.6-sol",
+    thinkingLevel: "medium" as const,
+  };
+  const h = await productionParent({
+    holdProvisions: true,
+    modelPolicy: {
+      defaults: { global: luna },
+      allowlist: [luna, sol],
+    },
+    modelIntelligence: {
+      schemaVersion: 1,
+      routingMode: "rated_auto",
+      mappings: [],
+    },
+  });
+  try {
+    const spawn = async (model?: typeof luna) => {
+      const responsePromise = h.client.request("agent.spawn", {
+        task: { title: "rated-spawn", objective: "rated-spawn" },
+        profileId: "implementer",
+        ...(model ? { model } : {}),
+        isolation: { mode: "worktree" },
+        wait: false,
+        dryRun: false,
+      }) as Promise<{ tasks: Array<{ taskId: string }> }>;
+      const entered = await h.nextProvision();
+      entered.release();
+      return await responsePromise;
+    };
+
+    const fallback = await spawn();
+    const fallbackTask = h.broker.store.state.tasks[fallback.tasks[0]!.taskId]!;
+    const fallbackReceipt = validateAdvisoryModelReceipt(
+      fallbackTask.project?.advisoryModelReceipt,
+    );
+    assert.deepEqual(
+      (fallbackTask.project?.effectiveSpawnPolicy as { model: unknown }).model,
+      luna,
+    );
+    assert.equal(fallbackReceipt.mode, "rated_auto");
+    assert.equal(fallbackReceipt.selectionReason, "insufficient_evidence");
+
+    const record = normalizeModelEvidence({
+      schemaVersion: 1,
+      evidenceKind: "score",
+      sourceKind: "human",
+      sourceName: "operator:test",
+      sourceKey: "rated-auto-sol-quality",
+      taskProfile: "implementer",
+      subject: {
+        kind: "runtime",
+        ...sol,
+        endpointId: derivedEndpointId(sol.provider),
+      },
+      sampleCount: 4,
+      observedAt: "2026-08-26T00:00:00.000Z",
+      expiresAt: "2027-08-26T00:00:00.000Z",
+      dimension: "reviewed_output_quality",
+      valuePpm: 950_000,
+      confidencePpm: 1_000_000,
+    });
+    await h.broker.store.append({
+      type: "model.evidence_recorded",
+      actor,
+      entityRefs: {},
+      payload: { record },
+    });
+
+    const automatic = await spawn();
+    const automaticTaskId = automatic.tasks[0]!.taskId;
+    const automaticTask = h.broker.store.state.tasks[automaticTaskId]!;
+    const automaticReceipt = validateAdvisoryModelReceipt(
+      automaticTask.project?.advisoryModelReceipt,
+    );
+    assert.deepEqual(
+      (automaticTask.project?.effectiveSpawnPolicy as { model: unknown }).model,
+      sol,
+    );
+    assert.equal(
+      (automaticTask.project?.requestedSpawnPolicy as { model?: unknown })
+        .model,
+      undefined,
+    );
+    assert.equal(automaticReceipt.mode, "rated_auto");
+    assert.equal(automaticReceipt.selectionReason, "rated_auto");
+
+    await h.restart();
+    assert.deepEqual(
+      validateAdvisoryModelReceipt(
+        h.broker.store.state.tasks[automaticTaskId]?.project
+          ?.advisoryModelReceipt,
+      ),
+      automaticReceipt,
+    );
+
+    const explicit = await spawn(luna);
+    const explicitTask = h.broker.store.state.tasks[explicit.tasks[0]!.taskId]!;
+    const explicitReceipt = validateAdvisoryModelReceipt(
+      explicitTask.project?.advisoryModelReceipt,
+    );
+    assert.deepEqual(
+      (explicitTask.project?.effectiveSpawnPolicy as { model: unknown }).model,
+      luna,
+    );
+    assert.equal(explicitReceipt.selectionReason, "explicit_override");
+  } finally {
     await h.cleanup();
   }
 });
@@ -795,7 +925,7 @@ test("compact broker preview is mutation-free and acceptance uses the existing d
           h.broker.store.state.tasks[task.taskId]?.project
             ?.advisoryModelReceipt,
         ).mode,
-        "advisory",
+        "current_default",
       );
     }
   } finally {
@@ -1568,7 +1698,7 @@ test("delegate.execute provisions both defaults through exact owned receipts", a
           h.broker.store.state.tasks[task.taskId]?.project
             ?.advisoryModelReceipt,
         ).mode,
-        "advisory",
+        "current_default",
       );
   } finally {
     for (const receipt of receipts) receipt.remove();

@@ -2002,32 +2002,27 @@ export class BrokerDeckApp implements Component {
     value: string,
     parentOverride?: Agent,
   ): Promise<boolean> {
-    const [
-      title,
-      objective,
-      profileId,
-      provider,
-      modelId,
-      thinkingLevel,
-      lifecycleClass,
-      ...extra
-    ] = value.split("|").map((part) => part.trim());
+    const parts = value.split("|").map((part) => part.trim());
+    const automatic = parts.length === 5 && parts[3] === "auto";
+    const [title, objective, profileId] = parts;
+    const provider = automatic ? undefined : parts[3];
+    const modelId = automatic ? undefined : parts[4];
+    const thinkingLevel = automatic ? undefined : parts[5];
+    const lifecycleClass = automatic ? parts[4] : parts[6];
     const parent = parentOverride ?? this.selectedAgent();
     if (
-      extra.length ||
+      (!automatic && parts.length !== 7) ||
       !parent?.cwd ||
       !title ||
       !objective ||
       !profileId ||
-      !provider ||
-      !modelId ||
-      !thinkingLevel ||
+      (!automatic && (!provider || !modelId || !thinkingLevel)) ||
       !["temporary", "reusable", "retained", "pinned"].includes(
         lifecycleClass ?? "",
       )
     ) {
       this.#message =
-        "Use title|objective|profile|provider|model|thinking|lifecycle with a parent that has a project.";
+        "Use title|objective|profile|auto|lifecycle or title|objective|profile|provider|model|thinking|lifecycle.";
       this.#requestRender();
       return false;
     }
@@ -2036,7 +2031,7 @@ export class BrokerDeckApp implements Component {
         parentAgentId: parent.id,
         task: { title, objective },
         profileId,
-        model: { provider, modelId, thinkingLevel },
+        ...(automatic ? {} : { model: { provider, modelId, thinkingLevel } }),
         lifecycleClass,
         keepForReuse: lifecycleClass === "reusable",
         project: { cwd: parent.cwd },
@@ -2048,7 +2043,9 @@ export class BrokerDeckApp implements Component {
         budget: { wallTimeMs: 1_800_000 },
         wait: false,
       });
-      this.#message = `Creation accepted with explicit ${provider}/${modelId} and ${thinkingLevel} thinking.`;
+      this.#message = automatic
+        ? "Creation accepted with broker-owned model selection."
+        : `Creation accepted with explicit ${provider}/${modelId} and ${thinkingLevel} thinking.`;
       await this.#client.refresh();
     } catch (error) {
       this.#message = error instanceof Error ? error.message : String(error);

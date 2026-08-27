@@ -24,6 +24,16 @@ pi-herdr-orchestrator config validate ./config.json
 
 Project configuration is accepted only when `PI_HERDR_ORCH_PROJECT_TRUSTED=1` is set by the trusted Pi context. Unknown fields, writable files, symlinks, and secret-like fields fail closed. The shipped CLI also applies the effective config policy and returns its generation and hash.
 
+### Agent settings and rated routing
+
+Use `/agent-settings` from the adopted owner Pi pane. Save writes one validated batch to the existing owner configuration before the broker applies it. The batch contains model scope, existing endpoint limits, exact model mappings, routing mode, and task-profile scoring. It does not create endpoint identities. Add a physical endpoint ID to the owner configuration before you map a model to it.
+
+Use `current_default` for immediate selection rollback. Use `advisory` to retain rankings without application. Use `rated_auto` only after shadow evidence is useful. Automatic application is limited to direct agent creation that omitted a model. A zero-confidence or tied leader keeps the current default. An explicit model always has precedence.
+
+Lowering an endpoint limit does not stop active work. It blocks new admission until active use is below the new limit. Do not remove endpoint limits or mappings while affected work is active. Inspect current agents and queue state first.
+
+The settings screen can request one bounded foundation refresh. The refresh reads only configured scoped models. Failure does not block agent creation and does not remove the last good evidence.
+
 ## Broker lifecycle, state, and export
 
 Run broker commands inside the affected Herdr session. Herdr 0.8.0 or newer gives the canonical socket to ordinary panes. It gives the authoritative `HERDR_BIN_PATH` to the plugin startup hook and plugin panes. Do not set an internal broker socket, session key, client secret, token, terminal ID, or binary path. The broker never searches `PATH` for Herdr.
@@ -83,7 +93,9 @@ pi-herdr-orchestrator ops apply --plan expected.json --current current.json
 
 `expected.json` and `current.json` must be owner-only regular files. The loader rejects unknown fields, duplicates, malformed entries, stale identities, stale preflight evidence, and unsafe resource states. CLI apply reports that execution is disabled. It does not imply that a mutation ran. An injected runner is required for apply tests.
 
-Canary order is: fake validation, package smoke, disposable fake stack, then an explicitly selected low-risk task. Do not repoint Pi or Herdr registration until each earlier gate passes.
+Canary order is: fake validation, package smoke, disposable fake stack, then an explicitly selected low-risk task. For rated routing, first prove `current_default`, then insufficient-evidence fallback, explicit-model precedence, one evidenced unique leader, and a capacity-one queue. Do not repoint Pi or Herdr registration until each earlier gate passes.
+
+A normal Pi extension reload can retain stale dependency bytes. Fully exit and restart Pi before final live acceptance of a deployed dependency change.
 
 ## Rollback
 
@@ -91,7 +103,7 @@ Canary order is: fake validation, package smoke, disposable fake stack, then an 
 2. Export and verify state.
 3. Check stored schema compatibility with the target version.
 4. Restore the exact prior package or checkout.
-5. Use an authorized Herdr start or restart so the restored startup hook starts the broker. Verify `broker status` and `doctor`, then reopen Pi.
+5. Use an authorized Herdr start or restart so the restored startup hook starts the broker. Verify `broker status` and `doctor`, then reopen Pi. If dependency bytes changed, fully exit the prior Pi process before you reopen it.
 6. Reconcile agents and retain dirty or ambiguous worktrees.
 
 Never run older code against a newer unsupported state generation. Never kill-scan processes. Never remove a dirty, live, unknown, missing, ambiguous, or replaced resource. Operation verification fails closed when a resource identity changes.

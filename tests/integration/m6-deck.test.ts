@@ -14,6 +14,7 @@ import {
   FakeDeckBroker,
   agentTarget,
   m6Event,
+  m6Snapshot,
   taskTarget,
   waitForM6,
 } from "../helpers/m6-deck-fixtures.js";
@@ -285,6 +286,56 @@ test("deck actions use the managed broker control methods", async () => {
     reason: "Closed from Agent Board.",
     confirm: true,
   });
+  client.stop();
+});
+
+test("Agent Board automatic creation omits model selection", async () => {
+  const broker = new FakeDeckBroker({
+    ...structuredClone(m6Snapshot),
+    agents: [
+      {
+        ...m6Snapshot.agents[0]!,
+        cwd: "/tmp/agent-board-project",
+      },
+    ],
+  });
+  const client = new BrokerClient({
+    socketPath: "/tmp/m7-automatic-create.sock",
+    secret: "fixture-secret",
+    socketFactory: () => broker.createSocket(),
+  });
+  await client.start();
+  await waitForM6(() => client.status === "connected");
+  const app = new BrokerDeckApp({
+    client,
+    requestRender: () => undefined,
+    getHeight: () => 60,
+  });
+
+  app.handleInput("3");
+  app.handleInput("n");
+  assert.match(app.render(120).join("\n"), /title\|objective\|profile\|auto/u);
+  app.handleInput("Auto child|Check routing|scout|auto|temporary");
+  app.handleInput("\r");
+  await waitForM6(() =>
+    broker.requests.some((request) => request.method === "agent.spawn"),
+  );
+  const request = broker.requests.find(
+    (candidate) => candidate.method === "agent.spawn",
+  )?.params as Record<string, unknown>;
+  assert.equal(Object.hasOwn(request, "model"), false);
+  assert.deepEqual(request, {
+    parentAgentId: "agt_alpha",
+    task: { title: "Auto child", objective: "Check routing" },
+    profileId: "scout",
+    lifecycleClass: "temporary",
+    keepForReuse: false,
+    project: { cwd: "/tmp/agent-board-project" },
+    isolation: { mode: "shared-readonly" },
+    budget: { wallTimeMs: 1_800_000 },
+    wait: false,
+  });
+  app.dispose();
   client.stop();
 });
 
