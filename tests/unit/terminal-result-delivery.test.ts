@@ -12,14 +12,15 @@ function brokerEvent(
   seq: number,
   taskId: string,
   state: string,
+  event: "task.state_changed" | "run.state_changed" = "task.state_changed",
 ): PiBrokerEvent {
   return {
     seq,
     id: `evt_${seq}`,
-    event: "task.state_changed",
+    event,
     timestamp: "2026-08-27T00:00:00.000Z",
     refs: { taskId },
-    data: { to: state },
+    data: event === "run.state_changed" ? { state } : { to: state },
   };
 }
 
@@ -83,9 +84,18 @@ test("terminal result delivery ignores blocked, wakes for success, and deduplica
   };
   const active = binding(tasks);
   delivery.beginEpoch(1);
-  delivery.handle(brokerEvent(10, "tsk_one", "blocked"), active.value);
-  delivery.handle(brokerEvent(11, "tsk_one", "succeeded"), active.value);
-  delivery.handle(brokerEvent(12, "tsk_one", "succeeded"), active.value);
+  delivery.handle(
+    brokerEvent(10, "tsk_one", "blocked", "run.state_changed"),
+    active.value,
+  );
+  delivery.handle(
+    brokerEvent(11, "tsk_one", "succeeded", "run.state_changed"),
+    active.value,
+  );
+  delivery.handle(
+    brokerEvent(12, "tsk_one", "succeeded", "run.state_changed"),
+    active.value,
+  );
   await delivery.flush();
 
   assert.equal(fake.messages.length, 1);
@@ -166,7 +176,10 @@ test("terminal result delivery restores cursor and message dedupe across reload"
     },
   });
   delivery.beginEpoch(1);
-  delivery.handle(brokerEvent(22, "tsk_done", "succeeded"), active.value);
+  delivery.handle(
+    brokerEvent(22, "tsk_done", "succeeded", "run.state_changed"),
+    active.value,
+  );
   await delivery.flush();
   assert.equal(fake.messages.length, 0);
   assert.deepEqual(fake.entries.at(-1), {
@@ -223,7 +236,10 @@ test("terminal result delivery rejects a task response with a different task ID"
     },
   });
   delivery.beginEpoch(1);
-  delivery.handle(brokerEvent(4, "tsk_requested", "succeeded"), active.value);
+  delivery.handle(
+    brokerEvent(4, "tsk_requested", "succeeded", "run.state_changed"),
+    active.value,
+  );
   await delivery.flush();
 
   assert.equal(fake.messages.length, 0);
@@ -249,8 +265,14 @@ test("terminal result delivery retries a failed injection without advancing past
   };
   const first = binding(tasks, 1);
   delivery.beginEpoch(1);
-  delivery.handle(brokerEvent(5, "tsk_retry", "succeeded"), first.value);
-  delivery.handle(brokerEvent(6, "tsk_retry", "succeeded"), first.value);
+  delivery.handle(
+    brokerEvent(5, "tsk_retry", "succeeded", "run.state_changed"),
+    first.value,
+  );
+  delivery.handle(
+    brokerEvent(6, "tsk_retry", "succeeded", "run.state_changed"),
+    first.value,
+  );
   await delivery.flush();
   assert.equal(first.retries(), 1);
   assert.equal(fake.entries.length, 0);
@@ -259,7 +281,10 @@ test("terminal result delivery retries a failed injection without advancing past
   first.setCurrent(false);
   const second = binding(tasks, 2);
   delivery.beginEpoch(2);
-  delivery.handle(brokerEvent(5, "tsk_retry", "succeeded"), second.value);
+  delivery.handle(
+    brokerEvent(5, "tsk_retry", "succeeded", "run.state_changed"),
+    second.value,
+  );
   await delivery.flush();
   assert.equal(second.retries(), 0);
   assert.deepEqual(fake.entries.at(-1), {

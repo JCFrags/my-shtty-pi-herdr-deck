@@ -932,7 +932,9 @@ export default async function piHerdrOrchestrator(
           "events.subscribe",
           {
             fromSeq: subscriptionCursor,
-            filters: { events: ["task.state_changed"] },
+            filters: {
+              events: ["task.state_changed", "run.state_changed"],
+            },
             includeSnapshot: false,
           },
           { timeoutMs: 10_000 },

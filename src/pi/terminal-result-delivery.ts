@@ -150,13 +150,17 @@ export class TerminalResultDelivery {
     binding: TerminalResultDeliveryBinding,
   ): Promise<void> {
     if (
-      event.event !== "task.state_changed" ||
+      !["task.state_changed", "run.state_changed"].includes(event.event) ||
       typeof event.refs.taskId !== "string"
     ) {
       this.#advance(event.seq);
       return;
     }
-    const eventState = String(event.data.to ?? "");
+    const eventState = String(
+      event.event === "run.state_changed"
+        ? (event.data.state ?? "")
+        : (event.data.to ?? ""),
+    );
     if (!TERMINAL_STATES.has(eventState)) {
       this.#advance(event.seq);
       return;

@@ -55,6 +55,7 @@ test("parent extension wakes on terminal result and replays a disconnected suffi
   );
   const sockets: Socket[] = [];
   const subscriptions: number[] = [];
+  const subscriptionFilters: string[][] = [];
   const tasks = new Map<string, Record<string, unknown>>();
   let brokerHead = 10;
   let activeSocket: Socket | undefined;
@@ -105,6 +106,10 @@ test("parent extension wakes on terminal result and replays a disconnected suffi
         else if (method === "events.subscribe") {
           const params = frame.params as Record<string, unknown>;
           subscriptions.push(Number(params.fromSeq));
+          subscriptionFilters.push([
+            ...(((params.filters as Record<string, unknown>)
+              .events as string[]) ?? []),
+          ]);
           result = { subscriptionId: `sub_${subscriptions.length}` };
         } else if (method === "task.get") {
           const params = frame.params as Record<string, unknown>;
@@ -165,6 +170,7 @@ test("parent extension wakes on terminal result and replays a disconnected suffi
     taskId: string,
     state: string,
     socket = activeSocket,
+    event: "task.state_changed" | "run.state_changed" = "run.state_changed",
   ): void => {
     socket?.write(
       encodeFrame({
@@ -172,10 +178,10 @@ test("parent extension wakes on terminal result and replays a disconnected suffi
         type: "event",
         seq,
         id: `evt_${seq}`,
-        event: "task.state_changed",
+        event,
         timestamp: "2026-08-27T00:00:00.000Z",
         refs: { taskId },
-        data: { to: state },
+        data: event === "run.state_changed" ? { state } : { to: state },
       }),
     );
   };
@@ -212,6 +218,9 @@ test("parent extension wakes on terminal result and replays a disconnected suffi
   await emit("session_start", {});
   await waitFor(() => subscriptions.length === 1);
   assert.deepEqual(subscriptions, [10]);
+  assert.deepEqual(subscriptionFilters, [
+    ["task.state_changed", "run.state_changed"],
+  ]);
 
   tasks.set("tsk_first", {
     id: "tsk_first",
@@ -246,6 +255,10 @@ test("parent extension wakes on terminal result and replays a disconnected suffi
   activeSocket?.destroy();
   await waitFor(() => subscriptions.length === 2, 5_000);
   assert.equal(subscriptions[1], 12);
+  assert.deepEqual(subscriptionFilters[1], [
+    "task.state_changed",
+    "run.state_changed",
+  ]);
   sendEvent(13, "tsk_missed", "succeeded");
   await waitFor(() => messages.length === 2);
   assert.equal(
