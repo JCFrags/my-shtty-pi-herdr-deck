@@ -1044,7 +1044,7 @@ export default async function piHerdrOrchestrator(
     description: "Choose agent models and per-model thinking levels",
     handler: async (_args, next) => {
       const context = next as PiContextLike;
-      await start(context);
+      if (!client?.connected) await start(context);
       await openAgentSettings(client, context);
     },
   });
@@ -1055,7 +1055,8 @@ export default async function piHerdrOrchestrator(
   api.registerCommand("orchestrator-status", {
     description: "Show Pi Herd Orchestrator status",
     handler: async (_args, next) => {
-      await start(next as PiContextLike);
+      const context = next as PiContextLike;
+      if (!client?.connected) await start(context);
       providerCollector.request();
       (next as PiContextLike).ui.notify?.(
         client?.connected

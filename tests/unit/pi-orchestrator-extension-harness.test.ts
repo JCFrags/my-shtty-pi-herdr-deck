@@ -410,6 +410,26 @@ test("orchestrator extension reload transfers runtime credential and registers t
     "read",
   ]);
   assert.equal(registrationCount, 1);
+  const settingsCommand = first.commands.find(
+    (item) => item.name === "agent-settings",
+  );
+  assert.ok(settingsCommand);
+  await settingsCommand.command.handler("", firstHarness.context);
+  assert.equal(
+    registrationCount,
+    1,
+    "opening settings must reuse the connected broker client",
+  );
+  const statusCommand = first.commands.find(
+    (item) => item.name === "orchestrator-status",
+  );
+  assert.ok(statusCommand);
+  await statusCommand.command.handler("", firstHarness.context);
+  assert.equal(
+    registrationCount,
+    1,
+    "checking status must reuse the connected broker client",
+  );
   await shutdown(firstActive, "reload");
   await unlink(tokenPath);
   const secondHarness = createFakePiHarness();
