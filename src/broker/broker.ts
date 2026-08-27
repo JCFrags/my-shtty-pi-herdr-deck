@@ -3938,24 +3938,145 @@ export class Broker {
         };
       } else if (request.method === "agent.list") {
         requirePermission(principal, "read:state");
-        const progressNow = this.#now();
-        const items = (
+        const p = request.params;
+        const agentStates = [
+          "provisioning",
+          "starting",
+          "idle",
+          "working",
+          "blocked",
+          "stopping",
+          "stopped",
+          "failed",
+          "orphaned",
+          "replaced",
+        ];
+        if (
+          !exactKeys(p, [
+            "ids",
+            "managed",
+            "state",
+            "profileId",
+            "taskId",
+            "workspaceId",
+            "connected",
+            "include",
+            "maxBytes",
+            "cursor",
+            "limit",
+          ]) ||
+          (p.ids !== undefined &&
+            (!Array.isArray(p.ids) ||
+              p.ids.length > 64 ||
+              p.ids.some((id) => !safeText(id, 256)))) ||
+          (p.managed !== undefined && typeof p.managed !== "boolean") ||
+          (p.state !== undefined &&
+            (!safeText(p.state, 64) || !agentStates.includes(p.state))) ||
+          (p.profileId !== undefined && !safeText(p.profileId, 256)) ||
+          (p.taskId !== undefined && !safeText(p.taskId, 256)) ||
+          (p.workspaceId !== undefined && !safeText(p.workspaceId, 256)) ||
+          (p.connected !== undefined && typeof p.connected !== "boolean") ||
+          (p.include !== undefined && !Array.isArray(p.include)) ||
+          (p.maxBytes !== undefined &&
+            (!Number.isSafeInteger(p.maxBytes) ||
+              Number(p.maxBytes) < 1 ||
+              Number(p.maxBytes) > 262_144)) ||
+          (p.cursor !== undefined &&
+            (typeof p.cursor !== "string" || !/^\d+$/u.test(p.cursor))) ||
+          (p.limit !== undefined &&
+            (!Number.isSafeInteger(p.limit) ||
+              Number(p.limit) < 1 ||
+              Number(p.limit) > 500))
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Agent list parameters are invalid.",
+          );
+        if ((p.include as unknown[] | undefined)?.length)
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Agent list include sections are not supported. Omit include.",
+          );
+        const requestedIds =
+          p.ids === undefined ? undefined : new Set(p.ids as string[]);
+        const requestedTaskAgentId =
+          p.taskId === undefined
+            ? undefined
+            : this.store.state.tasks[p.taskId as string]?.assignedAgentId;
+        const connectedAgentIds = new Set(
+          Object.values(this.store.state.agents)
+            .filter((agent) =>
+              [...this.#clients].some(
+                (candidate) =>
+                  !candidate.socket.destroyed &&
+                  candidate.principal?.kind === "pi_child" &&
+                  candidate.principal.agentId === agent.id &&
+                  candidate.principal.generation === agent.generation &&
+                  candidate.principal.piSessionId === agent.piSessionId,
+              ),
+            )
+            .map((agent) => agent.id),
+        );
+        const accessible = (
           await Promise.all(
             Object.values(this.store.state.agents).map(async (agent) =>
               (await this.#canAccessAgent(principal, agent.id))
-                ? {
-                    ...agentWithLifecycle(agent, this.store.state, progressNow),
-                    tokenDigest: undefined,
-                  }
+                ? agent
                 : undefined,
             ),
           )
-        ).filter((agent): agent is NonNullable<typeof agent> => Boolean(agent));
+        )
+          .filter((agent): agent is NonNullable<typeof agent> => Boolean(agent))
+          .filter(
+            (agent) =>
+              (requestedIds === undefined || requestedIds.has(agent.id)) &&
+              (p.managed === undefined ||
+                (agent.managed === true) === p.managed) &&
+              (p.state === undefined || agent.state === p.state) &&
+              (p.profileId === undefined || agent.profileId === p.profileId) &&
+              (p.taskId === undefined || requestedTaskAgentId === agent.id) &&
+              (p.workspaceId === undefined ||
+                agent.workspaceId === p.workspaceId) &&
+              (p.connected === undefined ||
+                connectedAgentIds.has(agent.id) === p.connected),
+          )
+          .sort((left, right) => left.id.localeCompare(right.id));
+        const offset = p.cursor === undefined ? 0 : Number(p.cursor);
+        const limit = p.limit === undefined ? 64 : Number(p.limit);
+        const maxBytes = p.maxBytes === undefined ? 32_768 : Number(p.maxBytes);
+        const progressNow = this.#now();
+        const items: Array<Record<string, unknown>> = [];
+        for (const agent of accessible.slice(offset, offset + limit)) {
+          const item = {
+            ...agentWithLifecycle(agent, this.store.state, progressNow),
+            tokenDigest: undefined,
+          };
+          const nextItems = [...items, item];
+          const nextOffset = offset + nextItems.length;
+          const envelope = {
+            items: nextItems,
+            nextCursor:
+              nextOffset < accessible.length ? String(nextOffset) : null,
+            snapshotSeq: this.store.state.lastEventSeq,
+          };
+          if (Buffer.byteLength(JSON.stringify(envelope)) > maxBytes) break;
+          items.push(item);
+        }
+        const nextOffset = offset + items.length;
         result = {
           items,
-          nextCursor: null,
+          nextCursor:
+            nextOffset < accessible.length ? String(nextOffset) : null,
           snapshotSeq: this.store.state.lastEventSeq,
         };
+        if (
+          (items.length === 0 && offset < accessible.length) ||
+          Buffer.byteLength(JSON.stringify(result)) > maxBytes
+        )
+          throw new OrchestratorError(
+            "LIMIT_EXCEEDED",
+            "Agent list cannot fit the requested output bound.",
+          );
       } else if (request.method === "agent.get") {
         requirePermission(principal, "read:state");
         if (!safeText(request.params.agentId))

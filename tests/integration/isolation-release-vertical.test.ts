@@ -1892,6 +1892,162 @@ test("spawn and read responses expose derived startup progress", async () => {
   }
 });
 
+test("agent list honors authorized filters, pagination, bounds, and unsupported includes", async () => {
+  const h = await productionParent({ compactLifecycle: true });
+  try {
+    const spawn = async (title: string, profileId: "scout" | "reviewer") =>
+      (await h.client.request("agent.spawn", {
+        task: { title, objective: title },
+        profileId,
+        isolation: { mode: "shared-readonly" },
+        wait: false,
+        dryRun: false,
+      })) as {
+        tasks: Array<{ taskId: string; agentId: string }>;
+      };
+    const first = (await spawn("inventory-first", "scout")).tasks[0]!;
+    const second = (await spawn("inventory-second", "reviewer")).tasks[0]!;
+    await connectManagedChild(h, first.agentId);
+
+    const list = (params: Record<string, unknown>) =>
+      h.client.request("agent.list", params) as Promise<{
+        items: Array<{
+          id: string;
+          state: string;
+          profileId?: string;
+          workspaceId?: string;
+        }>;
+        nextCursor: string | null;
+      }>;
+    assert.deepEqual(
+      (await list({ ids: [first.agentId] })).items.map((item) => item.id),
+      [first.agentId],
+    );
+    assert.deepEqual(
+      (await list({ managed: true, profileId: "reviewer" })).items.map(
+        (item) => item.id,
+      ),
+      [second.agentId],
+    );
+    assert.deepEqual(
+      (await list({ taskId: first.taskId })).items.map((item) => item.id),
+      [first.agentId],
+    );
+    const firstAgent = h.broker.store.state.agents[first.agentId]!;
+    const parentAgent = h.broker.store.state.agents[h.registered.agentId]!;
+    assert.equal(typeof parentAgent.workspaceId, "string");
+    assert.deepEqual(
+      (await list({ workspaceId: parentAgent.workspaceId })).items.map(
+        (item) => item.id,
+      ),
+      [parentAgent.id],
+    );
+    assert.deepEqual(
+      (await list({ state: firstAgent.state, ids: [first.agentId] })).items.map(
+        (item) => item.id,
+      ),
+      [first.agentId],
+    );
+    assert.deepEqual(
+      (await list({ managed: true, connected: true })).items.map(
+        (item) => item.id,
+      ),
+      [first.agentId],
+    );
+    assert.deepEqual(
+      (await list({ managed: true, connected: false })).items.map(
+        (item) => item.id,
+      ),
+      [second.agentId],
+    );
+
+    const ordered = [first.agentId, second.agentId].sort();
+    const pageOne = await list({
+      ids: [first.agentId, second.agentId],
+      managed: true,
+      limit: 1,
+      maxBytes: 4096,
+    });
+    assert.deepEqual(
+      pageOne.items.map((item) => item.id),
+      [ordered[0]],
+    );
+    assert.equal(pageOne.nextCursor, "1");
+    assert.ok(Buffer.byteLength(JSON.stringify(pageOne)) <= 4096);
+    const pageTwo = await list({
+      ids: [first.agentId, second.agentId],
+      managed: true,
+      cursor: pageOne.nextCursor,
+      limit: 1,
+      maxBytes: 4096,
+    });
+    assert.deepEqual(
+      pageTwo.items.map((item) => item.id),
+      [ordered[1]],
+    );
+    assert.equal(pageTwo.nextCursor, null);
+
+    const firstChild = h.children.get(first.agentId)!;
+    const sibling = (await firstChild.request("agent.list", {
+      ids: [second.agentId],
+    })) as { items: unknown[] };
+    assert.deepEqual(sibling.items, []);
+    await assert.rejects(
+      h.client.request("agent.list", { include: ["runs"] }),
+      (error: unknown) =>
+        (error as { code?: string; message?: string }).code ===
+          "INVALID_REQUEST" &&
+        /include sections are not supported/u.test(
+          (error as { message?: string }).message ?? "",
+        ),
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("result inspection is read-only and task collection records collection", async () => {
+  const h = await productionParent();
+  try {
+    const spawned = (await h.client.request("agent.spawn", {
+      task: { title: "collection-contract", objective: "Finish." },
+      profileId: "scout",
+      isolation: { mode: "shared-readonly" },
+      wait: false,
+      dryRun: false,
+    })) as { tasks: Array<{ taskId: string; agentId: string }> };
+    const child = spawned.tasks[0]!;
+    await connectManagedChild(h, child.agentId);
+    await completeManagedChild(h, child.agentId);
+    assert.equal(
+      h.broker.store.state.tasks[child.taskId]?.resultCollectedAt,
+      undefined,
+    );
+
+    await h.client.request("result.get", { taskId: child.taskId });
+    assert.equal(
+      h.broker.store.state.tasks[child.taskId]?.resultCollectedAt,
+      undefined,
+    );
+    const before = (await h.client.request("agent.get", {
+      agentId: child.agentId,
+    })) as { closeRecommendation: string };
+    assert.equal(before.closeRecommendation, "blocked");
+
+    await h.client.request("task.collect", { taskIds: [child.taskId] });
+    assert.equal(
+      typeof h.broker.store.state.tasks[child.taskId]?.resultCollectedAt,
+      "string",
+    );
+    const after = (await h.client.request("agent.get", {
+      agentId: child.agentId,
+    })) as { closeRecommendation: string };
+    assert.equal(after.closeRecommendation, "close");
+  } finally {
+    await h.cleanup();
+  }
+});
+
 test("result recovery holds endpoint capacity until result publish", async () => {
   const h = await productionParent({
     holdProvisions: true,
