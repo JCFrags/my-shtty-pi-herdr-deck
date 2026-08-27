@@ -78,6 +78,7 @@ test("terminal result delivery ignores blocked, wakes for success, and deduplica
       id: "tsk_one",
       title: "Focused check",
       parentAgentId: "agt_parent",
+      assignedAgentId: "agt_one",
       state: "succeeded",
       resultId: "res_one",
     },
@@ -114,8 +115,12 @@ test("terminal result delivery ignores blocked, wakes for success, and deduplica
     taskId: "tsk_one",
     state: "succeeded",
     resultId: "res_one",
+    assignedAgentId: "agt_one",
   });
-  assert.match(fake.messages[0]?.message.content ?? "", /structured result/);
+  assert.equal(
+    fake.messages[0]?.message.content,
+    "Managed task tsk_one (Focused check) reached succeeded for agent agt_one. Use task_collect for tsk_one to record its structured result if available. If agent agt_one remains open and is no longer needed, use agent_close. Continue the remaining work without waiting for a user prompt.",
+  );
   assert.deepEqual(
     fake.entries.map((entry) => [entry.customType, entry.data]),
     [
@@ -221,6 +226,35 @@ test("terminal result delivery binds the parent and supports failure without a r
     taskId: "tsk_failed",
     state: "failed",
   });
+  assert.equal(
+    fake.messages[0]?.message.content,
+    "Managed task tsk_failed (Failed check) reached failed. Use task_collect for tsk_failed to record its structured result if available. Continue the remaining work without waiting for a user prompt.",
+  );
+  assert.doesNotMatch(fake.messages[0]?.message.content ?? "", /agent_close/);
+});
+
+test("terminal result delivery rejects an invalid assigned agent without advancing", async () => {
+  const fake = harness();
+  const delivery = new TerminalResultDelivery(fake.api);
+  const active = binding({
+    tsk_invalid_agent: {
+      id: "tsk_invalid_agent",
+      title: "Invalid agent",
+      parentAgentId: "agt_parent",
+      assignedAgentId: "bad\nagent",
+      state: "succeeded",
+      resultId: "res_invalid_agent",
+    },
+  });
+  delivery.beginEpoch(1);
+  delivery.handle(
+    brokerEvent(3, "tsk_invalid_agent", "succeeded", "run.state_changed"),
+    active.value,
+  );
+  await delivery.flush();
+  assert.equal(fake.messages.length, 0);
+  assert.equal(fake.entries.length, 0);
+  assert.equal(active.retries(), 1);
 });
 
 test("terminal result delivery rejects a task response with a different task ID", async () => {

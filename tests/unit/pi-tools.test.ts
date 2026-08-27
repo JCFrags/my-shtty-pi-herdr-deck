@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   registerManagedChildTools,
   registerParentTools,
+  withLaunchLifecycleReminder,
 } from "../../src/pi/tools.js";
 import { PiBrokerClient } from "../../src/pi/broker-client.js";
 import { NdjsonDecoder, encodeFrame } from "../../src/shared/protocol/codec.js";
@@ -50,6 +51,39 @@ function fakeAdapter() {
 function fakeContext() {
   return {} as never;
 }
+
+test("successful launch outputs remind the parent to collect and conditionally close", () => {
+  const result = { taskId: "tsk_1", agentId: "agt_1" };
+  for (const [tool, input] of [
+    ["agent_spawn", {}],
+    ["delegate", { dryRun: false }],
+    ["delegate_compact", { accept: true }],
+  ] as const) {
+    assert.deepEqual(withLaunchLifecycleReminder(tool, input, result), {
+      ...result,
+      lifecycleReminder:
+        "After each managed task becomes terminal, use task_collect to record its result. If an assigned agent remains open and is no longer needed, use agent_close.",
+    });
+  }
+});
+
+test("launch reminders do not decorate previews or unrelated results", () => {
+  const result = { accepted: true };
+  assert.equal(
+    withLaunchLifecycleReminder("delegate", { dryRun: true }, result),
+    result,
+  );
+  assert.equal(
+    withLaunchLifecycleReminder("delegate_compact", { accept: false }, result),
+    result,
+  );
+  assert.equal(withLaunchLifecycleReminder("agent_list", {}, result), result);
+  assert.equal(
+    withLaunchLifecycleReminder("agent_spawn", { dryRun: true }, result),
+    result,
+  );
+  assert.equal(withLaunchLifecycleReminder("agent_spawn", {}, null), null);
+});
 
 test("real socket PiBrokerClient drives a managed ask through normal and early answer delivery", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-real-tool-"));

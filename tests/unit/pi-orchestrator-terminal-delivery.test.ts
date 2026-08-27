@@ -226,6 +226,7 @@ test("parent extension wakes on terminal result and replays a disconnected suffi
     id: "tsk_first",
     title: "First result",
     parentAgentId: "agt_parent",
+    assignedAgentId: "agt_first",
     state: "succeeded",
     resultId: "res_first",
   });
@@ -236,6 +237,19 @@ test("parent extension wakes on terminal result and replays a disconnected suffi
   assert.deepEqual(messages[0]?.options, {
     deliverAs: "followUp",
     triggerTurn: true,
+  });
+  assert.equal(
+    messages[0]?.message.content,
+    "Managed task tsk_first (First result) reached succeeded for agent agt_first. Use task_collect for tsk_first to record its structured result if available. If agent agt_first remains open and is no longer needed, use agent_close. Continue the remaining work without waiting for a user prompt.",
+  );
+  assert.deepEqual(messages[0]?.message.details, {
+    schemaVersion: 1,
+    eventSeq: 12,
+    deliveryKey: "tsk_first:succeeded:res_first",
+    taskId: "tsk_first",
+    state: "succeeded",
+    resultId: "res_first",
+    assignedAgentId: "agt_first",
   });
   assert.equal(
     sessionEntries.some(
@@ -265,4 +279,5 @@ test("parent extension wakes on terminal result and replays a disconnected suffi
     (messages[1]?.message.details as Record<string, unknown>).resultId,
     "res_missed",
   );
+  assert.doesNotMatch(String(messages[1]?.message.content), /agent_close/);
 });
