@@ -20,6 +20,8 @@ import { AGENT_STATES } from "../state/types.js";
 
 const MAX_BODY_BYTES = 262_144;
 const MAX_TEXT_BYTES = 16_384;
+const LAUNCH_LIFECYCLE_REMINDER =
+  "After each managed task becomes terminal, use task_collect to record its result. If an assigned agent remains open and is no longer needed, use agent_close.";
 const boundedString = (max: number) => ({
   type: "string",
   minLength: 1,
@@ -352,6 +354,28 @@ const parentInputKeys: Readonly<Record<ParentToolName, readonly string[]>> =
     task_metadata: ["taskId", "runId"],
     task_transcript_close: ["taskId", "runId", "confirm"],
   });
+export function withLaunchLifecycleReminder(
+  tool: ParentToolName,
+  input: Readonly<Record<string, unknown>>,
+  result: unknown,
+): unknown {
+  const launched =
+    (tool === "agent_spawn" && input.dryRun !== true) ||
+    (tool === "delegate" && input.dryRun !== true) ||
+    (tool === "delegate_compact" && input.accept === true);
+  if (
+    !launched ||
+    !result ||
+    typeof result !== "object" ||
+    Array.isArray(result)
+  )
+    return result;
+  return {
+    ...(result as Record<string, unknown>),
+    lifecycleReminder: LAUNCH_LIFECYCLE_REMINDER,
+  };
+}
+
 function validateNested(value: unknown, depth = 0): void {
   if (depth > 6) throw new Error("LIMIT_EXCEEDED");
   if (typeof value === "string") {
@@ -2139,7 +2163,13 @@ export function registerParentTools(
             isError: true,
           };
         }
-        return textResult(response.result);
+        return textResult(
+          withLaunchLifecycleReminder(
+            tool as ParentToolName,
+            raw,
+            response.result,
+          ),
+        );
       },
     });
   }

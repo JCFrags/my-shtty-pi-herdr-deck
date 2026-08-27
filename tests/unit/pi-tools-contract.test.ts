@@ -232,6 +232,66 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
   assert.equal(calls.length, 27);
 });
 
+test("launch tools add lifecycle reminders only for created work", async () => {
+  const tools: Array<{
+    name: string;
+    execute: (...args: never[]) => Promise<any>;
+  }> = [];
+  const client = {
+    connected: true,
+    principal: {
+      id: "principal",
+      kind: "pi_parent" as const,
+      permissions: ["delegate"],
+    },
+    request: async (method: string, params: Record<string, unknown>) => ({
+      workflowId: `wfl_${method}`,
+      state: "scheduled",
+      tasks: [{ key: "one", taskId: "tsk_one", state: "queued" }],
+      ...(method === "compact.delegate" && params.accept !== true
+        ? { schemaVersion: 1, workflowDigest: "b".repeat(64) }
+        : {}),
+    }),
+  };
+  registerParentTools(
+    {
+      registerTool: (definition: (typeof tools)[number]) =>
+        tools.push(definition),
+    } as never,
+    { safeState: () => state } as never,
+    client as never,
+  );
+  const run = async (name: string, input: Record<string, unknown>) => {
+    const tool = tools.find((item) => item.name === name);
+    assert.ok(tool);
+    return (tool.execute as unknown as (...args: unknown[]) => Promise<any>)(
+      `call-${name}`,
+      input,
+      AbortSignal.timeout(1_000),
+      undefined,
+      {},
+    );
+  };
+  const reminder =
+    "After each managed task becomes terminal, use task_collect to record its result. If an assigned agent remains open and is no longer needed, use agent_close.";
+  const spawn = await run("agent_spawn", inputs.agent_spawn ?? {});
+  assert.equal(spawn.details.lifecycleReminder, reminder);
+  const delegated = await run("delegate", {
+    ...(inputs.delegate ?? {}),
+    dryRun: false,
+  });
+  assert.equal(delegated.details.lifecycleReminder, reminder);
+  const accepted = await run("delegate_compact", inputs.delegate_compact ?? {});
+  assert.equal(accepted.details.lifecycleReminder, reminder);
+  const preview = await run("delegate_compact", {
+    text: "- [ ] canary: Read package.json [profile:reviewer] [mode:read]",
+    accept: false,
+  });
+  assert.equal(Object.hasOwn(preview.details, "lifecycleReminder"), false);
+  const dryRun = await run("delegate", inputs.delegate ?? {});
+  assert.equal(Object.hasOwn(dryRun.details, "lifecycleReminder"), false);
+});
+
 test("delegate wait polls task state through automatic execution", async () => {
   const tools: Array<{
     name: string;

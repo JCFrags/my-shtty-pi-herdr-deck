@@ -185,14 +185,26 @@ export class TerminalResultDelivery {
       task.resultId === undefined ? undefined : safeText(task.resultId);
     if (task.resultId !== undefined && !resultId)
       throw new Error("TASK_DELIVERY_INVALID");
+    const assignedAgentId =
+      task.assignedAgentId === undefined
+        ? undefined
+        : safeText(task.assignedAgentId);
+    if (task.assignedAgentId !== undefined && !assignedAgentId)
+      throw new Error("TASK_DELIVERY_INVALID");
     const key = deliveryKey(taskId, state, resultId);
     if (!this.#delivered.has(key)) {
       if (!this.#api.sendMessage) throw new Error("PI_MESSAGE_UNAVAILABLE");
       const title = safeText(task.title, 16_384) ?? taskId;
+      const agentReference = assignedAgentId
+        ? ` for agent ${assignedAgentId}`
+        : "";
+      const closeInstruction = assignedAgentId
+        ? ` If agent ${assignedAgentId} remains open and is no longer needed, use agent_close.`
+        : "";
       this.#api.sendMessage(
         {
           customType: TERMINAL_RESULT_MESSAGE_TYPE,
-          content: `Managed task ${taskId} (${title}) reached ${state}. Collect its structured result if available and continue the remaining work without waiting for a user prompt.`,
+          content: `Managed task ${taskId} (${title}) reached ${state}${agentReference}. Use task_collect for ${taskId} to record its structured result if available.${closeInstruction} Continue the remaining work without waiting for a user prompt.`,
           display: true,
           details: {
             schemaVersion: 1,
@@ -201,6 +213,7 @@ export class TerminalResultDelivery {
             taskId,
             state,
             ...(resultId ? { resultId } : {}),
+            ...(assignedAgentId ? { assignedAgentId } : {}),
           },
         },
         { deliverAs: "followUp", triggerTurn: true },
