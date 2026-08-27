@@ -10,7 +10,7 @@ import {
 import { lstat, open, realpath } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { brokerRequest } from "../cli/client.js";
+import { BrokerRequestTimeoutError, brokerRequest } from "../cli/client.js";
 import { validateDoctorReport } from "./doctor.js";
 import { readPrivateRegular } from "../shared/private-fs.js";
 import {
@@ -564,6 +564,7 @@ async function secureLog(path: string) {
 
 async function authenticatedPing(
   paths: CanonicalResolvedPaths,
+  options: { timeoutMs?: number; timeoutIsTransient?: boolean } = {},
 ): Promise<boolean> {
   try {
     const secret = await readPrivateRegular(paths.secret);
@@ -581,8 +582,14 @@ async function authenticatedPing(
       "system.ping",
       {},
       paths.sessionKey,
+      { timeoutMs: options.timeoutMs ?? 5_000 },
     )) as Record<string, unknown>;
   } catch (error) {
+    if (
+      options.timeoutIsTransient &&
+      error instanceof BrokerRequestTimeoutError
+    )
+      return false;
     if (
       ["ENOENT", "ECONNREFUSED", "ECONNRESET"].includes(
         (error as NodeJS.ErrnoException).code ?? "",
@@ -658,7 +665,13 @@ async function waitReady(
   });
   while (Date.now() < deadline) {
     await revalidateHerdrSocket(herdr);
-    if (await authenticatedPing(paths)) {
+    const remainingMs = Math.max(1, deadline - Date.now());
+    if (
+      await authenticatedPing(paths, {
+        timeoutMs: Math.min(5_000, remainingMs),
+        timeoutIsTransient: true,
+      })
+    ) {
       await inspectAuthenticatedStartup(paths);
       return;
     }
@@ -1024,6 +1037,7 @@ export async function brokerStatus(): Promise<{
       "system.status",
       {},
       paths.sessionKey,
+      { timeoutMs: READY_TIMEOUT_MS },
     ),
   };
 }

@@ -349,6 +349,10 @@ Ordinary Herdr panes can use authenticated attach-only checks and stop:
 
 `status` reports only an authenticated broker. `doctor` asks that broker to run the same checks with its retained exact Herdr binary. The response does not include a binary path, session key, client secret, or token. `stop` verifies the recorded process-start identity before it requests shutdown. It does not signal an unverified process.
 
+Active `agent.spawn`, `agent.get`, `agent.list`, `task.get`, and `task.list` responses include a broker-derived `progress` object when work is queued, creating Herdr resources, waiting for Pi registration, or starting Pi. It contains the phase, operation start time, elapsed milliseconds, and the current task or registration deadline with remaining or overdue milliseconds. Agent Board shows the same data in agent and task detail. These values are a read-time view of existing task, run, agent, and Herdr resource state. They are not a second lifecycle record. Elapsed and remaining values are a snapshot and update on the next read or board snapshot.
+
+A broker request timeout now names the method, the connect or response phase, the configured timeout, and the observed elapsed time. During broker startup, only this known request timeout is retried under the existing 15-second authenticated readiness deadline. Authentication and the broker ping remain the only readiness authority.
+
 The public `broker start` and `broker restart` commands require Herdr plugin runtime context because only that context has the authoritative binary path. Do not run them from an ordinary pane. Normal installation and recovery use an authorized Herdr start or restart so Herdr runs the one-shot startup hook. Do not set or copy a binary path.
 
 A dry-run release rehearsal is also available:

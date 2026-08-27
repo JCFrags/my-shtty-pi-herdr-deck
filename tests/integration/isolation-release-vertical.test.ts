@@ -1825,6 +1825,73 @@ test("direct spawn waits for endpoint capacity until cancellation releases it", 
   }
 });
 
+test("spawn and read responses expose derived startup progress", async () => {
+  const h = await productionParent({ holdProvisions: true });
+  try {
+    const accepted = h.client.request("agent.spawn", {
+      task: { title: "visible-startup", objective: "Show progress." },
+      profileId: "scout",
+      isolation: { mode: "shared-readonly" },
+      wait: false,
+      dryRun: false,
+    }) as Promise<{
+      tasks: Array<{
+        taskId: string;
+        agentId: string;
+        progress?: { phase: string; elapsedMs: number; deadlineAt?: string };
+      }>;
+    }>;
+    const provision = await h.nextProvision();
+    provision.release();
+    const spawned = await accepted;
+    const child = spawned.tasks[0]!;
+    assert.ok(
+      ["creating_resources", "waiting_for_registration", "starting"].includes(
+        child.progress?.phase ?? "",
+      ),
+    );
+    assert.ok(Number.isSafeInteger(child.progress?.elapsedMs));
+    assert.equal(typeof child.progress?.deadlineAt, "string");
+
+    const task = (await h.client.request("task.get", {
+      taskId: child.taskId,
+    })) as { progress?: { phase: string } };
+    assert.ok(
+      ["creating_resources", "waiting_for_registration", "starting"].includes(
+        task.progress?.phase ?? "",
+      ),
+    );
+    const tasks = (await h.client.request("task.list", {})) as {
+      items: Array<{ id: string; progress?: { phase: string } }>;
+    };
+    assert.ok(
+      ["creating_resources", "waiting_for_registration", "starting"].includes(
+        tasks.items.find((item) => item.id === child.taskId)?.progress?.phase ??
+          "",
+      ),
+    );
+    const agent = (await h.client.request("agent.get", {
+      agentId: child.agentId,
+    })) as { progress?: { phase: string } };
+    assert.ok(
+      ["creating_resources", "waiting_for_registration", "starting"].includes(
+        agent.progress?.phase ?? "",
+      ),
+    );
+    const agents = (await h.client.request("agent.list", {})) as {
+      items: Array<{ id: string; progress?: { phase: string } }>;
+    };
+    assert.ok(
+      ["creating_resources", "waiting_for_registration", "starting"].includes(
+        agents.items.find((item) => item.id === child.agentId)?.progress
+          ?.phase ?? "",
+      ),
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
 test("result recovery holds endpoint capacity until result publish", async () => {
   const h = await productionParent({
     holdProvisions: true,
