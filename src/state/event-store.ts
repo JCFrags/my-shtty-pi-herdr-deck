@@ -16,6 +16,7 @@ import {
   validateModelEvidenceSupersession,
 } from "../model-intelligence/model-evidence.js";
 import { validateFoundationEvidenceSnapshot } from "../model-intelligence/foundation-snapshot.js";
+import { validateAdvisoryModelReceipt } from "../model-intelligence/model-ranking.js";
 import { emptyState, reduce } from "./reducer.js";
 import type {
   ErrorSummary,
@@ -59,6 +60,30 @@ function validTaskProject(value: unknown): boolean {
   const project = value as Record<string, unknown>;
   if (!boundedText(project.cwd, 4096) || !boundedText(project.workspaceId, 256))
     return false;
+  if (Object.hasOwn(project, "advisoryModelReceipt")) {
+    try {
+      const receipt = validateAdvisoryModelReceipt(
+        project.advisoryModelReceipt,
+      );
+      const effective = project.effectiveSpawnPolicy;
+      const effectiveModel =
+        effective && typeof effective === "object" && !Array.isArray(effective)
+          ? (effective as Record<string, unknown>).model
+          : undefined;
+      if (
+        typeof project.modelPolicyHash !== "string" ||
+        receipt.modelPolicyHash !== project.modelPolicyHash ||
+        !effectiveModel ||
+        canonicalJson(receipt.selectedModel) !== canonicalJson(effectiveModel)
+      )
+        return false;
+    } catch {
+      return false;
+    }
+    const withoutReceipt = { ...project };
+    delete withoutReceipt.advisoryModelReceipt;
+    return validTaskProject(withoutReceipt);
+  }
   if (Object.hasOwn(project, "compact")) {
     const compact = project.compact;
     if (
@@ -194,6 +219,19 @@ function validTaskProject(value: unknown): boolean {
     boundedText((model as Record<string, unknown>).modelId, 256) &&
     boundedText((model as Record<string, unknown>).thinkingLevel, 32)
   );
+}
+function validTaskProjectProfile(value: unknown, profileId: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const receipt = (value as Record<string, unknown>).advisoryModelReceipt;
+  if (receipt === undefined) return true;
+  try {
+    return (
+      typeof profileId === "string" &&
+      validateAdvisoryModelReceipt(receipt).taskProfile === profileId
+    );
+  } catch {
+    return false;
+  }
 }
 const EVENT_KEYS = [
   "schemaVersion",
@@ -776,7 +814,9 @@ export class EventStore {
           (Array.isArray(p.dependencies) &&
             p.dependencies.length <= 64 &&
             p.dependencies.every((id) => isEntityId(id, "tsk")))) &&
-        (p.project === undefined || validTaskProject(p.project));
+        (p.project === undefined ||
+          (validTaskProject(p.project) &&
+            validTaskProjectProfile(p.project, p.profileId)));
     } else if (event.type === "task.project_bound") {
       valid =
         exactKeys(refs, ["taskId"]) &&
@@ -1041,7 +1081,18 @@ export class EventStore {
         !Array.isArray(p.response) &&
         Array.isArray(p.tasks) &&
         p.tasks.length >= 1 &&
-        p.tasks.length <= 16;
+        p.tasks.length <= 16 &&
+        p.tasks.every(
+          (task) =>
+            !!task &&
+            typeof task === "object" &&
+            !Array.isArray(task) &&
+            validTaskProject((task as Record<string, unknown>).project) &&
+            validTaskProjectProfile(
+              (task as Record<string, unknown>).project,
+              (task as Record<string, unknown>).profileId,
+            ),
+        );
     } else if (event.type === "herdr.metadata_projected") {
       valid =
         exactKeys(refs, [

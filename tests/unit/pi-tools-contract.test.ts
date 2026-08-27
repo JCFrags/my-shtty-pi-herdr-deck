@@ -25,6 +25,7 @@ const inputs: Record<string, Record<string, unknown>> = {
     budget: { wallTimeMs: 1000 },
     wait: false,
   },
+  agent_model_options: { profileId: "scout", limit: 5 },
   agent_list: {},
   agent_get: { agentId: "child" },
   agent_prompt: {
@@ -146,7 +147,7 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
       {},
     );
   }
-  assert.equal(calls.length, 26);
+  assert.equal(calls.length, 27);
   const compactTool = tools.find((item) => item.name === "delegate_compact");
   assert.equal(
     (compactTool?.parameters as { properties?: { accept?: { type?: string } } })
@@ -159,6 +160,7 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
       "compact.delegate",
       "delegate.execute",
       "agent.spawn",
+      "model.options",
       "agent.list",
       "agent.get",
       "agent.prompt",

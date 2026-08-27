@@ -123,7 +123,17 @@ import {
   type AgentPlacement,
   type ModelPolicyConfig,
   type ModelProfileId,
+  type ResolvedSpawnPolicy,
 } from "./model-policy.js";
+import {
+  buildModelOptions,
+  createAdvisoryModelReceipt,
+  modelCapacityView,
+  MODEL_RANKING_POLICY,
+  type AdvisoryModelReceipt,
+  type BuildModelOptionsInput,
+  type ModelOptionsView,
+} from "../model-intelligence/model-ranking.js";
 interface SubscriptionFilter {
   events?: string[];
   agentIds?: string[];
@@ -3556,6 +3566,55 @@ export class Broker {
       } else if (request.method === "model.capabilities") {
         requirePermission(principal, "read:state");
         result = await this.#piCapabilities.snapshot();
+      } else if (request.method === "model.options") {
+        requirePermission(principal, "read:state");
+        const p = request.params;
+        if (
+          Object.keys(p).some(
+            (key) =>
+              ![
+                "profileId",
+                "placement",
+                "modelProfileId",
+                "projectKey",
+                "limit",
+              ].includes(key),
+          ) ||
+          typeof p.profileId !== "string" ||
+          !/^[a-z][a-z0-9_-]{0,63}$/u.test(p.profileId) ||
+          (p.placement !== undefined &&
+            p.placement !== "current-workspace" &&
+            p.placement !== "new-workspace") ||
+          (p.modelProfileId !== undefined &&
+            p.modelProfileId !== "manager" &&
+            p.modelProfileId !== "subagent") ||
+          (p.projectKey !== undefined && !safeText(p.projectKey, 4096)) ||
+          (p.limit !== undefined &&
+            (!Number.isSafeInteger(p.limit) ||
+              Number(p.limit) < 1 ||
+              Number(p.limit) > MODEL_RANKING_POLICY.maxReturnedCandidates))
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Model option parameters are invalid.",
+          );
+        const inheritedProjectKey = principal.agentId
+          ? this.store.state.agents[principal.agentId]?.cwd
+          : undefined;
+        result = await this.#modelOptions({
+          taskProfile: p.profileId,
+          ...(p.placement ? { placement: p.placement as AgentPlacement } : {}),
+          ...(p.modelProfileId
+            ? { modelProfileId: p.modelProfileId as ModelProfileId }
+            : {}),
+          ...(p.projectKey
+            ? { projectKey: p.projectKey }
+            : inheritedProjectKey
+              ? { projectKey: inheritedProjectKey }
+              : {}),
+          asOf: new Date(this.#now()).toISOString(),
+          limit: p.limit === undefined ? 10 : Number(p.limit),
+        });
       } else if (request.method === "model.policy.get") {
         requirePermission(principal, "read:state");
         result = {
@@ -5689,6 +5748,19 @@ export class Broker {
             "LIMIT_EXCEEDED",
             "The global task queue is full.",
           );
+        const advisoryReceipts = dryRun
+          ? []
+          : await Promise.all(
+              planned.map(
+                async (step) =>
+                  await this.#advisoryModelReceipt(
+                    step.profileId,
+                    step.spawnPolicy,
+                    inheritedProject.cwd as string,
+                    createdAt,
+                  ),
+              ),
+            );
         if (dryRun) {
           result = {
             workflowId,
@@ -5749,6 +5821,7 @@ export class Broker {
                   requestedSpawnPolicy: step.spawnPolicy.requested,
                   effectiveSpawnPolicy: step.spawnPolicy.effective,
                   modelPolicyHash: step.spawnPolicy.policyHash,
+                  advisoryModelReceipt: advisoryReceipts[index]!,
                   compact: {
                     workflowDigest: compact.workflowDigest,
                     transcriptPolicy: compact.transcriptPolicy,
@@ -5814,6 +5887,7 @@ export class Broker {
                   requestedSpawnPolicy: step.spawnPolicy.requested,
                   effectiveSpawnPolicy: step.spawnPolicy.effective,
                   modelPolicyHash: step.spawnPolicy.policyHash,
+                  advisoryModelReceipt: advisoryReceipts[index]!,
                   ...(!compact
                     ? {
                         lifecycleClass: step.lifecycleClass,
@@ -5990,6 +6064,25 @@ export class Broker {
             "LIMIT_EXCEEDED",
             "The global task queue is full.",
           );
+        const advisoryReceipts =
+          p.dryRun === true
+            ? new Map<string, AdvisoryModelReceipt>()
+            : new Map(
+                await Promise.all(
+                  resolvedPlan.map(
+                    async (step) =>
+                      [
+                        step.taskId,
+                        await this.#advisoryModelReceipt(
+                          step.profileId,
+                          step.spawnPolicy,
+                          workflowParent?.cwd,
+                          createdAt,
+                        ),
+                      ] as const,
+                  ),
+                ),
+              );
         if (p.dryRun !== true)
           committedEvent = await this.store.append({
             type: "workflow.created",
@@ -6029,6 +6122,9 @@ export class Broker {
                         requestedSpawnPolicy: step.spawnPolicy.requested,
                         effectiveSpawnPolicy: step.spawnPolicy.effective,
                         modelPolicyHash: step.spawnPolicy.policyHash,
+                        advisoryModelReceipt: advisoryReceipts.get(
+                          step.taskId,
+                        )!,
                       },
                     }
                   : {}),
@@ -7576,6 +7672,89 @@ export class Broker {
       }
     }
     return last;
+  }
+
+  async #modelOptions(
+    input: Pick<
+      BuildModelOptionsInput,
+      | "taskProfile"
+      | "placement"
+      | "modelProfileId"
+      | "projectKey"
+      | "selectedModel"
+      | "asOf"
+      | "limit"
+    >,
+  ): Promise<ModelOptionsView> {
+    try {
+      return buildModelOptions({
+        capabilities: await this.#piCapabilities.snapshot(),
+        policy: this.#modelPolicy,
+        endpointPolicy: this.#endpointPolicy,
+        ...(this.#modelIntelligence
+          ? { modelIntelligence: this.#modelIntelligence }
+          : {}),
+        ...(this.store.state.modelEvidence
+          ? { evidence: this.store.state.modelEvidence }
+          : {}),
+        scheduler: this.#scheduler.snapshot(),
+        fallbackEndpointLimit: this.#scheduler.limits.maxActiveAgents,
+        ...input,
+      });
+    } catch (error) {
+      if (error instanceof OrchestratorError) throw error;
+      const code = error instanceof Error ? error.message : "";
+      if (code === "MODEL_SCOPE_TOO_LARGE")
+        throw new OrchestratorError(
+          "LIMIT_EXCEEDED",
+          `Eligible model scope exceeds ${MODEL_RANKING_POLICY.maxEligibleCandidates} exact pairs.`,
+        );
+      if (code === "MODEL_SCOPE_EMPTY")
+        throw new OrchestratorError(
+          "INVALID_REQUEST",
+          "No installed model is eligible for this task profile.",
+        );
+      if (code === "MODEL_OPTIONS_LIMIT_INVALID")
+        throw new OrchestratorError(
+          "INVALID_REQUEST",
+          "Model option limit is invalid.",
+        );
+      throw error;
+    }
+  }
+
+  async #advisoryModelReceipt(
+    taskProfile: string,
+    spawnPolicy: ResolvedSpawnPolicy,
+    projectKey: string | undefined,
+    asOf: string,
+  ): Promise<AdvisoryModelReceipt> {
+    const options = await this.#modelOptions({
+      taskProfile,
+      placement: spawnPolicy.effective.placement,
+      modelProfileId: spawnPolicy.effective.modelProfileId,
+      ...(projectKey ? { projectKey } : {}),
+      selectedModel: spawnPolicy.effective.model,
+      asOf,
+      limit: MODEL_RANKING_POLICY.maxEligibleCandidates,
+    });
+    const endpoint = resolveEndpoint(
+      spawnPolicy.effective.model,
+      this.#endpointPolicy,
+      this.#scheduler.limits.maxActiveAgents,
+    );
+    return createAdvisoryModelReceipt({
+      options,
+      selectedModel: spawnPolicy.effective.model,
+      selectedEndpoint: modelCapacityView(
+        endpoint.endpointId,
+        endpoint.maxConcurrentAgents,
+        this.#scheduler.snapshot(),
+      ),
+      selectionReason: spawnPolicy.requested.model
+        ? "explicit_override"
+        : "current_default",
+    });
   }
 
   #foundationSourceConfig() {

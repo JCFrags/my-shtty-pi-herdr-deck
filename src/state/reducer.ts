@@ -299,7 +299,7 @@ export function reduce(
           !Array.isArray(definition.dependencies) ||
           definition.dependencies.some((item) => typeof item !== "string") ||
           !project ||
-          Object.keys(project).length !== 7 ||
+          ![7, 8].includes(Object.keys(project).length) ||
           ![
             "cwd",
             "workspaceId",
@@ -309,6 +309,8 @@ export function reduce(
             "modelPolicyHash",
             "compact",
           ].every((field) => Object.hasOwn(project, field)) ||
+          (Object.keys(project).length === 8 &&
+            !Object.hasOwn(project, "advisoryModelReceipt")) ||
           typeof project.cwd !== "string" ||
           typeof project.workspaceId !== "string" ||
           !compact ||
