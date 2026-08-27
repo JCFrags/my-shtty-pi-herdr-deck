@@ -3696,10 +3696,18 @@ export class Broker {
             "The model allowlist must include every effective default.",
             { details: { missingDefaults } },
           );
+        const endpointsValue =
+          p.endpoints === null ||
+          (typeof p.endpoints === "object" &&
+            p.endpoints !== null &&
+            !Array.isArray(p.endpoints) &&
+            Object.keys(p.endpoints).length === 0)
+            ? undefined
+            : p.endpoints;
         let validatedSettings;
         try {
           validatedSettings = validateEndpointPolicyConfig(
-            p.endpoints === null ? undefined : p.endpoints,
+            endpointsValue,
             p.modelIntelligence === null ? undefined : p.modelIntelligence,
           );
         } catch (error) {
