@@ -65,13 +65,14 @@ import {
   modelFamily,
   runtimeSubjectForRun,
 } from "../model-intelligence/evidence-producers.js";
-import type {
-  HerdrTaskMetadata,
-  HerdrMetadataState,
-  QuestionRecord,
-  StoredEvent,
-  Task,
-  Run,
+import {
+  AGENT_STATES,
+  type HerdrTaskMetadata,
+  type HerdrMetadataState,
+  type QuestionRecord,
+  type StoredEvent,
+  type Task,
+  type Run,
 } from "../state/types.js";
 import { DeterministicScheduler } from "../scheduler/scheduler.js";
 import {
@@ -3939,18 +3940,6 @@ export class Broker {
       } else if (request.method === "agent.list") {
         requirePermission(principal, "read:state");
         const p = request.params;
-        const agentStates = [
-          "provisioning",
-          "starting",
-          "idle",
-          "working",
-          "blocked",
-          "stopping",
-          "stopped",
-          "failed",
-          "orphaned",
-          "replaced",
-        ];
         if (
           !exactKeys(p, [
             "ids",
@@ -3971,7 +3960,8 @@ export class Broker {
               p.ids.some((id) => !safeText(id, 256)))) ||
           (p.managed !== undefined && typeof p.managed !== "boolean") ||
           (p.state !== undefined &&
-            (!safeText(p.state, 64) || !agentStates.includes(p.state))) ||
+            (!safeText(p.state, 64) ||
+              !AGENT_STATES.some((state) => state === p.state))) ||
           (p.profileId !== undefined && !safeText(p.profileId, 256)) ||
           (p.taskId !== undefined && !safeText(p.taskId, 256)) ||
           (p.workspaceId !== undefined && !safeText(p.workspaceId, 256)) ||

@@ -26,7 +26,7 @@ const inputs: Record<string, Record<string, unknown>> = {
     wait: false,
   },
   agent_model_options: { profileId: "scout", limit: 5 },
-  agent_list: {},
+  agent_list: { state: "stopped" },
   agent_get: { agentId: "child" },
   agent_prompt: {
     agentId: "child",
@@ -208,12 +208,28 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
     "scout",
     "test-runner",
   ]);
+  const agentListTool = tools.find((item) => item.name === "agent_list");
   const agentListProperties = (
-    tools.find((item) => item.name === "agent_list")?.parameters as {
+    agentListTool?.parameters as {
       properties?: Record<string, unknown>;
     }
   ).properties;
   assert.equal(Object.hasOwn(agentListProperties ?? {}, "include"), false);
+  await assert.rejects(
+    (
+      agentListTool?.execute as unknown as (
+        ...args: unknown[]
+      ) => Promise<unknown>
+    )(
+      "invalid-agent-state",
+      { state: "succeeded" },
+      AbortSignal.timeout(1000),
+      undefined,
+      {},
+    ),
+    /INVALID_REQUEST/,
+  );
+  assert.equal(calls.length, 27);
 });
 
 test("delegate wait polls task state through automatic execution", async () => {
