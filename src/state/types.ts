@@ -1,16 +1,18 @@
 import type { EntityKind } from "../shared/ids.js";
 import type { ModelEvidenceState } from "../model-intelligence/model-evidence.js";
-export type AgentState =
-  | "provisioning"
-  | "starting"
-  | "idle"
-  | "working"
-  | "blocked"
-  | "stopping"
-  | "stopped"
-  | "failed"
-  | "orphaned"
-  | "replaced";
+export const AGENT_STATES = [
+  "provisioning",
+  "starting",
+  "idle",
+  "working",
+  "blocked",
+  "stopping",
+  "stopped",
+  "failed",
+  "orphaned",
+  "replaced",
+] as const;
+export type AgentState = (typeof AGENT_STATES)[number];
 export type TaskState =
   | "draft"
   | "queued"

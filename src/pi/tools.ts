@@ -16,6 +16,7 @@ import type { CorrelationState } from "./correlation.js";
 import type { PiBrokerClient } from "./broker-client.js";
 import type { PiApiLike, PiContextLike } from "./types.js";
 import { SHIPPED_TASK_PROFILES } from "../broker/model-policy.js";
+import { AGENT_STATES } from "../state/types.js";
 
 const MAX_BODY_BYTES = 262_144;
 const MAX_TEXT_BYTES = 16_384;
@@ -447,7 +448,10 @@ function assertExactObject(
   )
     throw new Error("INVALID_REQUEST");
 }
-function validateExactNested(input: Record<string, unknown>): void {
+function validateExactNested(
+  tool: ParentToolName,
+  input: Record<string, unknown>,
+): void {
   const arrayFields = new Set([
     "ids",
     "taskIds",
@@ -692,10 +696,10 @@ function validateExactNested(input: Record<string, unknown>): void {
     }
     if (key === "state") {
       const values = Array.isArray(value) ? value : [value];
-      if (
-        values.some(
-          (item) =>
-            ![
+      const allowedStates =
+        tool === "agent_list"
+          ? AGENT_STATES
+          : [
               "queued",
               "provisioning",
               "running",
@@ -709,9 +713,8 @@ function validateExactNested(input: Record<string, unknown>): void {
               "working",
               "connected",
               "disconnected",
-            ].includes(item as string),
-        )
-      )
+            ];
+      if (values.some((item) => !allowedStates.some((state) => state === item)))
         throw new Error("INVALID_REQUEST");
       continue;
     }
@@ -727,7 +730,7 @@ function validateParentInput(
     (parentRequired[tool] ?? []).some((key) => !Object.hasOwn(input, key))
   )
     throw new Error("INVALID_REQUEST");
-  validateExactNested(input);
+  validateExactNested(tool, input);
   for (const [key, value] of Object.entries(input)) {
     if (
       [
