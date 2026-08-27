@@ -76,6 +76,8 @@ import type {
 import { DeterministicScheduler } from "../scheduler/scheduler.js";
 import {
   resolveEndpoint,
+  validateEndpointPolicyConfig,
+  type EndpointLimit,
   type EndpointPolicyConfig,
   type ModelIntelligenceConfig,
 } from "./endpoint-policy.js";
@@ -129,6 +131,7 @@ import {
   buildModelOptions,
   createAdvisoryModelReceipt,
   modelCapacityView,
+  ratedAutomaticCandidate,
   MODEL_RANKING_POLICY,
   type AdvisoryModelReceipt,
   type BuildModelOptionsInput,
@@ -555,6 +558,12 @@ export function sessionKeyMatches(
 ): boolean {
   return expectedSessionKey === received;
 }
+export interface BrokerOperatorSettings {
+  readonly modelPolicy: ModelPolicyConfig;
+  readonly endpoints?: Readonly<Record<string, EndpointLimit>>;
+  readonly modelIntelligence?: ModelIntelligenceConfig;
+}
+
 export interface BrokerOptions {
   herdr?: HerdrService;
   now?: () => number;
@@ -572,6 +581,7 @@ export interface BrokerOptions {
   foundationCredentialProvider?: () => Promise<string | undefined>;
   lifecyclePolicy?: { autoCloseCompletedTemporary?: boolean };
   persistModelPolicy?: (policy: ModelPolicyConfig) => Promise<void>;
+  persistOperatorSettings?: (settings: BrokerOperatorSettings) => Promise<void>;
   persistLifecyclePolicy?: (policy: {
     autoCloseCompletedTemporary?: boolean;
   }) => Promise<void>;
@@ -632,8 +642,8 @@ export class Broker {
   #clearTimeout: (timer: NodeJS.Timeout) => void;
   #herdr?: HerdrService;
   #modelPolicy: ModelPolicyConfig;
-  readonly #endpointPolicy: EndpointPolicyConfig;
-  readonly #modelIntelligence: ModelIntelligenceConfig | undefined;
+  #endpointPolicy: EndpointPolicyConfig;
+  #modelIntelligence: ModelIntelligenceConfig | undefined;
   readonly #foundationAdapter: ArtificialAnalysisFoundationAdapter;
   readonly #foundationCredentialProvider:
     (() => Promise<string | undefined>) | undefined;
@@ -641,6 +651,8 @@ export class Broker {
   readonly #piCapabilities = new InstalledPiCapabilities();
   readonly #persistModelPolicy:
     ((policy: ModelPolicyConfig) => Promise<void>) | undefined;
+  readonly #persistOperatorSettings:
+    ((settings: BrokerOperatorSettings) => Promise<void>) | undefined;
   readonly #persistLifecyclePolicy:
     | ((policy: { autoCloseCompletedTemporary?: boolean }) => Promise<void>)
     | undefined;
@@ -687,6 +699,7 @@ export class Broker {
       ),
     );
     this.#persistModelPolicy = options.persistModelPolicy;
+    this.#persistOperatorSettings = options.persistOperatorSettings;
     this.#persistLifecyclePolicy = options.persistLifecyclePolicy;
     this.#autoCloseCompletedTemporary =
       options.lifecyclePolicy?.autoCloseCompletedTemporary === true;
@@ -3550,11 +3563,6 @@ export class Broker {
           );
         result = this.#foundationStatusView();
       } else if (request.method === "model.foundation.refresh") {
-        if (!["human", "cli", "deck"].includes(principal.kind))
-          throw new OrchestratorError(
-            "PERMISSION_DENIED",
-            "Foundation refresh requires an operator client.",
-          );
         requirePermission(principal, "configure");
         if (!exactKeys(request.params, []))
           throw new OrchestratorError(
@@ -3619,10 +3627,157 @@ export class Broker {
         requirePermission(principal, "read:state");
         result = {
           policy: this.#modelPolicy,
+          operatorSettings: {
+            endpoints: this.#endpointPolicy.endpoints ?? {},
+            modelIntelligence: this.#modelIntelligence ?? {
+              schemaVersion: 1,
+              routingMode: "current_default",
+              mappings: [],
+            },
+            foundationStatus: this.#foundationStatusView(),
+          },
           lifecyclePolicy: {
             autoCloseCompletedTemporary: this.#autoCloseCompletedTemporary,
           },
           precedence: ["task", "project", "role", "global", "legacy-profile"],
+        };
+      } else if (request.method === "model.operator.settings.set") {
+        requirePermission(principal, "configure");
+        if (!this.#persistOperatorSettings)
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Agent settings require persistent broker configuration.",
+          );
+        const p = request.params;
+        if (!exactKeys(p, ["allowlist", "endpoints", "modelIntelligence"]))
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Agent settings batch is invalid.",
+          );
+        const allowlist =
+          p.allowlist === null
+            ? undefined
+            : Array.isArray(p.allowlist) &&
+                p.allowlist.length >= 1 &&
+                p.allowlist.length <= 64
+              ? p.allowlist.map((selection) =>
+                  validateModelSelection(selection),
+                )
+              : null;
+        if (allowlist === null)
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Model allowlist is invalid.",
+          );
+        if (
+          allowlist?.some((selection, index) =>
+            allowlist
+              .slice(0, index)
+              .some((candidate) => sameModelSelection(candidate, selection)),
+          )
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Model allowlist entries must be unique.",
+          );
+        const nextPolicy = { ...this.#modelPolicy };
+        if (allowlist) nextPolicy.allowlist = allowlist;
+        else delete nextPolicy.allowlist;
+        const missingDefaults = requiredModelSelections(nextPolicy).filter(
+          (required) =>
+            allowlist &&
+            !allowlist.some((selection) =>
+              sameModelSelection(selection, required),
+            ),
+        );
+        if (missingDefaults.length > 0)
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "The model allowlist must include every effective default.",
+            { details: { missingDefaults } },
+          );
+        let validatedSettings;
+        try {
+          validatedSettings = validateEndpointPolicyConfig(
+            p.endpoints === null ? undefined : p.endpoints,
+            p.modelIntelligence === null ? undefined : p.modelIntelligence,
+          );
+        } catch (error) {
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            error instanceof Error
+              ? error.message
+              : "Agent settings are invalid.",
+          );
+        }
+        const capabilities = await this.#piCapabilities.snapshot();
+        await Promise.all(
+          (allowlist ?? []).map(
+            async (selection) => await this.#piCapabilities.validate(selection),
+          ),
+        );
+        for (const mapping of validatedSettings.modelIntelligence?.mappings ??
+          []) {
+          const installed = capabilities.models.some(
+            (candidate) =>
+              candidate.provider === mapping.provider &&
+              (mapping.modelId === undefined ||
+                candidate.modelId === mapping.modelId),
+          );
+          const allowed =
+            !allowlist ||
+            allowlist.some(
+              (selection) =>
+                selection.provider === mapping.provider &&
+                (mapping.modelId === undefined ||
+                  selection.modelId === mapping.modelId),
+            );
+          if (!installed || !allowed)
+            throw new OrchestratorError(
+              "INVALID_REQUEST",
+              "Endpoint mappings must reference installed allowed models.",
+            );
+        }
+        const nextEndpointPolicy: EndpointPolicyConfig = {
+          ...(validatedSettings.endpoints
+            ? { endpoints: validatedSettings.endpoints }
+            : {}),
+          ...(validatedSettings.modelIntelligence
+            ? { mappings: validatedSettings.modelIntelligence.mappings }
+            : {}),
+        };
+        await this.#persistOperatorSettings({
+          modelPolicy: nextPolicy,
+          ...(validatedSettings.endpoints
+            ? { endpoints: validatedSettings.endpoints }
+            : {}),
+          ...(validatedSettings.modelIntelligence
+            ? { modelIntelligence: validatedSettings.modelIntelligence }
+            : {}),
+        });
+        this.#modelPolicy = nextPolicy;
+        this.#endpointPolicy = nextEndpointPolicy;
+        this.#modelIntelligence = validatedSettings.modelIntelligence;
+        this.#scheduler.replaceEndpointLimits(
+          Object.fromEntries(
+            Object.entries(nextEndpointPolicy.endpoints ?? {}).map(
+              ([endpointId, limit]) => [endpointId, limit.maxConcurrentAgents],
+            ),
+          ),
+        );
+        result = {
+          accepted: true,
+          persisted: true,
+          policy: this.#modelPolicy,
+          operatorSettings: {
+            endpoints: this.#endpointPolicy.endpoints ?? {},
+            modelIntelligence: this.#modelIntelligence ?? {
+              schemaVersion: 1,
+              routingMode: "current_default",
+              mappings: [],
+            },
+            foundationStatus: this.#foundationStatusView(),
+          },
         };
       } else if (request.method === "lifecycle.policy.set") {
         requirePermission(principal, "configure");
@@ -5600,7 +5755,7 @@ export class Broker {
             "Delegation steps are invalid.",
           );
         const workflowId = createId("wfl");
-        const planned = steps.map((raw) => {
+        let planned = steps.map((raw) => {
           const record = raw as Record<string, unknown>;
           const profileId = record.profileId as string;
           const requested = compact
@@ -5676,6 +5831,14 @@ export class Broker {
             isolation: resolveIsolation(profileId, requested),
             spawnPolicy,
             endpointId: endpoint.endpointId,
+            routingOptions: undefined as ModelOptionsView | undefined,
+            selectionReason: (request.method === "agent.spawn" && p.model
+              ? "explicit_override"
+              : "current_default") as
+              | "explicit_override"
+              | "current_default"
+              | "rated_auto"
+              | "insufficient_evidence",
             lifecycleClass:
               request.method === "agent.spawn" &&
               typeof p.lifecycleClass === "string"
@@ -5686,6 +5849,67 @@ export class Broker {
               (p.keepForReuse === true || p.lifecycleClass === "reusable"),
           };
         });
+        if (
+          request.method === "agent.spawn" &&
+          p.model === undefined &&
+          this.#modelIntelligence?.routingMode === "rated_auto"
+        ) {
+          planned = await Promise.all(
+            planned.map(async (step) => {
+              const routingOptions = await this.#modelOptions({
+                taskProfile: step.profileId,
+                placement: step.spawnPolicy.effective.placement,
+                modelProfileId: step.spawnPolicy.effective.modelProfileId,
+                projectKey: inheritedProject.cwd as string,
+                selectedModel: step.spawnPolicy.effective.model,
+                asOf: createdAt,
+                limit: MODEL_RANKING_POLICY.maxEligibleCandidates,
+              });
+              const candidate = ratedAutomaticCandidate(routingOptions);
+              if (!candidate)
+                return {
+                  ...step,
+                  routingOptions,
+                  selectionReason: "insufficient_evidence" as const,
+                };
+              const automatic = resolveSpawnPolicy(
+                {
+                  taskProfileId: step.profileId,
+                  placement: step.spawnPolicy.effective.placement,
+                  modelProfileId: step.spawnPolicy.effective.modelProfileId,
+                  projectKey: inheritedProject.cwd as string,
+                  model: candidate.selection,
+                },
+                this.#modelPolicy,
+              );
+              const spawnPolicy: ResolvedSpawnPolicy = {
+                ...automatic,
+                requested: step.spawnPolicy.requested,
+              };
+              const selectedOptions = await this.#modelOptions({
+                taskProfile: step.profileId,
+                placement: spawnPolicy.effective.placement,
+                modelProfileId: spawnPolicy.effective.modelProfileId,
+                projectKey: inheritedProject.cwd as string,
+                selectedModel: spawnPolicy.effective.model,
+                asOf: createdAt,
+                limit: MODEL_RANKING_POLICY.maxEligibleCandidates,
+              });
+              const endpoint = resolveEndpoint(
+                spawnPolicy.effective.model,
+                this.#endpointPolicy,
+                this.#scheduler.limits.maxActiveAgents,
+              );
+              return {
+                ...step,
+                spawnPolicy,
+                endpointId: endpoint.endpointId,
+                routingOptions: selectedOptions,
+                selectionReason: "rated_auto" as const,
+              };
+            }),
+          );
+        }
         const taskIds = planned.map(() => createId("tsk"));
         try {
           validateWorkflow({
@@ -5758,6 +5982,8 @@ export class Broker {
                     step.spawnPolicy,
                     inheritedProject.cwd as string,
                     createdAt,
+                    step.routingOptions,
+                    step.selectionReason,
                   ),
               ),
             );
@@ -7728,16 +7954,24 @@ export class Broker {
     spawnPolicy: ResolvedSpawnPolicy,
     projectKey: string | undefined,
     asOf: string,
+    frozenOptions?: ModelOptionsView,
+    frozenReason?:
+      | "explicit_override"
+      | "current_default"
+      | "rated_auto"
+      | "insufficient_evidence",
   ): Promise<AdvisoryModelReceipt> {
-    const options = await this.#modelOptions({
-      taskProfile,
-      placement: spawnPolicy.effective.placement,
-      modelProfileId: spawnPolicy.effective.modelProfileId,
-      ...(projectKey ? { projectKey } : {}),
-      selectedModel: spawnPolicy.effective.model,
-      asOf,
-      limit: MODEL_RANKING_POLICY.maxEligibleCandidates,
-    });
+    const options =
+      frozenOptions ??
+      (await this.#modelOptions({
+        taskProfile,
+        placement: spawnPolicy.effective.placement,
+        modelProfileId: spawnPolicy.effective.modelProfileId,
+        ...(projectKey ? { projectKey } : {}),
+        selectedModel: spawnPolicy.effective.model,
+        asOf,
+        limit: MODEL_RANKING_POLICY.maxEligibleCandidates,
+      }));
     const endpoint = resolveEndpoint(
       spawnPolicy.effective.model,
       this.#endpointPolicy,
@@ -7751,9 +7985,9 @@ export class Broker {
         endpoint.maxConcurrentAgents,
         this.#scheduler.snapshot(),
       ),
-      selectionReason: spawnPolicy.requested.model
-        ? "explicit_override"
-        : "current_default",
+      selectionReason:
+        frozenReason ??
+        (spawnPolicy.requested.model ? "explicit_override" : "current_default"),
     });
   }
 

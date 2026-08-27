@@ -665,7 +665,7 @@ test("broker domain wire persists correlated result, question, workflow, and rep
       validateAdvisoryModelReceipt(
         broker.store.state.tasks[workflowTaskId]?.project?.advisoryModelReceipt,
       ).mode,
-      "advisory",
+      "current_default",
     );
     const manualTask = resultOf(
       await request(socket, "task.create_m3", {

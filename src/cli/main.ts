@@ -14,7 +14,11 @@ import { access } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createProductionHerdrService } from "../herdr/service.js";
-import { loadConfig, scalarSchedulerLimits } from "../ops/config.js";
+import {
+  loadConfig,
+  scalarSchedulerLimits,
+  validateConfig,
+} from "../ops/config.js";
 import { exportState, planRetention } from "../ops/retention.js";
 import { planRetention as planRetentionPolicy } from "../ops/retention-policy.js";
 import { exportBeforeRepair, planRecovery } from "../ops/recovery.js";
@@ -439,6 +443,28 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
               ...persistedBrokerConfig!,
               modelPolicy,
             });
+          },
+          persistOperatorSettings: async (settings) => {
+            const { endpoints: _oldEndpoints, ...schedulerLimits } =
+              persistedBrokerConfig!.scheduler ?? {};
+            const next = validateConfig({
+              ...persistedBrokerConfig!,
+              modelPolicy: settings.modelPolicy,
+              ...(Object.keys(schedulerLimits).length > 0 || settings.endpoints
+                ? {
+                    scheduler: {
+                      ...schedulerLimits,
+                      ...(settings.endpoints
+                        ? { endpoints: settings.endpoints }
+                        : {}),
+                    },
+                  }
+                : { scheduler: undefined }),
+              ...(settings.modelIntelligence
+                ? { modelIntelligence: settings.modelIntelligence }
+                : { modelIntelligence: undefined }),
+            });
+            await persistBrokerConfig(next);
           },
           persistLifecyclePolicy: async (lifecyclePolicy) => {
             await persistBrokerConfig({

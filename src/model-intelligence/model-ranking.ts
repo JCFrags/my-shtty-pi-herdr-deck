@@ -3,6 +3,8 @@ import {
   resolveEndpoint,
   type EndpointPolicyConfig,
   type ModelIntelligenceConfig,
+  type ModelRoutingMode,
+  type ModelRankingProfileConfig,
 } from "../broker/endpoint-policy.js";
 import {
   resolveSpawnPolicy,
@@ -88,7 +90,7 @@ export interface ModelSourceDate {
 export interface ModelOptionsView {
   readonly schemaVersion: 1;
   readonly scorerVersion: 1;
-  readonly mode: "advisory";
+  readonly mode: ModelRoutingMode;
   readonly taskProfile: string;
   readonly asOf: string;
   readonly currentSelection: ModelSelection;
@@ -107,7 +109,7 @@ export interface ModelOptionsView {
 export interface AdvisoryModelReceipt {
   readonly schemaVersion: 1;
   readonly scorerVersion: 1;
-  readonly mode: "advisory";
+  readonly mode: ModelRoutingMode;
   readonly taskProfile: string;
   readonly asOf: string;
   readonly selectedModel: ModelSelection;
@@ -115,7 +117,11 @@ export interface AdvisoryModelReceipt {
   readonly selectedRank: number | null;
   readonly selectedEligible: boolean;
   readonly recommendedMatchesSelection: boolean;
-  readonly selectionReason: "explicit_override" | "current_default";
+  readonly selectionReason:
+    | "explicit_override"
+    | "current_default"
+    | "rated_auto"
+    | "insufficient_evidence";
   readonly modelPolicyHash: string;
   readonly scoringPolicyDigest: string;
   readonly evidenceDigest: string;
@@ -228,9 +234,30 @@ function sourceDates(
     .slice(0, MODEL_RANKING_POLICY.maxSourceDates);
 }
 
+export function modelRankingProfile(
+  modelIntelligence: ModelIntelligenceConfig | undefined,
+  taskProfile: string,
+): ModelRankingProfileConfig {
+  return (
+    modelIntelligence?.profiles?.[taskProfile] ?? {
+      weightsPpm: {
+        taskCapability: MODEL_RANKING_POLICY.weightsPpm.task_capability,
+        protocolReliability:
+          MODEL_RANKING_POLICY.weightsPpm.protocol_reliability,
+        speed: MODEL_RANKING_POLICY.weightsPpm.speed,
+        effectiveCost: MODEL_RANKING_POLICY.weightsPpm.effective_cost,
+        humanPreference: MODEL_RANKING_POLICY.weightsPpm.preference,
+      },
+      uncertaintyPenaltyPpm: MODEL_RANKING_POLICY.uncertaintyPenaltyPpm,
+      tieBandPpm: MODEL_RANKING_POLICY.tieBandPpm,
+    }
+  );
+}
+
 function scoreProjection(
   projection: ModelEvidenceCandidateProjection,
   endpoint: ModelCapacityView,
+  rankingProfile: ModelRankingProfileConfig,
 ): Omit<RankedModelOption, "rank" | "tiedWithPrevious"> {
   const values = {
     taskCapability: projection.taskCapability.valuePpm,
@@ -239,18 +266,17 @@ function scoreProjection(
     effectiveCost: projection.effectiveCost.valuePpm,
     preference: projection.preference.valuePpm,
   };
-  const weights = MODEL_RANKING_POLICY.weightsPpm;
+  const weights = rankingProfile.weightsPpm;
   const utilityPpm = divideHalfUp(
-    BigInt(values.taskCapability) * BigInt(weights.task_capability) +
-      BigInt(values.protocolReliability) *
-        BigInt(weights.protocol_reliability) +
+    BigInt(values.taskCapability) * BigInt(weights.taskCapability) +
+      BigInt(values.protocolReliability) * BigInt(weights.protocolReliability) +
       BigInt(values.speed) * BigInt(weights.speed) +
-      BigInt(values.effectiveCost) * BigInt(weights.effective_cost) +
-      BigInt(values.preference) * BigInt(weights.preference),
+      BigInt(values.effectiveCost) * BigInt(weights.effectiveCost) +
+      BigInt(values.preference) * BigInt(weights.humanPreference),
     BigInt(PPM),
   );
   const uncertaintyPenaltyPpm = divideHalfUp(
-    BigInt(MODEL_RANKING_POLICY.uncertaintyPenaltyPpm) *
+    BigInt(rankingProfile.uncertaintyPenaltyPpm) *
       BigInt(PPM - projection.overallConfidencePpm),
     BigInt(PPM),
   );
@@ -274,6 +300,10 @@ export function buildModelOptions(
   input: BuildModelOptionsInput,
 ): ModelOptionsView {
   const limit = input.limit ?? 10;
+  const rankingProfile = modelRankingProfile(
+    input.modelIntelligence,
+    input.taskProfile,
+  );
   if (
     !Number.isSafeInteger(limit) ||
     limit < 1 ||
@@ -381,6 +411,7 @@ export function buildModelOptions(
           endpoint.maxConcurrentAgents,
           input.scheduler,
         ),
+        rankingProfile,
       );
     })
     .sort(
@@ -394,8 +425,7 @@ export function buildModelOptions(
     const leader = scored[start]!;
     while (
       cursor < scored.length &&
-      leader.scorePpm - scored[cursor]!.scorePpm <=
-        MODEL_RANKING_POLICY.tieBandPpm
+      leader.scorePpm - scored[cursor]!.scorePpm <= rankingProfile.tieBandPpm
     )
       cursor++;
     tieStarts.add(ordered.length);
@@ -407,10 +437,11 @@ export function buildModelOptions(
     tiedWithPrevious: index > 0 && !tieStarts.has(index),
   }));
   const exclusionsDigest = digest("model-option-exclusions", excluded);
-  const scoringPolicyDigest = digest(
-    "model-ranking-policy",
-    MODEL_RANKING_POLICY,
-  );
+  const scoringPolicyDigest = digest("model-ranking-policy", {
+    schemaVersion: MODEL_RANKING_POLICY.schemaVersion,
+    scorerVersion: MODEL_RANKING_POLICY.scorerVersion,
+    ...rankingProfile,
+  });
   const rankingPreimage = {
     taskProfile: input.taskProfile,
     asOf: input.asOf,
@@ -426,7 +457,7 @@ export function buildModelOptions(
   return {
     schemaVersion: 1,
     scorerVersion: 1,
-    mode: "advisory",
+    mode: input.modelIntelligence?.routingMode ?? "current_default",
     taskProfile: input.taskProfile,
     asOf: input.asOf,
     currentSelection: currentPolicy.effective.model,
@@ -443,10 +474,29 @@ export function buildModelOptions(
   };
 }
 
+export function ratedAutomaticCandidate(
+  options: ModelOptionsView,
+): RankedModelOption | undefined {
+  if (options.mode !== "rated_auto") return undefined;
+  const leader = options.candidates[0];
+  const runnerUp = options.candidates[1];
+  if (
+    !leader ||
+    leader.confidencePpm === 0 ||
+    runnerUp?.tiedWithPrevious === true
+  )
+    return undefined;
+  return leader;
+}
+
 export function createAdvisoryModelReceipt(input: {
   readonly options: ModelOptionsView;
   readonly selectedModel: ModelSelection;
-  readonly selectionReason: "explicit_override" | "current_default";
+  readonly selectionReason:
+    | "explicit_override"
+    | "current_default"
+    | "rated_auto"
+    | "insufficient_evidence";
   readonly selectedEndpoint?: ModelCapacityView;
 }): AdvisoryModelReceipt {
   const selectedModel = validateModelSelection(input.selectedModel);
@@ -462,7 +512,7 @@ export function createAdvisoryModelReceipt(input: {
   const withoutDigest = {
     schemaVersion: 1 as const,
     scorerVersion: 1 as const,
-    mode: "advisory" as const,
+    mode: input.options.mode,
     taskProfile: input.options.taskProfile,
     asOf: input.options.asOf,
     selectedModel,
@@ -519,8 +569,7 @@ function validSelection(value: unknown): boolean {
 function validPpm(value: unknown, allowNegative = false): boolean {
   return (
     Number.isSafeInteger(value) &&
-    Number(value) >=
-      (allowNegative ? -MODEL_RANKING_POLICY.uncertaintyPenaltyPpm : 0) &&
+    Number(value) >= (allowNegative ? -PPM : 0) &&
     Number(value) <= PPM
   );
 }
@@ -572,8 +621,7 @@ function validRankedOption(value: unknown): boolean {
     validPpm(option.scorePpm, true) &&
     validPpm(option.utilityPpm) &&
     validPpm(option.uncertaintyPenaltyPpm) &&
-    Number(option.uncertaintyPenaltyPpm) <=
-      MODEL_RANKING_POLICY.uncertaintyPenaltyPpm &&
+    Number(option.uncertaintyPenaltyPpm) <= PPM &&
     validPpm(option.confidencePpm) &&
     Number.isSafeInteger(option.rank) &&
     Number(option.rank) >= 1 &&
@@ -655,7 +703,9 @@ export function validateAdvisoryModelReceipt(
     !exactKeys(receipt, keys) ||
     receipt.schemaVersion !== 1 ||
     receipt.scorerVersion !== 1 ||
-    receipt.mode !== "advisory" ||
+    !["current_default", "advisory", "rated_auto"].includes(
+      String(receipt.mode),
+    ) ||
     typeof receipt.taskProfile !== "string" ||
     !/^[a-z][a-z0-9_-]{0,63}$/u.test(receipt.taskProfile) ||
     typeof receipt.asOf !== "string" ||
@@ -666,9 +716,12 @@ export function validateAdvisoryModelReceipt(
     typeof receipt.selectedEligible !== "boolean" ||
     receipt.selectedEligible !== (receipt.selectedRank !== null) ||
     typeof receipt.recommendedMatchesSelection !== "boolean" ||
-    !["explicit_override", "current_default"].includes(
-      String(receipt.selectionReason),
-    ) ||
+    ![
+      "explicit_override",
+      "current_default",
+      "rated_auto",
+      "insufficient_evidence",
+    ].includes(String(receipt.selectionReason)) ||
     ![
       receipt.modelPolicyHash,
       receipt.scoringPolicyDigest,

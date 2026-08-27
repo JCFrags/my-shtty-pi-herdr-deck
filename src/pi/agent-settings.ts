@@ -7,12 +7,21 @@ import {
   type SettingsListTheme,
 } from "@pi-herdr-deck/tui";
 import {
+  SHIPPED_TASK_PROFILES,
   THINKING_LEVELS,
   requiredModelSelections,
   type ModelPolicyConfig,
   type ModelSelection,
   type ThinkingLevel,
 } from "../broker/model-policy.js";
+import type {
+  EndpointLimit,
+  EndpointMapping,
+  ModelIntelligenceConfig,
+  ModelRankingProfileConfig,
+  ModelRoutingMode,
+} from "../broker/endpoint-policy.js";
+import { modelRankingProfile } from "../model-intelligence/model-ranking.js";
 import type {
   PiCapabilitySnapshot,
   PiModelCapability,
@@ -21,7 +30,12 @@ import type { PiContextLike, PiModelLike } from "./types.js";
 
 const MAX_ALLOWLIST_ENTRIES = 64;
 const MODE_ID = "scope-mode";
+const ROUTING_ID = "routing-mode";
 const SAVE_ID = "save-policy";
+const ENDPOINTS_ID = "endpoint-capacity";
+const MAPPINGS_ID = "endpoint-mappings";
+const PROFILES_ID = "ranking-profiles";
+const FOUNDATION_ID = "foundation-refresh";
 
 export interface AgentSettingsClient {
   readonly connected: boolean;
@@ -31,8 +45,15 @@ export interface AgentSettingsClient {
   ): Promise<unknown>;
 }
 
+interface OperatorSettings {
+  readonly endpoints: Readonly<Record<string, EndpointLimit>>;
+  readonly modelIntelligence: ModelIntelligenceConfig;
+  readonly foundationStatus?: Readonly<Record<string, unknown>>;
+}
+
 interface PolicyResponse {
   readonly policy: ModelPolicyConfig;
+  readonly operatorSettings: OperatorSettings;
 }
 
 interface CatalogModel extends PiModelCapability {
@@ -41,6 +62,9 @@ interface CatalogModel extends PiModelCapability {
 
 interface SettingsResult {
   readonly allowlist: readonly ModelSelection[] | null;
+  readonly endpoints: Readonly<Record<string, EndpointLimit>> | null;
+  readonly modelIntelligence: ModelIntelligenceConfig;
+  readonly refreshFoundation: boolean;
 }
 
 interface AgentSettingsTheme {
@@ -133,7 +157,29 @@ function parseCapabilities(value: unknown): PiCapabilitySnapshot {
 function parsePolicy(value: unknown): PolicyResponse {
   if (!isRecord(value) || !isRecord(value.policy))
     throw new Error("The broker returned an invalid model policy.");
-  return { policy: value.policy as unknown as ModelPolicyConfig };
+  const rawSettings = isRecord(value.operatorSettings)
+    ? value.operatorSettings
+    : {};
+  const endpoints = isRecord(rawSettings.endpoints)
+    ? (rawSettings.endpoints as unknown as Record<string, EndpointLimit>)
+    : {};
+  const modelIntelligence = isRecord(rawSettings.modelIntelligence)
+    ? (rawSettings.modelIntelligence as unknown as ModelIntelligenceConfig)
+    : ({
+        schemaVersion: 1,
+        routingMode: "current_default",
+        mappings: [],
+      } as const);
+  return {
+    policy: value.policy as unknown as ModelPolicyConfig,
+    operatorSettings: {
+      endpoints,
+      modelIntelligence,
+      ...(isRecord(rawSettings.foundationStatus)
+        ? { foundationStatus: rawSettings.foundationStatus }
+        : {}),
+    },
+  };
 }
 
 function buildCatalog(
@@ -290,10 +336,264 @@ function createLevelSubmenu(
   );
 }
 
+function createEndpointSubmenu(
+  endpoints: Record<string, EndpointLimit>,
+  listTheme: SettingsListTheme,
+  done: (selectedValue?: string) => void,
+): Component {
+  const entries = Object.keys(endpoints).sort();
+  const items: SettingItem[] = [
+    ...(entries.length > 0
+      ? entries.map((endpointId) => ({
+          id: endpointId,
+          label: endpointId,
+          currentValue: String(endpoints[endpointId]!.maxConcurrentAgents),
+          values: [
+            ...new Set([
+              endpoints[endpointId]!.maxConcurrentAgents,
+              ...Array.from({ length: 32 }, (_, index) => index + 1),
+            ]),
+          ]
+            .sort((left, right) => left - right)
+            .map(String),
+          description:
+            "Lowering a limit blocks new admission. It does not stop active agents.",
+        }))
+      : [
+          {
+            id: "none",
+            label: "Configured endpoints",
+            currentValue: "none",
+            values: ["none"],
+            description:
+              "Add endpoint IDs in the owner config before assigning model mappings.",
+          },
+        ]),
+    {
+      id: SAVE_ID,
+      label: "Apply endpoint limits",
+      currentValue: "apply",
+      values: ["apply"],
+    },
+  ];
+  return new SettingsList(
+    items,
+    Math.min(items.length + 2, 12),
+    listTheme,
+    (id, value) => {
+      if (id === SAVE_ID) {
+        done(`${String(Object.keys(endpoints).length)} configured`);
+        return;
+      }
+      if (id !== "none") endpoints[id] = { maxConcurrentAgents: Number(value) };
+    },
+    () => done(undefined),
+  );
+}
+
+function createMappingSubmenu(
+  catalog: readonly CatalogModel[],
+  endpoints: Readonly<Record<string, EndpointLimit>>,
+  mappings: EndpointMapping[],
+  listTheme: SettingsListTheme,
+  done: (selectedValue?: string) => void,
+): Component {
+  const endpointIds = Object.keys(endpoints).sort();
+  const values = ["derived", ...endpointIds];
+  const items: SettingItem[] = [
+    ...catalog.map((model, index) => ({
+      id: `mapping-${index}`,
+      label: `${model.provider}/${model.modelId}`,
+      currentValue:
+        mappings.find(
+          (mapping) =>
+            mapping.provider === model.provider &&
+            mapping.modelId === model.modelId,
+        )?.endpointId ?? "derived",
+      values,
+      description:
+        "An exact model mapping overrides a provider mapping. Derived uses the provider fallback.",
+    })),
+    {
+      id: SAVE_ID,
+      label: "Apply endpoint mappings",
+      currentValue: "apply",
+      values: ["apply"],
+    },
+  ];
+  return new SettingsList(
+    items,
+    Math.min(items.length + 2, 12),
+    listTheme,
+    (id, value) => {
+      if (id === SAVE_ID) {
+        done(`${String(mappings.length)} configured`);
+        return;
+      }
+      const index = Number(id.slice("mapping-".length));
+      const model = catalog[index];
+      if (!model) return;
+      const existing = mappings.findIndex(
+        (mapping) =>
+          mapping.provider === model.provider &&
+          mapping.modelId === model.modelId,
+      );
+      const prior = existing >= 0 ? mappings[existing] : undefined;
+      if (existing >= 0) mappings.splice(existing, 1);
+      if (value !== "derived")
+        mappings.push({
+          provider: model.provider,
+          modelId: model.modelId,
+          endpointId: value,
+          ...(prior?.canonicalModelId
+            ? { canonicalModelId: prior.canonicalModelId }
+            : {}),
+          ...(prior?.quantization ? { quantization: prior.quantization } : {}),
+        });
+    },
+    () => done(undefined),
+  );
+}
+
+function ppmValues(current: number): string[] {
+  return [
+    ...new Set([
+      current,
+      ...Array.from({ length: 21 }, (_, index) => index * 50_000),
+    ]),
+  ]
+    .sort((left, right) => left - right)
+    .map(String);
+}
+
+function profileSummary(profile: ModelRankingProfileConfig): string {
+  const weights = profile.weightsPpm;
+  return `${weights.taskCapability / 10_000}/${weights.protocolReliability / 10_000}/${weights.speed / 10_000}/${weights.effectiveCost / 10_000}/${weights.humanPreference / 10_000}%`;
+}
+
+function createProfileSubmenu(
+  profileId: string,
+  profile: ModelRankingProfileConfig,
+  profiles: Record<string, ModelRankingProfileConfig>,
+  ui: AgentSettingsUi,
+  listTheme: SettingsListTheme,
+  done: (selectedValue?: string) => void,
+): Component {
+  const draft = structuredClone(profile);
+  const mutableDraft = draft as unknown as {
+    weightsPpm: Record<string, number>;
+    uncertaintyPenaltyPpm: number;
+    tieBandPpm: number;
+  };
+  const fields = [
+    ["taskCapability", "Task capability"],
+    ["protocolReliability", "Protocol reliability"],
+    ["speed", "Endpoint speed"],
+    ["effectiveCost", "Effective cost"],
+    ["humanPreference", "Human preference"],
+  ] as const;
+  const items: SettingItem[] = [
+    ...fields.map(([key, label]) => ({
+      id: key,
+      label,
+      currentValue: String(draft.weightsPpm[key]),
+      values: ppmValues(draft.weightsPpm[key]),
+    })),
+    {
+      id: "uncertaintyPenaltyPpm",
+      label: "Uncertainty penalty",
+      currentValue: String(draft.uncertaintyPenaltyPpm),
+      values: ppmValues(draft.uncertaintyPenaltyPpm),
+    },
+    {
+      id: "tieBandPpm",
+      label: "Tie band",
+      currentValue: String(draft.tieBandPpm),
+      values: ppmValues(draft.tieBandPpm),
+    },
+    {
+      id: SAVE_ID,
+      label: `Apply ${profileId} scoring`,
+      currentValue: "apply",
+      values: ["apply"],
+    },
+  ];
+  return new SettingsList(
+    items,
+    Math.min(items.length + 2, 12),
+    listTheme,
+    (id, value) => {
+      if (id === SAVE_ID) {
+        const total = Object.values(draft.weightsPpm).reduce(
+          (sum, item) => sum + item,
+          0,
+        );
+        if (total !== 1_000_000) {
+          ui.notify("Profile weights must total 1000000 PPM.", "warning");
+          return;
+        }
+        profiles[profileId] = draft;
+        done(profileSummary(draft));
+        return;
+      }
+      if (id === "uncertaintyPenaltyPpm" || id === "tieBandPpm")
+        mutableDraft[id] = Number(value);
+      else mutableDraft.weightsPpm[id] = Number(value);
+    },
+    () => done(undefined),
+  );
+}
+
+function createProfilesSubmenu(
+  profiles: Record<string, ModelRankingProfileConfig>,
+  ui: AgentSettingsUi,
+  listTheme: SettingsListTheme,
+  done: (selectedValue?: string) => void,
+): Component {
+  const profileIds = Object.keys(profiles).sort();
+  const items: SettingItem[] = [
+    ...profileIds.map((profileId) => ({
+      id: profileId,
+      label: profileId,
+      currentValue: profileSummary(profiles[profileId]!),
+      description:
+        "Order: capability, protocol, speed, cost, human preference.",
+      submenu: (
+        _currentValue: string,
+        close: (selectedValue?: string) => void,
+      ) =>
+        createProfileSubmenu(
+          profileId,
+          profiles[profileId]!,
+          profiles,
+          ui,
+          listTheme,
+          close,
+        ),
+    })),
+    {
+      id: SAVE_ID,
+      label: "Apply scoring profiles",
+      currentValue: "apply",
+      values: ["apply"],
+    },
+  ];
+  return new SettingsList(
+    items,
+    Math.min(items.length + 2, 12),
+    listTheme,
+    (id) => {
+      if (id === SAVE_ID) done(`${String(profileIds.length)} profiles`);
+    },
+    () => done(undefined),
+  );
+}
+
 async function editPolicy(
   context: PiContextLike,
   catalog: readonly CatalogModel[],
   policy: ModelPolicyConfig,
+  operatorSettings: OperatorSettings,
 ): Promise<SettingsResult | undefined> {
   if (!("custom" in context.ui) || typeof context.ui.custom !== "function") {
     context.ui.notify?.(
@@ -308,15 +608,56 @@ async function editPolicy(
   const selected = selectedByModel(policy.allowlist ?? required);
   addRequiredSelections(selected, required);
   let mode = policy.allowlist ? "restricted" : "unrestricted";
+  let routingMode: ModelRoutingMode =
+    operatorSettings.modelIntelligence.routingMode ?? "current_default";
+  const endpoints = structuredClone(operatorSettings.endpoints) as Record<
+    string,
+    EndpointLimit
+  >;
+  const mappings = structuredClone(
+    operatorSettings.modelIntelligence.mappings,
+  ) as EndpointMapping[];
+  const configuredProfileIds = Object.keys(
+    operatorSettings.modelIntelligence.profiles ?? {},
+  );
+  const profileIds = [
+    ...new Set([...SHIPPED_TASK_PROFILES, ...configuredProfileIds]),
+  ];
+  const profiles = Object.fromEntries(
+    profileIds.map((profileId) => [
+      profileId,
+      structuredClone(
+        modelRankingProfile(operatorSettings.modelIntelligence, profileId),
+      ),
+    ]),
+  ) as Record<string, ModelRankingProfileConfig>;
+  let refreshFoundation = false;
+  const foundationState = String(
+    operatorSettings.foundationStatus?.state ?? "disabled",
+  );
+  const foundationObservedAt =
+    operatorSettings.foundationStatus?.lastGoodObservedAt;
+  const foundationSummary =
+    typeof foundationObservedAt === "string"
+      ? `${foundationState} · ${foundationObservedAt}`
+      : foundationState;
 
   return await ui.custom<SettingsResult | undefined>(
     (_tui, theme, _kb, done) => {
       const listTheme = settingsTheme(theme);
       const container = new Container();
       container.addChild(
-        new Text(theme.fg("accent", theme.bold("Agent model scope")), 1, 1),
+        new Text(theme.fg("accent", theme.bold("Agent settings")), 1, 1),
       );
       const items: SettingItem[] = [
+        {
+          id: ROUTING_ID,
+          label: "Model routing",
+          currentValue: routingMode,
+          values: ["current_default", "advisory", "rated_auto"],
+          description:
+            "rated_auto applies only to direct agent creation when no model is explicit.",
+        },
         {
           id: MODE_ID,
           label: "Scope mode",
@@ -324,6 +665,52 @@ async function editPolicy(
           values: ["unrestricted", "restricted"],
           description:
             "Restricted mode permits only the selected model and thinking-level pairs.",
+        },
+        {
+          id: ENDPOINTS_ID,
+          label: "Endpoint capacity",
+          currentValue: `${String(Object.keys(endpoints).length)} configured`,
+          description: "Edit hard concurrent-agent limits for known endpoints.",
+          submenu: (
+            _currentValue: string,
+            close: (selectedValue?: string) => void,
+          ) => createEndpointSubmenu(endpoints, listTheme, close),
+        },
+        {
+          id: MAPPINGS_ID,
+          label: "Model endpoint mappings",
+          currentValue: `${String(mappings.length)} configured`,
+          description: "Map scoped exact models to configured endpoints.",
+          submenu: (
+            _currentValue: string,
+            close: (selectedValue?: string) => void,
+          ) =>
+            createMappingSubmenu(
+              catalog,
+              endpoints,
+              mappings,
+              listTheme,
+              close,
+            ),
+        },
+        {
+          id: PROFILES_ID,
+          label: "Task-profile scoring",
+          currentValue: `${String(Object.keys(profiles).length)} profiles`,
+          description:
+            "Edit capability, reliability, speed, cost, preference, uncertainty, and tie weights.",
+          submenu: (
+            _currentValue: string,
+            close: (selectedValue?: string) => void,
+          ) => createProfilesSubmenu(profiles, ui, listTheme, close),
+        },
+        {
+          id: FOUNDATION_ID,
+          label: "Foundation source",
+          currentValue: foundationSummary,
+          values: [foundationSummary, "refresh"],
+          description:
+            "Source status is read-only here. Select refresh to request one bounded update.",
         },
         ...catalog.map((model, index) => ({
           id: `model-${index}`,
@@ -361,6 +748,14 @@ async function editPolicy(
         15,
         listTheme,
         (id, value) => {
+          if (id === ROUTING_ID) {
+            routingMode = value as ModelRoutingMode;
+            return;
+          }
+          if (id === FOUNDATION_ID) {
+            refreshFoundation = value === "refresh";
+            return;
+          }
           if (id === MODE_ID) {
             mode = value;
             if (mode === "restricted")
@@ -373,19 +768,36 @@ async function editPolicy(
             return;
           }
           if (id !== SAVE_ID) return;
-          if (mode === "unrestricted") {
-            done({ allowlist: null });
-            return;
-          }
-          const allowlist = flattenSelections(catalog, selected);
-          if (allowlist.length < 1) {
+          const allowlist =
+            mode === "unrestricted"
+              ? null
+              : flattenSelections(catalog, selected);
+          if (allowlist !== null && allowlist.length < 1) {
             ui.notify(
               "Select at least one model and thinking level.",
               "warning",
             );
             return;
           }
-          done({ allowlist });
+          const sortedMappings = [...mappings].sort(
+            (left, right) =>
+              left.provider.localeCompare(right.provider) ||
+              (left.modelId ?? "").localeCompare(right.modelId ?? ""),
+          );
+          done({
+            allowlist,
+            endpoints: Object.keys(endpoints).length > 0 ? endpoints : null,
+            modelIntelligence: {
+              schemaVersion: 1,
+              routingMode,
+              mappings: sortedMappings,
+              profiles,
+              ...(operatorSettings.modelIntelligence.sources
+                ? { sources: operatorSettings.modelIntelligence.sources }
+                : {}),
+            },
+            refreshFoundation,
+          });
         },
         () => done(undefined),
         { enableSearch: true },
@@ -414,7 +826,7 @@ export async function openAgentSettings(
       client.request("model.policy.get", {}),
     ]);
     const capabilities = parseCapabilities(capabilityValue);
-    const { policy } = parsePolicy(policyValue);
+    const { policy, operatorSettings } = parsePolicy(policyValue);
     const catalog = buildCatalog(capabilities, context, policy);
     if (catalog.length < 1) {
       context.ui.notify?.(
@@ -423,18 +835,37 @@ export async function openAgentSettings(
       );
       return;
     }
-    const result = await editPolicy(context, catalog, policy);
+    const result = await editPolicy(context, catalog, policy, operatorSettings);
     if (!result) return;
-    const response = await client.request("model.policy.allowlist.set", {
+    const response = await client.request("model.operator.settings.set", {
       allowlist: result.allowlist,
+      endpoints: result.endpoints,
+      modelIntelligence: result.modelIntelligence,
     });
     const persisted = isRecord(response) && response.persisted === true;
     context.ui.notify?.(
       persisted
-        ? "Agent model settings were saved for new agents."
-        : "Agent model settings changed for this broker run but were not persisted.",
+        ? "Agent settings were saved for new agents."
+        : "Agent settings were not persisted.",
       persisted ? "info" : "warning",
     );
+    if (result.refreshFoundation) {
+      try {
+        const refresh = await client.request("model.foundation.refresh", {});
+        const started = isRecord(refresh) && refresh.started === true;
+        context.ui.notify?.(
+          started
+            ? "Foundation refresh was scheduled."
+            : "Foundation refresh is not enabled.",
+          started ? "info" : "warning",
+        );
+      } catch (error) {
+        context.ui.notify?.(
+          `Agent settings were saved, but foundation refresh failed: ${error instanceof Error ? error.message : String(error)}`,
+          "warning",
+        );
+      }
+    }
   } catch (error) {
     context.ui.notify?.(
       error instanceof Error ? error.message : String(error),

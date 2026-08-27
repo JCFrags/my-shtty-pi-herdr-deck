@@ -9,8 +9,25 @@ export const MAX_FOUNDATION_MODELS = 64;
 export const MAX_FOUNDATION_PROFILES = 32;
 export const MAX_FOUNDATION_REQUESTS = 32;
 export const MAX_FOUNDATION_RECORDS_PER_REFRESH = 256;
+export const MAX_MODEL_RANKING_PROFILES = 32;
+export const PPM_TOTAL = 1_000_000;
 
 export type ArtificialAnalysisMetric = "coding" | "intelligence" | "agentic";
+export type ModelRoutingMode = "current_default" | "advisory" | "rated_auto";
+
+export interface ModelRankingWeightsPpm {
+  readonly taskCapability: number;
+  readonly protocolReliability: number;
+  readonly speed: number;
+  readonly effectiveCost: number;
+  readonly humanPreference: number;
+}
+
+export interface ModelRankingProfileConfig {
+  readonly weightsPpm: ModelRankingWeightsPpm;
+  readonly uncertaintyPenaltyPpm: number;
+  readonly tieBandPpm: number;
+}
 
 export interface ArtificialAnalysisModelMapping {
   readonly canonicalModelId: string;
@@ -45,7 +62,9 @@ export interface EndpointMapping {
 
 export interface ModelIntelligenceConfig {
   readonly schemaVersion: 1;
+  readonly routingMode?: ModelRoutingMode;
   readonly mappings: readonly EndpointMapping[];
+  readonly profiles?: Readonly<Record<string, ModelRankingProfileConfig>>;
   readonly sources?: ModelFoundationSourcesConfig;
 }
 
@@ -130,15 +149,22 @@ export function validateEndpointPolicyConfig(
     if (
       Object.keys(input).some(
         (key) =>
-          key !== "schemaVersion" && key !== "mappings" && key !== "sources",
+          key !== "schemaVersion" &&
+          key !== "routingMode" &&
+          key !== "mappings" &&
+          key !== "profiles" &&
+          key !== "sources",
       ) ||
       input.schemaVersion !== 1 ||
+      (input.routingMode !== undefined &&
+        !["current_default", "advisory", "rated_auto"].includes(
+          String(input.routingMode),
+        )) ||
       !Array.isArray(input.mappings) ||
-      input.mappings.length < 1 ||
       input.mappings.length > MAX_ENDPOINT_MAPPINGS
     )
       throw new Error("modelIntelligence is invalid.");
-    if (!endpoints)
+    if (input.mappings.length > 0 && !endpoints)
       throw new Error(
         "modelIntelligence mappings require scheduler.endpoints.",
       );
@@ -171,7 +197,7 @@ export function validateEndpointPolicyConfig(
           mapping.quantization !== undefined) &&
           mapping.modelId === undefined) ||
         !validConfiguredEndpointId(mapping.endpointId) ||
-        !endpoints[mapping.endpointId]
+        !endpoints?.[mapping.endpointId]
       )
         throw new Error(`modelIntelligence.mappings[${index}] is invalid.`);
       const key = `${mapping.provider}\u0000${mapping.modelId ?? ""}`;
@@ -189,6 +215,73 @@ export function validateEndpointPolicyConfig(
           ? { quantization: mapping.quantization }
           : {}),
       });
+    }
+    let profiles: Record<string, ModelRankingProfileConfig> | undefined;
+    if (input.profiles !== undefined) {
+      const profileInput = object(input.profiles, "modelIntelligence.profiles");
+      const entries = Object.entries(profileInput);
+      if (entries.length < 1 || entries.length > MAX_MODEL_RANKING_PROFILES)
+        throw new Error("modelIntelligence.profiles is invalid.");
+      profiles = {};
+      for (const [profileId, rawProfile] of entries) {
+        if (!/^[a-z][a-z0-9_-]{0,63}$/u.test(profileId))
+          throw new Error("modelIntelligence.profiles is invalid.");
+        const profile = object(
+          rawProfile,
+          `modelIntelligence.profiles.${profileId}`,
+        );
+        const weights = object(
+          profile.weightsPpm,
+          `modelIntelligence.profiles.${profileId}.weightsPpm`,
+        );
+        const weightKeys = [
+          "taskCapability",
+          "protocolReliability",
+          "speed",
+          "effectiveCost",
+          "humanPreference",
+        ] as const;
+        if (
+          Object.keys(profile).some(
+            (key) =>
+              !["weightsPpm", "uncertaintyPenaltyPpm", "tieBandPpm"].includes(
+                key,
+              ),
+          ) ||
+          Object.keys(weights).length !== weightKeys.length ||
+          Object.keys(weights).some(
+            (key) => !weightKeys.includes(key as (typeof weightKeys)[number]),
+          ) ||
+          !weightKeys.every(
+            (key) =>
+              Number.isSafeInteger(weights[key]) &&
+              Number(weights[key]) >= 0 &&
+              Number(weights[key]) <= PPM_TOTAL,
+          ) ||
+          weightKeys.reduce((sum, key) => sum + Number(weights[key]), 0) !==
+            PPM_TOTAL ||
+          !Number.isSafeInteger(profile.uncertaintyPenaltyPpm) ||
+          Number(profile.uncertaintyPenaltyPpm) < 0 ||
+          Number(profile.uncertaintyPenaltyPpm) > PPM_TOTAL ||
+          !Number.isSafeInteger(profile.tieBandPpm) ||
+          Number(profile.tieBandPpm) < 0 ||
+          Number(profile.tieBandPpm) > PPM_TOTAL
+        )
+          throw new Error(
+            `modelIntelligence.profiles.${profileId} is invalid.`,
+          );
+        profiles[profileId] = {
+          weightsPpm: {
+            taskCapability: Number(weights.taskCapability),
+            protocolReliability: Number(weights.protocolReliability),
+            speed: Number(weights.speed),
+            effectiveCost: Number(weights.effectiveCost),
+            humanPreference: Number(weights.humanPreference),
+          },
+          uncertaintyPenaltyPpm: Number(profile.uncertaintyPenaltyPpm),
+          tieBandPpm: Number(profile.tieBandPpm),
+        };
+      }
     }
     let sources: ModelFoundationSourcesConfig | undefined;
     if (input.sources !== undefined) {
@@ -303,7 +396,9 @@ export function validateEndpointPolicyConfig(
     }
     modelIntelligence = {
       schemaVersion: 1,
+      routingMode: (input.routingMode ?? "current_default") as ModelRoutingMode,
       mappings,
+      ...(profiles ? { profiles } : {}),
       ...(sources ? { sources } : {}),
     };
   }

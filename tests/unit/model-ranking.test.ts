@@ -7,6 +7,7 @@ import {
   buildModelOptions,
   createAdvisoryModelReceipt,
   modelCapacityView,
+  ratedAutomaticCandidate,
   validateAdvisoryModelReceipt,
 } from "../../src/model-intelligence/model-ranking.js";
 import {
@@ -120,6 +121,35 @@ test("model options rank only installed policy-eligible pairs with deterministic
   );
   assert.equal(view.candidates[1]?.tiedWithPrevious, true);
   assert.deepEqual(view.currentSelection, beta);
+});
+
+test("rated automatic routing requires evidence and a unique leader", () => {
+  const noEvidence = options({
+    modelIntelligence: {
+      schemaVersion: 1,
+      routingMode: "rated_auto",
+      mappings: [],
+    },
+  });
+  assert.equal(ratedAutomaticCandidate(noEvidence), undefined);
+
+  const evidenced = options({
+    evidence: alphaEvidence(),
+    modelIntelligence: {
+      schemaVersion: 1,
+      routingMode: "rated_auto",
+      mappings: [],
+    },
+  });
+  assert.deepEqual(ratedAutomaticCandidate(evidenced)?.selection, alpha);
+  const receipt = createAdvisoryModelReceipt({
+    options: evidenced,
+    selectedModel: alpha,
+    selectionReason: "rated_auto",
+  });
+  assert.equal(receipt.mode, "rated_auto");
+  assert.equal(receipt.selectionReason, "rated_auto");
+  assert.deepEqual(validateAdvisoryModelReceipt(receipt), receipt);
 });
 
 test("quality evidence changes advisory order but never changes the selected model", () => {

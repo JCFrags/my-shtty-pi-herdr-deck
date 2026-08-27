@@ -126,6 +126,62 @@ test("endpoint configuration validates mappings and keeps scheduler scalars sepa
   );
 });
 
+test("routing and scoring config default safely and validate exact PPM totals", () => {
+  const legacy = validateConfig({
+    version: 1,
+    modelIntelligence: { schemaVersion: 1, mappings: [] },
+  });
+  assert.equal(legacy.modelIntelligence?.routingMode, undefined);
+  assert.doesNotThrow(() =>
+    validateConfig({
+      version: 1,
+      modelIntelligence: {
+        schemaVersion: 1,
+        routingMode: "rated_auto",
+        mappings: [],
+        profiles: {
+          scout: {
+            weightsPpm: {
+              taskCapability: 450_000,
+              protocolReliability: 250_000,
+              speed: 100_000,
+              effectiveCost: 50_000,
+              humanPreference: 150_000,
+            },
+            uncertaintyPenaltyPpm: 100_000,
+            tieBandPpm: 20_000,
+          },
+        },
+      },
+    }),
+  );
+  assert.throws(
+    () =>
+      validateConfig({
+        version: 1,
+        modelIntelligence: {
+          schemaVersion: 1,
+          routingMode: "rated_auto",
+          mappings: [],
+          profiles: {
+            scout: {
+              weightsPpm: {
+                taskCapability: 450_001,
+                protocolReliability: 250_000,
+                speed: 100_000,
+                effectiveCost: 50_000,
+                humanPreference: 150_000,
+              },
+              uncertaintyPenaltyPpm: 100_000,
+              tieBandPpm: 20_000,
+            },
+          },
+        },
+      }),
+    /profiles.scout is invalid/u,
+  );
+});
+
 test("exact endpoint mapping wins and provider fallback is stable", () => {
   assert.deepEqual(resolveEndpoint(selection, endpointConfig, 4), {
     endpointId: "local-host",
@@ -168,6 +224,23 @@ test("capacity-one endpoint queues aliases while collecting still holds the leas
     "alias",
     "remote",
   ]);
+});
+
+test("endpoint limit replacement keeps active leases and blocks only new admission", () => {
+  const scheduler = new DeterministicScheduler(
+    { maxActiveAgents: 4, maxActivePerParent: 4 },
+    { "local-host": 2 },
+  );
+  const tasks = new Map<string, SchedulerTask>([
+    ["active", schedulerTask("active", "running")],
+    ["queued", schedulerTask("queued", "queued", "local-host", 1)],
+  ]);
+  assert.deepEqual(planAdmission(scheduler, tasks).admittedTaskIds, ["queued"]);
+  scheduler.replaceEndpointLimits({ "local-host": 1 });
+  const lowered = planAdmission(scheduler, tasks);
+  assert.deepEqual(lowered.admittedTaskIds, []);
+  assert.equal(lowered.decisions[0]?.reason, "endpoint_capacity");
+  assert.equal(tasks.get("active")?.state, "running");
 });
 
 test("durable task and run projections bind one endpoint lease and queue reason", () => {
