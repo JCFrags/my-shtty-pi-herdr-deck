@@ -116,6 +116,79 @@ test("broker round-trips an empty endpoint settings batch", async () => {
   }
 });
 
+test("explicit-required settings accept any nonempty scope and model options hide defaults", async () => {
+  const root = await mkdtemp(join(tmpdir(), "operator-settings-explicit-"));
+  const runtime = await mkdtemp(
+    join(tmpdir(), "operator-settings-explicit-runtime-"),
+  );
+  const paths = pathsFor(root, runtime);
+  const persisted: BrokerOperatorSettings[] = [];
+  const broker = new Broker(paths, {
+    modelPolicy: { defaults: { global: luna } },
+    persistOperatorSettings: async (settings) => {
+      persisted.push(structuredClone(settings));
+    },
+  });
+  const explicit = {
+    schemaVersion: 1 as const,
+    routingMode: "explicit_required" as const,
+    mappings: [],
+  };
+  try {
+    await broker.start();
+    await assert.rejects(
+      () =>
+        brokerRequest(
+          paths.socket,
+          paths.secret,
+          "model.operator.settings.set",
+          {
+            allowlist: [],
+            endpoints: null,
+            modelIntelligence: explicit,
+          },
+          paths.sessionKey,
+        ),
+      /Model allowlist is invalid/u,
+    );
+
+    const accepted = (await brokerRequest(
+      paths.socket,
+      paths.secret,
+      "model.operator.settings.set",
+      {
+        allowlist: [sol],
+        endpoints: null,
+        modelIntelligence: explicit,
+      },
+      paths.sessionKey,
+    )) as { accepted: boolean; persisted: boolean };
+    assert.equal(accepted.accepted, true);
+    assert.equal(accepted.persisted, true);
+    assert.equal(persisted.length, 1);
+    assert.deepEqual(persisted[0]?.modelPolicy.allowlist, [sol]);
+
+    const modelOptions = (await brokerRequest(
+      paths.socket,
+      paths.secret,
+      "model.options",
+      { profileId: "implementer", limit: 16 },
+      paths.sessionKey,
+    )) as Record<string, unknown> & {
+      candidates: Array<{ selection: ModelSelection }>;
+    };
+    assert.equal("currentSelection" in modelOptions, false);
+    assert.deepEqual(
+      modelOptions.candidates.map((candidate) => candidate.selection),
+      [sol],
+    );
+  } finally {
+    await broker.stop().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+    await rm(runtime, { recursive: true, force: true });
+  }
+});
+
 test("broker persists one validated operator settings batch before runtime apply", async () => {
   const root = await mkdtemp(join(tmpdir(), "operator-settings-"));
   const runtime = await mkdtemp(join(tmpdir(), "operator-settings-runtime-"));

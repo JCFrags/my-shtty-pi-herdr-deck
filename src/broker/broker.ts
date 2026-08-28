@@ -3704,19 +3704,6 @@ export class Broker {
         const nextPolicy = { ...this.#modelPolicy };
         if (allowlist) nextPolicy.allowlist = allowlist;
         else delete nextPolicy.allowlist;
-        const missingDefaults = requiredModelSelections(nextPolicy).filter(
-          (required) =>
-            allowlist &&
-            !allowlist.some((selection) =>
-              sameModelSelection(selection, required),
-            ),
-        );
-        if (missingDefaults.length > 0)
-          throw new OrchestratorError(
-            "INVALID_REQUEST",
-            "The model allowlist must include every effective default.",
-            { details: { missingDefaults } },
-          );
         const endpointsValue =
           p.endpoints === null ||
           (typeof p.endpoints === "object" &&
@@ -3739,6 +3726,23 @@ export class Broker {
               : "Agent settings are invalid.",
           );
         }
+        const missingDefaults = requiredModelSelections(nextPolicy).filter(
+          (required) =>
+            allowlist &&
+            !allowlist.some((selection) =>
+              sameModelSelection(selection, required),
+            ),
+        );
+        if (
+          validatedSettings.modelIntelligence?.routingMode !==
+            "explicit_required" &&
+          missingDefaults.length > 0
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "The model allowlist must include every effective default unless model routing requires an explicit selection.",
+            { details: { missingDefaults } },
+          );
         const capabilities = await this.#piCapabilities.snapshot();
         await Promise.all(
           (allowlist ?? []).map(
@@ -3874,10 +3878,13 @@ export class Broker {
                 sameModelSelection(selection, required),
               ),
           );
-          if (missingDefaults.length > 0)
+          if (
+            this.#modelIntelligence?.routingMode !== "explicit_required" &&
+            missingDefaults.length > 0
+          )
             throw new OrchestratorError(
               "INVALID_REQUEST",
-              "The model allowlist must include every effective default.",
+              "The model allowlist must include every effective default unless model routing requires an explicit selection.",
               { details: { missingDefaults } },
             );
         }

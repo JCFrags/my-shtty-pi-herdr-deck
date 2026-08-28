@@ -120,7 +120,28 @@ test("model options rank only installed policy-eligible pairs with deterministic
     [alpha, beta],
   );
   assert.equal(view.candidates[1]?.tiedWithPrevious, true);
-  assert.deepEqual(view.currentSelection, beta);
+  assert.equal("currentSelection" in view, false);
+});
+
+test("explicit-required options do not require or disclose a configured default", () => {
+  const view = options({
+    policy: {
+      defaults: { global: beta },
+      allowlist: [alpha],
+      compatibility: { scout: ["subagent"] },
+    },
+    modelIntelligence: {
+      schemaVersion: 1,
+      routingMode: "explicit_required",
+      mappings: [],
+    },
+  });
+  assert.deepEqual(
+    view.candidates.map((candidate) => candidate.selection),
+    [alpha],
+  );
+  assert.equal(view.eligibleCount, 1);
+  assert.equal("currentSelection" in view, false);
 });
 
 test("rated automatic routing requires evidence and a unique leader", () => {

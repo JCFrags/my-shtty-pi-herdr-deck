@@ -93,7 +93,6 @@ export interface ModelOptionsView {
   readonly mode: ModelRoutingMode;
   readonly taskProfile: string;
   readonly asOf: string;
-  readonly currentSelection: ModelSelection;
   readonly modelPolicyHash: string;
   readonly scoringPolicyDigest: string;
   readonly evidenceDigest: string;
@@ -310,13 +309,19 @@ export function buildModelOptions(
     limit > MODEL_RANKING_POLICY.maxEligibleCandidates
   )
     throw new Error("MODEL_OPTIONS_LIMIT_INVALID");
+  const routingMode = input.modelIntelligence?.routingMode ?? "current_default";
+  const policySelection =
+    input.selectedModel ??
+    (routingMode === "explicit_required"
+      ? input.policy.allowlist?.[0]
+      : undefined);
   const currentPolicy = resolveSpawnPolicy(
     {
       taskProfileId: input.taskProfile,
       ...(input.placement ? { placement: input.placement } : {}),
       ...(input.modelProfileId ? { modelProfileId: input.modelProfileId } : {}),
       ...(input.projectKey ? { projectKey: input.projectKey } : {}),
-      ...(input.selectedModel ? { model: input.selectedModel } : {}),
+      ...(policySelection ? { model: policySelection } : {}),
     },
     input.policy,
   );
@@ -457,10 +462,9 @@ export function buildModelOptions(
   return {
     schemaVersion: 1,
     scorerVersion: 1,
-    mode: input.modelIntelligence?.routingMode ?? "current_default",
+    mode: routingMode,
     taskProfile: input.taskProfile,
     asOf: input.asOf,
-    currentSelection: currentPolicy.effective.model,
     modelPolicyHash: currentPolicy.policyHash,
     scoringPolicyDigest,
     evidenceDigest: projection.evidenceDigest,
