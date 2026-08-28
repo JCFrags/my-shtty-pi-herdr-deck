@@ -113,6 +113,27 @@ function exactRetainedTabAbsent(
     throw new Error("HERDR_IDENTITY_MISMATCH");
   return true;
 }
+function isDedicatedManagedTab(
+  snapshot: HerdrSnapshot,
+  tabId: string,
+  paneId: string,
+  identity: ExactPiPaneIdentity,
+): boolean {
+  const tabs = snapshot.tabs.filter((item) => item.id === tabId);
+  const panes = snapshot.panes.filter((item) => item.tabId === tabId);
+  const targetPanes = snapshot.panes.filter((item) => item.id === paneId);
+  if (
+    tabs.length !== 1 ||
+    targetPanes.length !== 1 ||
+    identity.tabId !== tabId ||
+    targetPanes[0]!.tabId !== tabId ||
+    panes.length !== 1 ||
+    panes[0]!.id !== paneId
+  )
+    return false;
+  const tabPaneIds = tabs[0]!.panes.map((item) => item.id);
+  return tabPaneIds.length === 1 && tabPaneIds[0] === paneId;
+}
 function exactPiPane(
   snapshot: HerdrSnapshot,
   paneId: string,
@@ -818,6 +839,7 @@ export class HerdrService {
     await this.withAgentLock(agentId, async () => {
       await this.#preflight?.();
       this.#cli.requireMutationCapabilities([
+        "tab.close",
         "pane.close",
         "worktree.remove",
         "session.snapshot",
@@ -918,7 +940,7 @@ export class HerdrService {
           true,
         );
       let removedWorktree = false;
-      await revalidateAndRun(this.#cli, guard, async (identity) => {
+      await revalidateAndRun(this.#cli, guard, async (identity, snapshot) => {
         if (resource?.worktreePath && !resource.worktreeId) {
           if (
             !identity.workspaceId ||
@@ -927,6 +949,16 @@ export class HerdrService {
             throw new Error("HERDR_IDENTITY_MISMATCH");
           await this.#cli.removeWorktree(identity.workspaceId);
           removedWorktree = true;
+        } else if (
+          resource?.tabId &&
+          isDedicatedManagedTab(
+            snapshot,
+            resource.tabId,
+            guard.paneId,
+            identity,
+          )
+        ) {
+          await this.#cli.closeTab(resource.tabId);
         } else {
           await this.#cli.closePane(guard.paneId);
         }
@@ -1139,7 +1171,10 @@ function legacyOccupantIdentity(
 async function revalidateAndRun(
   cli: HerdrCli,
   guard: OccupantGuard,
-  action: (identity: ExactPiPaneIdentity) => Promise<void>,
+  action: (
+    identity: ExactPiPaneIdentity,
+    snapshot: HerdrSnapshot,
+  ) => Promise<void>,
 ): Promise<void> {
   const snapshot = await cli.snapshot();
   const identity =
@@ -1158,7 +1193,7 @@ async function revalidateAndRun(
     identity.generation !== guard.generation
   )
     throw new Error("HERDR_IDENTITY_MISMATCH");
-  await action(identity);
+  await action(identity, snapshot);
   await cli.snapshot();
 }
 
