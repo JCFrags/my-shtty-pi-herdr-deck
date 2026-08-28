@@ -15,7 +15,7 @@
   },
   "tools": {
     "mode": "allowlist",
-    "names": ["read", "bash", "grep", "find", "ls"]
+    "names": ["read", "bash", "local_search", "ls"]
   },
   "isolation": {
     "mode": "shared-readonly",

@@ -15,7 +15,7 @@
   },
   "tools": {
     "mode": "allowlist",
-    "names": ["read", "write", "edit", "bash", "grep", "find", "ls"]
+    "names": ["read", "write", "edit", "bash", "local_search", "ls"]
   },
   "isolation": {
     "mode": "worktree",
