@@ -4131,6 +4131,21 @@ export class Broker {
             "INVALID_REQUEST",
             "Agent control identity is invalid.",
           );
+        if (
+          request.method === "agent.prompt" &&
+          ((p.timeoutMs !== undefined &&
+            (!Number.isSafeInteger(p.timeoutMs) ||
+              Number(p.timeoutMs) < 1 ||
+              Number(p.timeoutMs) > 30_000)) ||
+            p.createTask === true ||
+            ["task", "profileId", "project", "isolation", "budget"].some(
+              (key) => p[key] !== undefined,
+            ))
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "Agent prompt controls are invalid.",
+          );
         const agent = this.store.state.agents[p.agentId];
         if (!agent)
           throw new OrchestratorError(

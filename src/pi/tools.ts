@@ -291,18 +291,7 @@ const parentInputKeys: Readonly<Record<ParentToolName, readonly string[]>> =
       "limit",
     ],
     agent_get: ["agentId", "include", "maxBytes"],
-    agent_prompt: [
-      "agentId",
-      "message",
-      "delivery",
-      "timeoutMs",
-      "createTask",
-      "task",
-      "profileId",
-      "project",
-      "isolation",
-      "budget",
-    ],
+    agent_prompt: ["agentId", "message", "delivery", "timeoutMs"],
     agent_steer: [
       "agentId",
       "message",
@@ -784,7 +773,7 @@ function validateParentInput(
         (value as number) < 1 ||
         (key === "timeoutMs" &&
           (value as number) >
-            (tool === "agent_wait"
+            (tool === "agent_wait" || tool === "agent_prompt"
               ? 30_000
               : tool === "agent_ask"
                 ? 120_000
@@ -1151,7 +1140,8 @@ function parentInputSchema(tool: ParentToolName): unknown {
       ...Object.fromEntries(
         parentInputKeys[tool].map((key) => [
           key,
-          key === "timeoutMs" && tool === "agent_wait"
+          key === "timeoutMs" &&
+          (tool === "agent_wait" || tool === "agent_prompt")
             ? { type: "integer", minimum: 1, maximum: 30_000 }
             : key === "timeoutMs" && tool === "agent_ask"
               ? { type: "integer", minimum: 1, maximum: 120_000 }

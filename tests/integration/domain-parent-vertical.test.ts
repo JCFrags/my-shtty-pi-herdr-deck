@@ -661,6 +661,36 @@ test("parent-bound broker vertical path provisions, assigns, correlates, bounds,
       broker.store.state.runs[runId]?.assignmentDeliveryState,
       "accepted",
     );
+    assert.equal(
+      (
+        await send(p1.socket, "agent.prompt", {
+          agentId: childId,
+          message: "too long",
+          delivery: "normal",
+          timeoutMs: 30_001,
+        })
+      ).ok,
+      false,
+    );
+    assert.equal(Boolean(controlPromptParams), false);
+    assert.equal(
+      (
+        await send(p1.socket, "agent.prompt", {
+          agentId: childId,
+          message: "unsupported new task",
+          delivery: "normal",
+          timeoutMs: 30_000,
+          createTask: true,
+          task: { title: "new", objective: "new" },
+          profileId: "scout",
+          project: { cwd: root },
+          isolation: { mode: "shared-readonly" },
+          budget: { wallTimeMs: 60_000 },
+        })
+      ).ok,
+      false,
+    );
+    assert.equal(Boolean(controlPromptParams), false);
     assert.deepEqual(
       ok(
         await send(p1.socket, "agent.prompt", {
