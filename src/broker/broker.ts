@@ -343,6 +343,15 @@ function isAbortFallbackError(error: unknown): boolean {
 const DEFAULT_TASK_WALL_MS = 15 * 60_000;
 const MAX_TASK_WALL_MS = 24 * 60 * 60_000;
 const MAX_BROKER_CLIENTS = 64;
+export const HEARTBEAT_SNAPSHOT_INTERVAL = 64;
+export function shouldWriteRequestSnapshot(
+  method: string,
+  eventSeq: number,
+): boolean {
+  return (
+    method !== "agent.heartbeat" || eventSeq % HEARTBEAT_SNAPSHOT_INTERVAL === 0
+  );
+}
 const ADAPTER_ABORT_TIMEOUT_MS = 10_000;
 const RESULT_RECOVERY_TIMEOUT_MS = 10_000;
 const RESULT_RECOVERY_PROMPT =
@@ -7023,7 +7032,11 @@ export class Broker {
         if (evidenceEvent) committedEvent = evidenceEvent;
       }
       assertInvariants(this.store.state);
-      if (committedEvent) await this.#writeSnapshotBestEffort();
+      if (
+        committedEvent &&
+        shouldWriteRequestSnapshot(request.method, committedEvent.seq)
+      )
+        await this.#writeSnapshotBestEffort();
       await responseBoundary?.();
       const response = {
         v: 1,
