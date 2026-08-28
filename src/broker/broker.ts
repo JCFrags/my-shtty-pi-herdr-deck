@@ -344,12 +344,14 @@ const DEFAULT_TASK_WALL_MS = 15 * 60_000;
 const MAX_TASK_WALL_MS = 24 * 60 * 60_000;
 const MAX_BROKER_CLIENTS = 64;
 export const HEARTBEAT_SNAPSHOT_INTERVAL = 64;
-export function shouldWriteRequestSnapshot(
+export function shouldCheckpointRequestState(
   method: string,
-  eventSeq: number,
+  eventSeq: number | null,
 ): boolean {
   return (
-    method !== "agent.heartbeat" || eventSeq % HEARTBEAT_SNAPSHOT_INTERVAL === 0
+    eventSeq !== null &&
+    (method !== "agent.heartbeat" ||
+      eventSeq % HEARTBEAT_SNAPSHOT_INTERVAL === 0)
   );
 }
 const ADAPTER_ABORT_TIMEOUT_MS = 10_000;
@@ -7031,12 +7033,15 @@ export class Broker {
           await this.#reconcileAutomaticModelEvidence(pendingRunIds);
         if (evidenceEvent) committedEvent = evidenceEvent;
       }
-      assertInvariants(this.store.state);
       if (
-        committedEvent &&
-        shouldWriteRequestSnapshot(request.method, committedEvent.seq)
-      )
+        shouldCheckpointRequestState(
+          request.method,
+          committedEvent?.seq ?? null,
+        )
+      ) {
+        assertInvariants(this.store.state);
         await this.#writeSnapshotBestEffort();
+      }
       await responseBoundary?.();
       const response = {
         v: 1,
