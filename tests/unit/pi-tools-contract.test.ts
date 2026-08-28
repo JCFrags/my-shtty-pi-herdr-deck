@@ -230,6 +230,40 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
     /INVALID_REQUEST/,
   );
   assert.equal(calls.length, 27);
+  const agentPromptTool = tools.find((item) => item.name === "agent_prompt");
+  const agentPromptProperties = (
+    agentPromptTool?.parameters as {
+      properties?: Record<string, { maximum?: number }>;
+    }
+  ).properties;
+  assert.deepEqual(Object.keys(agentPromptProperties ?? {}).sort(), [
+    "agentId",
+    "delivery",
+    "idempotencyKey",
+    "message",
+    "timeoutMs",
+  ]);
+  assert.equal(agentPromptProperties?.timeoutMs?.maximum, 30_000);
+  await assert.rejects(
+    (
+      agentPromptTool?.execute as unknown as (
+        ...args: unknown[]
+      ) => Promise<unknown>
+    )(
+      "invalid-prompt-timeout",
+      {
+        agentId: "child",
+        message: "x",
+        delivery: "normal",
+        timeoutMs: 30_001,
+      },
+      AbortSignal.timeout(1000),
+      undefined,
+      {},
+    ),
+    /INVALID_REQUEST/u,
+  );
+  assert.equal(calls.length, 27);
 });
 
 test("launch tools add lifecycle reminders only for created work", async () => {
