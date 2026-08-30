@@ -97,6 +97,105 @@ test("M2 fake registration retains files until verified and records lifecycle", 
   );
 });
 
+test("M2 close removes a dedicated managed tab and preserves a tab with another pane", async () => {
+  for (const extraPane of [false, true]) {
+    const root = await mkdtemp(join(tmpdir(), "m2-close-managed-tab-"));
+    const store = new EventStore(join(root, "events.ndjson"));
+    await store.open();
+    const panes = [
+      {
+        id: "pane-managed",
+        terminalId: "terminal-managed",
+        workspaceId: "workspace-1",
+        tabId: "tab-managed",
+      },
+      ...(extraPane
+        ? [
+            {
+              id: "pane-user",
+              terminalId: "terminal-user",
+              workspaceId: "workspace-1",
+              tabId: "tab-managed",
+            },
+          ]
+        : []),
+    ];
+    let tabCloses = 0;
+    let paneCloses = 0;
+    const cli = {
+      requireMutationCapabilities: (capabilities: string[]) =>
+        assert.equal(capabilities.includes("tab.close"), true),
+      snapshot: async () => ({
+        panes,
+        tabs: [
+          {
+            id: "tab-managed",
+            workspaceId: "workspace-1",
+            panes: panes.map((pane) => ({ id: pane.id })),
+          },
+        ],
+        workspaces: [{ id: "workspace-1", tabs: [] }],
+        agents: [
+          {
+            kind: "pi",
+            paneId: "pane-managed",
+            terminalId: "terminal-managed",
+            workspaceId: "workspace-1",
+            tabId: "tab-managed",
+            sessionId: "session-managed",
+          },
+        ],
+        worktrees: [],
+      }),
+      closeTab: async (tabId: string) => {
+        assert.equal(tabId, "tab-managed");
+        tabCloses += 1;
+      },
+      closePane: async (paneId: string) => {
+        assert.equal(paneId, "pane-managed");
+        paneCloses += 1;
+      },
+    } as never;
+    await store.append({
+      type: "herdr.provision.intent",
+      actor: { principalId: "prn_00000000000000000000000000", kind: "system" },
+      entityRefs: { agentId: "agent-managed" },
+      payload: { agentId: "agent-managed" },
+    });
+    await store.append({
+      type: "herdr.provision.outcome",
+      actor: { principalId: "prn_00000000000000000000000000", kind: "system" },
+      entityRefs: { agentId: "agent-managed" },
+      payload: {
+        agentId: "agent-managed",
+        state: "registered",
+        workspaceId: "workspace-1",
+        tabId: "tab-managed",
+        paneId: "pane-managed",
+        terminalId: "terminal-managed",
+        sessionId: "session-managed",
+        generation: 1,
+      },
+    });
+    const service = new HerdrService({
+      store,
+      cli,
+      provisioner: {} as never,
+    });
+    await service.close({
+      paneId: "pane-managed",
+      terminalId: "terminal-managed",
+      sessionId: "session-managed",
+    });
+    assert.equal(tabCloses, extraPane ? 0 : 1);
+    assert.equal(paneCloses, extraPane ? 1 : 0);
+    assert.equal(
+      store.state.herdrResources?.["agent-managed"]?.state,
+      "closed",
+    );
+  }
+});
+
 test("M2 registration remains durable when registration archival fails", async () => {
   const root = await mkdtemp(join(tmpdir(), "m2-archive-failure-"));
   const prompts = join(root, "prompts");

@@ -116,6 +116,161 @@ test("broker round-trips an empty endpoint settings batch", async () => {
   }
 });
 
+test("explicit-required settings accept any nonempty scope and model options hide defaults", async () => {
+  const root = await mkdtemp(join(tmpdir(), "operator-settings-explicit-"));
+  const runtime = await mkdtemp(
+    join(tmpdir(), "operator-settings-explicit-runtime-"),
+  );
+  const paths = pathsFor(root, runtime);
+  const persisted: BrokerOperatorSettings[] = [];
+  const broker = new Broker(paths, {
+    modelPolicy: { defaults: { global: luna } },
+    persistOperatorSettings: async (settings) => {
+      persisted.push(structuredClone(settings));
+    },
+  });
+  const explicit = {
+    schemaVersion: 1 as const,
+    routingMode: "explicit_required" as const,
+    mappings: [],
+  };
+  try {
+    await broker.start();
+    await assert.rejects(
+      () =>
+        brokerRequest(
+          paths.socket,
+          paths.secret,
+          "model.operator.settings.set",
+          {
+            allowlist: [],
+            endpoints: null,
+            modelIntelligence: explicit,
+          },
+          paths.sessionKey,
+        ),
+      /Model allowlist is invalid/u,
+    );
+
+    const accepted = (await brokerRequest(
+      paths.socket,
+      paths.secret,
+      "model.operator.settings.set",
+      {
+        allowlist: [sol],
+        endpoints: null,
+        modelIntelligence: explicit,
+      },
+      paths.sessionKey,
+    )) as { accepted: boolean; persisted: boolean };
+    assert.equal(accepted.accepted, true);
+    assert.equal(accepted.persisted, true);
+    assert.equal(persisted.length, 1);
+    assert.deepEqual(persisted[0]?.modelPolicy.allowlist, [sol]);
+
+    const modelOptions = (await brokerRequest(
+      paths.socket,
+      paths.secret,
+      "model.options",
+      { profileId: "implementer", limit: 16 },
+      paths.sessionKey,
+    )) as Record<string, unknown> & {
+      availableModels: Array<{
+        provider: string;
+        modelId: string;
+        thinkingLevels: Array<
+          Pick<ModelSelection, "thinkingLevel"> & {
+            ratings: Record<string, string>;
+          }
+        >;
+      }>;
+    };
+    assert.deepEqual(Object.keys(modelOptions).sort(), [
+      "availableModels",
+      "moreAvailable",
+      "profileId",
+      "thinkingGuide",
+    ]);
+    assert.equal("currentSelection" in modelOptions, false);
+    assert.equal("candidates" in modelOptions, false);
+    assert.equal("excluded" in modelOptions, false);
+    assert.deepEqual(
+      modelOptions.availableModels.flatMap(
+        ({ provider, modelId, thinkingLevels }) =>
+          thinkingLevels.map(({ thinkingLevel }) => ({
+            provider,
+            modelId,
+            thinkingLevel,
+          })),
+      ),
+      [sol],
+    );
+    assert.match(
+      modelOptions.availableModels[0]?.thinkingLevels[0]?.ratings.overall ?? "",
+      /^(?:★{0,5})(?:☆{0,5}) [0-5]\/5$/u,
+    );
+    assert.equal(
+      Object.hasOwn(modelOptions.availableModels[0] ?? {}, "capacity"),
+      false,
+    );
+  } finally {
+    await broker.stop().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+    await rm(runtime, { recursive: true, force: true });
+  }
+});
+
+test("model option group limits retain every available thinking level", async () => {
+  const root = await mkdtemp(join(tmpdir(), "model-options-group-limit-"));
+  const runtime = await mkdtemp(
+    join(tmpdir(), "model-options-group-limit-runtime-"),
+  );
+  const paths = pathsFor(root, runtime);
+  const lunaHigh: ModelSelection = { ...luna, thinkingLevel: "high" };
+  const broker = new Broker(paths, {
+    modelPolicy: {
+      defaults: { global: luna },
+      allowlist: [luna, lunaHigh, sol],
+    },
+  });
+  try {
+    await broker.start();
+    const modelOptions = (await brokerRequest(
+      paths.socket,
+      paths.secret,
+      "model.options",
+      { profileId: "implementer", limit: 1 },
+      paths.sessionKey,
+    )) as {
+      availableModels: Array<{
+        provider: string;
+        modelId: string;
+        thinkingLevels: Array<{ thinkingLevel: string; rank: number }>;
+      }>;
+      moreAvailable: number;
+    };
+    assert.equal(modelOptions.availableModels.length, 1);
+    assert.equal(modelOptions.moreAvailable, 1);
+    assert.deepEqual(
+      modelOptions.availableModels[0]?.thinkingLevels.map(
+        ({ thinkingLevel, rank }) => ({ thinkingLevel, rank }),
+      ),
+      [
+        { thinkingLevel: "high", rank: 1 },
+        { thinkingLevel: "medium", rank: 2 },
+      ],
+    );
+    assert.equal(
+      Object.hasOwn(modelOptions.availableModels[0] ?? {}, "capacity"),
+      false,
+    );
+  } finally {
+    await broker.stop().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+    await rm(runtime, { recursive: true, force: true });
+  }
+});
+
 test("broker persists one validated operator settings batch before runtime apply", async () => {
   const root = await mkdtemp(join(tmpdir(), "operator-settings-"));
   const runtime = await mkdtemp(join(tmpdir(), "operator-settings-runtime-"));
@@ -161,7 +316,12 @@ test("broker persists one validated operator settings batch before runtime apply
       "model.operator.settings.set",
       {
         allowlist: [luna, sol],
-        endpoints: { local_model: { maxConcurrentAgents: 2 } },
+        endpoints: {
+          local_model: {
+            maxConcurrentAgents: 2,
+            resourceClass: "local_compute",
+          },
+        },
         modelIntelligence: rated,
       },
       paths.sessionKey,
@@ -176,16 +336,16 @@ test("broker persists one validated operator settings batch before runtime apply
       { profileId: "implementer", limit: 16 },
       paths.sessionKey,
     )) as {
-      candidates: Array<{
-        selection: ModelSelection;
-        endpoint: { limit: number };
+      availableModels: Array<{
+        modelId: string;
+        capacity?: { status: string; available: number; limit: number };
       }>;
     };
-    assert.equal(
-      modelOptions.candidates.find(
-        (candidate) => candidate.selection.modelId === luna.modelId,
-      )?.endpoint.limit,
-      2,
+    assert.deepEqual(
+      modelOptions.availableModels.find(
+        (candidate) => candidate.modelId === luna.modelId,
+      )?.capacity,
+      { status: "ready", available: 2, limit: 2 },
     );
 
     rejectPersistence = true;
@@ -231,11 +391,11 @@ test("broker persists one validated operator settings batch before runtime apply
       { profileId: "implementer", limit: 16 },
       paths.sessionKey,
     )) as typeof modelOptions;
-    assert.equal(
-      afterFailureOptions.candidates.find(
-        (candidate) => candidate.selection.modelId === luna.modelId,
-      )?.endpoint.limit,
-      2,
+    assert.deepEqual(
+      afterFailureOptions.availableModels.find(
+        (candidate) => candidate.modelId === luna.modelId,
+      )?.capacity,
+      { status: "ready", available: 2, limit: 2 },
     );
   } finally {
     await broker.stop().catch(() => undefined);

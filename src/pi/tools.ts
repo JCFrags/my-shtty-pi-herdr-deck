@@ -15,8 +15,18 @@ import type { PiAdapter } from "./adapter.js";
 import type { CorrelationState } from "./correlation.js";
 import type { PiBrokerClient } from "./broker-client.js";
 import type { PiApiLike, PiContextLike } from "./types.js";
-import { SHIPPED_TASK_PROFILES } from "../broker/model-policy.js";
+import {
+  SHIPPED_TASK_PROFILES,
+  THINKING_LEVELS,
+  type ThinkingLevel,
+} from "../broker/model-policy.js";
 import { AGENT_STATES } from "../state/types.js";
+import {
+  Text,
+  truncateToWidth,
+  visibleWidth,
+  type Component,
+} from "@pi-herdr-deck/tui";
 
 const MAX_BODY_BYTES = 262_144;
 const MAX_TEXT_BYTES = 16_384;
@@ -702,7 +712,8 @@ function validateExactNested(
         (value as number) < 1 ||
         (key === "timeoutMs" && (value as number) > 1_800_000) ||
         (key === "maxBytes" && (value as number) > 262_144) ||
-        (key === "limit" && (value as number) > 500)
+        (key === "limit" &&
+          (value as number) > (tool === "agent_model_options" ? 16 : 500))
       )
         throw new Error("INVALID_REQUEST");
       continue;
@@ -779,7 +790,8 @@ function validateParentInput(
                 ? 120_000
                 : 1_800_000)) ||
         (key === "maxBytes" && (value as number) > 262_144) ||
-        (key === "limit" && (value as number) > 500) ||
+        (key === "limit" &&
+          (value as number) > (tool === "agent_model_options" ? 16 : 500)) ||
         (key === "durationMs" && (value as number) > 86_400_000) ||
         (key === "pollMs" && (value as number) > 60_000))
     )
@@ -1140,40 +1152,46 @@ function parentInputSchema(tool: ParentToolName): unknown {
       ...Object.fromEntries(
         parentInputKeys[tool].map((key) => [
           key,
-          key === "timeoutMs" &&
-          (tool === "agent_wait" || tool === "agent_prompt")
-            ? { type: "integer", minimum: 1, maximum: 30_000 }
-            : key === "timeoutMs" && tool === "agent_ask"
-              ? { type: "integer", minimum: 1, maximum: 120_000 }
-              : key === "mode" && tool === "group_wait"
-                ? { type: "string", enum: ["all", "any"] }
-                : key === "kind" && tool === "coordination_wait"
-                  ? {
-                      type: "string",
-                      enum: [
-                        "timer",
-                        "signal",
-                        "agent",
-                        "task",
-                        "result",
-                        "question",
-                        "group",
-                      ],
-                    }
-                  : key === "until" && tool !== "agent_wait"
+          key === "limit" && tool === "agent_model_options"
+            ? { type: "integer", minimum: 1, maximum: 16 }
+            : key === "timeoutMs" &&
+                (tool === "agent_wait" || tool === "agent_prompt")
+              ? { type: "integer", minimum: 1, maximum: 30_000 }
+              : key === "timeoutMs" && tool === "agent_ask"
+                ? { type: "integer", minimum: 1, maximum: 120_000 }
+                : key === "mode" && tool === "group_wait"
+                  ? { type: "string", enum: ["all", "any"] }
+                  : key === "kind" && tool === "coordination_wait"
                     ? {
-                        type: "array",
-                        minItems: 1,
-                        maxItems: 16,
-                        items: { type: "string", minLength: 1, maxLength: 64 },
+                        type: "string",
+                        enum: [
+                          "timer",
+                          "signal",
+                          "agent",
+                          "task",
+                          "result",
+                          "question",
+                          "group",
+                        ],
                       }
-                    : key === "followUps"
+                    : key === "until" && tool !== "agent_wait"
                       ? {
                           type: "array",
-                          maxItems: 3,
-                          items: boundedString(MAX_TEXT_BYTES),
+                          minItems: 1,
+                          maxItems: 16,
+                          items: {
+                            type: "string",
+                            minLength: 1,
+                            maxLength: 64,
+                          },
                         }
-                      : schemaForKey(key),
+                      : key === "followUps"
+                        ? {
+                            type: "array",
+                            maxItems: 3,
+                            items: boundedString(MAX_TEXT_BYTES),
+                          }
+                        : schemaForKey(key),
         ]),
       ),
       idempotencyKey: { type: "string", minLength: 1, maxLength: 256 },
@@ -1182,6 +1200,10 @@ function parentInputSchema(tool: ParentToolName): unknown {
   };
 }
 
+interface ToolRenderTheme {
+  fg(color: string, text: string): string;
+  bold(text: string): string;
+}
 interface ToolDefinition {
   name: string;
   label: string;
@@ -1198,6 +1220,15 @@ interface ToolDefinition {
     details?: unknown;
     isError?: boolean;
   }>;
+  renderResult?: (
+    result: {
+      content: Array<{ type: string; text?: string }>;
+      details?: unknown;
+    },
+    options: { expanded: boolean; isPartial?: boolean },
+    theme: ToolRenderTheme,
+    context: unknown,
+  ) => Component;
 }
 export interface PiToolBinding {
   adapter: PiAdapter | undefined;
@@ -1234,6 +1265,375 @@ function textResult(value: unknown): {
     content: [{ type: "text", text: JSON.stringify(details) }],
     details,
   };
+}
+interface AvailableAgentModelRatings {
+  readonly overall: string;
+  readonly taskFit: string;
+  readonly reliability: string;
+  readonly speed: string;
+  readonly value: string;
+}
+interface AvailableAgentThinkingGuide {
+  readonly thinkingLevel: ThinkingLevel;
+  readonly useFor: string;
+}
+interface AvailableAgentModelCapacity {
+  readonly status: "ready" | "will_queue";
+  readonly available: number;
+  readonly limit: number;
+}
+interface AvailableAgentModelThinking {
+  readonly rank: number;
+  readonly thinkingLevel: ThinkingLevel;
+  readonly recommended: boolean;
+  readonly ratings: AvailableAgentModelRatings;
+}
+interface AvailableAgentModelOption {
+  readonly rank: number;
+  readonly provider: string;
+  readonly modelId: string;
+  readonly recommended: boolean;
+  readonly thinkingLevels: readonly AvailableAgentModelThinking[];
+  readonly capacity?: AvailableAgentModelCapacity;
+}
+interface AvailableAgentModelsDetails {
+  readonly profileId: string;
+  readonly thinkingGuide: readonly AvailableAgentThinkingGuide[];
+  readonly availableModels: readonly AvailableAgentModelOption[];
+  readonly moreAvailable: number;
+}
+function nonnegativeSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) >= 0;
+}
+function hasExactKeys(
+  value: Record<string, unknown>,
+  keys: readonly string[],
+): boolean {
+  const actual = Object.keys(value);
+  return (
+    actual.length === keys.length &&
+    keys.every((key) => Object.hasOwn(value, key))
+  );
+}
+function validStarRating(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const match = /^(★{0,5})(☆{0,5}) ([0-5])\/5$/u.exec(value);
+  if (!match) return false;
+  const filled = match[1]?.length ?? 0;
+  const empty = match[2]?.length ?? 0;
+  return filled + empty === 5 && filled === Number(match[3]);
+}
+function ratingCategories(ratings: AvailableAgentModelRatings): string {
+  return [
+    `Task fit ${ratings.taskFit}`,
+    `Reliability ${ratings.reliability}`,
+    `Speed ${ratings.speed}`,
+    `Value ${ratings.value}`,
+  ].join(" · ");
+}
+function safeModelOptionText(value: unknown, max = 256): value is string {
+  try {
+    assertInputString(value, max);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function parseModelRatings(value: unknown): AvailableAgentModelRatings {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+  const ratings = value as Record<string, unknown>;
+  if (
+    !hasExactKeys(ratings, [
+      "overall",
+      "taskFit",
+      "reliability",
+      "speed",
+      "value",
+    ]) ||
+    !["overall", "taskFit", "reliability", "speed", "value"].every((key) =>
+      validStarRating(ratings[key]),
+    )
+  )
+    throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+  return {
+    overall: ratings.overall as string,
+    taskFit: ratings.taskFit as string,
+    reliability: ratings.reliability as string,
+    speed: ratings.speed as string,
+    value: ratings.value as string,
+  };
+}
+function parseModelCapacity(value: unknown): AvailableAgentModelCapacity {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+  const capacity = value as Record<string, unknown>;
+  if (
+    !hasExactKeys(capacity, ["status", "available", "limit"]) ||
+    (capacity.status !== "ready" && capacity.status !== "will_queue") ||
+    !nonnegativeSafeInteger(capacity.available) ||
+    !Number.isSafeInteger(capacity.limit) ||
+    Number(capacity.limit) < 1 ||
+    Number(capacity.limit) > 32 ||
+    Number(capacity.available) > Number(capacity.limit) ||
+    (capacity.status === "ready"
+      ? Number(capacity.available) < 1
+      : Number(capacity.available) !== 0)
+  )
+    throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+  return {
+    status: capacity.status,
+    available: Number(capacity.available),
+    limit: Number(capacity.limit),
+  };
+}
+function availableAgentModelsResult(value: unknown): {
+  content: Array<{ type: "text"; text: string }>;
+  details: AvailableAgentModelsDetails;
+} {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+  const source = value as Record<string, unknown>;
+  if (
+    !hasExactKeys(source, [
+      "profileId",
+      "thinkingGuide",
+      "availableModels",
+      "moreAvailable",
+    ]) ||
+    !safeModelOptionText(source.profileId) ||
+    !Array.isArray(source.thinkingGuide) ||
+    source.thinkingGuide.length > THINKING_LEVELS.length ||
+    !Array.isArray(source.availableModels) ||
+    source.availableModels.length > 16 ||
+    !nonnegativeSafeInteger(source.moreAvailable) ||
+    source.availableModels.length + source.moreAvailable > 256
+  )
+    throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+  const thinkingGuide = source.thinkingGuide.map(
+    (entry): AvailableAgentThinkingGuide => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry))
+        throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+      const guide = entry as Record<string, unknown>;
+      if (
+        !hasExactKeys(guide, ["thinkingLevel", "useFor"]) ||
+        !safeModelOptionText(guide.thinkingLevel, 32) ||
+        !THINKING_LEVELS.includes(guide.thinkingLevel as ThinkingLevel) ||
+        !safeModelOptionText(guide.useFor, 96)
+      )
+        throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+      return {
+        thinkingLevel: guide.thinkingLevel as ThinkingLevel,
+        useFor: guide.useFor,
+      };
+    },
+  );
+  const usedRanks = new Set<number>();
+  const usedModels = new Set<string>();
+  let pairCount = 0;
+  let previousGroupBestRank = 0;
+  const availableModels = source.availableModels.map(
+    (candidate, index): AvailableAgentModelOption => {
+      if (
+        !candidate ||
+        typeof candidate !== "object" ||
+        Array.isArray(candidate)
+      )
+        throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+      const option = candidate as Record<string, unknown>;
+      const expectedKeys = [
+        "rank",
+        "provider",
+        "modelId",
+        "recommended",
+        "thinkingLevels",
+        ...(Object.hasOwn(option, "capacity") ? ["capacity"] : []),
+      ];
+      if (
+        !hasExactKeys(option, expectedKeys) ||
+        !Number.isSafeInteger(option.rank) ||
+        Number(option.rank) !== index + 1 ||
+        !safeModelOptionText(option.provider) ||
+        !safeModelOptionText(option.modelId) ||
+        typeof option.recommended !== "boolean" ||
+        !Array.isArray(option.thinkingLevels) ||
+        option.thinkingLevels.length < 1 ||
+        option.thinkingLevels.length > THINKING_LEVELS.length
+      )
+        throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+      const modelKey = `${option.provider}\u0000${option.modelId}`;
+      if (usedModels.has(modelKey))
+        throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+      usedModels.add(modelKey);
+      const usedLevels = new Set<ThinkingLevel>();
+      const thinkingLevels = option.thinkingLevels.map(
+        (entry): AvailableAgentModelThinking => {
+          if (!entry || typeof entry !== "object" || Array.isArray(entry))
+            throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+          const thinking = entry as Record<string, unknown>;
+          if (
+            !hasExactKeys(thinking, [
+              "rank",
+              "thinkingLevel",
+              "recommended",
+              "ratings",
+            ]) ||
+            !Number.isSafeInteger(thinking.rank) ||
+            Number(thinking.rank) < 1 ||
+            Number(thinking.rank) > 256 ||
+            usedRanks.has(Number(thinking.rank)) ||
+            !safeModelOptionText(thinking.thinkingLevel, 32) ||
+            !THINKING_LEVELS.includes(
+              thinking.thinkingLevel as ThinkingLevel,
+            ) ||
+            usedLevels.has(thinking.thinkingLevel as ThinkingLevel) ||
+            typeof thinking.recommended !== "boolean" ||
+            thinking.recommended !== (thinking.rank === 1)
+          )
+            throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+          usedRanks.add(Number(thinking.rank));
+          usedLevels.add(thinking.thinkingLevel as ThinkingLevel);
+          pairCount++;
+          return {
+            rank: Number(thinking.rank),
+            thinkingLevel: thinking.thinkingLevel as ThinkingLevel,
+            recommended: thinking.recommended,
+            ratings: parseModelRatings(thinking.ratings),
+          };
+        },
+      );
+      if (
+        thinkingLevels.some(
+          (level, levelIndex) =>
+            levelIndex > 0 &&
+            level.rank <= (thinkingLevels[levelIndex - 1]?.rank ?? 0),
+        ) ||
+        (thinkingLevels[0]?.rank ?? 0) <= previousGroupBestRank ||
+        option.recommended !== thinkingLevels.some((level) => level.recommended)
+      )
+        throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+      previousGroupBestRank = thinkingLevels[0]!.rank;
+      return {
+        rank: Number(option.rank),
+        provider: option.provider,
+        modelId: option.modelId,
+        recommended: option.recommended,
+        thinkingLevels,
+        ...(Object.hasOwn(option, "capacity")
+          ? { capacity: parseModelCapacity(option.capacity) }
+          : {}),
+      };
+    },
+  );
+  if (pairCount > 256) throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+  const presentLevels = new Set(
+    availableModels.flatMap((model) =>
+      model.thinkingLevels.map((thinking) => thinking.thinkingLevel),
+    ),
+  );
+  const expectedGuide = THINKING_LEVELS.filter((level) =>
+    presentLevels.has(level),
+  );
+  if (
+    thinkingGuide.length !== expectedGuide.length ||
+    thinkingGuide.some(
+      (guide, index) => guide.thinkingLevel !== expectedGuide[index],
+    ) ||
+    (availableModels.length > 0 && !availableModels[0]?.recommended)
+  )
+    throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+  const details: AvailableAgentModelsDetails = {
+    profileId: source.profileId,
+    thinkingGuide,
+    availableModels,
+    moreAvailable: source.moreAvailable,
+  };
+  return {
+    content: [{ type: "text", text: JSON.stringify(details) }],
+    details,
+  };
+}
+function oneLineComponent(lines: readonly string[]): Component {
+  return {
+    render(width: number): string[] {
+      const safeWidth = Math.max(1, Math.floor(width));
+      return lines.map((line) =>
+        visibleWidth(line) <= safeWidth
+          ? line
+          : `${truncateToWidth(line, Math.max(0, safeWidth - 1))}…`,
+      );
+    },
+    invalidate(): void {},
+  };
+}
+function compactLocalCapacity(
+  capacity: AvailableAgentModelCapacity,
+  theme: ToolRenderTheme,
+): string {
+  const text =
+    capacity.status === "ready"
+      ? `local · ${capacity.available}/${capacity.limit} free`
+      : "local · will queue";
+  return theme.fg(capacity.status === "ready" ? "success" : "warning", text);
+}
+function renderAvailableAgentModels(
+  result: {
+    content: Array<{ type: string; text?: string }>;
+    details?: unknown;
+  },
+  expanded: boolean,
+  theme: ToolRenderTheme,
+): Component {
+  const details = result.details as AvailableAgentModelsDetails | undefined;
+  if (!details || !Array.isArray(details.availableModels))
+    return new Text(result.content[0]?.text ?? "", 0, 0);
+  const displayed = expanded
+    ? details.availableModels
+    : details.availableModels.slice(0, 4);
+  const total = details.availableModels.length + details.moreAvailable;
+  const guidance = new Map(
+    details.thinkingGuide.map((entry) => [entry.thinkingLevel, entry.useFor]),
+  );
+  const lines = [
+    theme.fg("success", `✓ ${total} available model${total === 1 ? "" : "s"}`) +
+      theme.fg("muted", ` for ${details.profileId}`),
+  ];
+  for (const model of displayed) {
+    const marker = model.recommended ? theme.fg("accent", "→") : " ";
+    lines.push(
+      `${marker} ${theme.fg("accent", `#${model.rank}`)} ${theme.fg("muted", `${model.provider}/${model.modelId}`)}`,
+    );
+    if (model.capacity)
+      lines.push(`    ${compactLocalCapacity(model.capacity, theme)}`);
+    for (const thinking of model.thinkingLevels) {
+      const thinkingMarker = thinking.recommended
+        ? theme.fg("accent", "→")
+        : " ";
+      lines.push(
+        `    ${thinkingMarker} ${thinking.thinkingLevel} · ${theme.fg("accent", thinking.ratings.overall)} · ${guidance.get(thinking.thinkingLevel) ?? ""}`,
+      );
+      if (expanded)
+        lines.push(
+          `      ${theme.fg("dim", ratingCategories(thinking.ratings))}`,
+        );
+    }
+  }
+  const hidden = details.availableModels.length - displayed.length;
+  if (hidden > 0)
+    lines.push(
+      theme.fg(
+        "dim",
+        `… ${hidden} more returned model${hidden === 1 ? "" : "s"}`,
+      ),
+    );
+  if (details.moreAvailable > 0)
+    lines.push(
+      theme.fg(
+        "warning",
+        `${details.moreAvailable} more available; increase limit to see them.`,
+      ),
+    );
+  return oneLineComponent(lines);
 }
 function validateResultInput(input: Record<string, unknown>): void {
   assertExactObject(
@@ -2037,21 +2437,49 @@ export function registerParentTools(
   for (const tool of PARENT_TOOL_NAMES) {
     register(api, {
       name: tool,
-      label: `Orchestrator ${tool}`,
-      description: `Use broker method for ${tool}. The broker checks current state and parent scope on every call.`,
+      label:
+        tool === "agent_model_options"
+          ? "Available Agent Models"
+          : `Orchestrator ${tool}`,
+      description:
+        tool === "agent_model_options"
+          ? "List only Pi-available, broker-allowed models for this task profile. Each model groups its thinking levels with simple five-star ratings and selection guidance. Slot capacity appears only for explicitly local compute."
+          : `Use broker method for ${tool}. The broker checks current state and parent scope on every call.`,
       parameters: parentInputSchema(tool as ParentToolName),
+      ...(tool === "agent_model_options"
+        ? {
+            renderResult(
+              result: {
+                content: Array<{ type: string; text?: string }>;
+                details?: unknown;
+              },
+              options: { expanded: boolean },
+              theme: ToolRenderTheme,
+            ) {
+              return renderAvailableAgentModels(
+                result,
+                options.expanded,
+                theme,
+              );
+            },
+          }
+        : {}),
       async execute(_id, params, signal) {
         const { idempotencyKey, ...provided } = params;
+        const modelOptionsInput =
+          tool === "agent_model_options" && provided.limit === undefined
+            ? { ...provided, limit: 16 }
+            : provided;
         const raw =
-          tool === "coordination_wait" && provided.kind === "timer"
+          tool === "coordination_wait" && modelOptionsInput.kind === "timer"
             ? {
-                ...provided,
+                ...modelOptionsInput,
                 startedAt:
-                  typeof provided.startedAt === "string"
-                    ? provided.startedAt
+                  typeof modelOptionsInput.startedAt === "string"
+                    ? modelOptionsInput.startedAt
                     : new Date().toISOString(),
               }
-            : provided;
+            : modelOptionsInput;
         if (idempotencyKey !== undefined)
           assertInputString(idempotencyKey, 256);
         if (
@@ -2153,13 +2581,14 @@ export function registerParentTools(
             isError: true,
           };
         }
-        return textResult(
-          withLaunchLifecycleReminder(
-            tool as ParentToolName,
-            raw,
-            response.result,
-          ),
+        const result = withLaunchLifecycleReminder(
+          tool as ParentToolName,
+          raw,
+          response.result,
         );
+        return tool === "agent_model_options"
+          ? availableAgentModelsResult(result)
+          : textResult(result);
       },
     });
   }

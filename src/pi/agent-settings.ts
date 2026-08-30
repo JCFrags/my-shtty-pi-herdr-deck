@@ -391,7 +391,11 @@ function createEndpointSubmenu(
         done(`${String(Object.keys(endpoints).length)} configured`);
         return;
       }
-      if (id !== "none") endpoints[id] = { maxConcurrentAgents: Number(value) };
+      if (id !== "none")
+        endpoints[id] = {
+          ...endpoints[id],
+          maxConcurrentAgents: Number(value),
+        };
     },
     () => done(undefined),
   );
@@ -611,11 +615,14 @@ async function editPolicy(
   const ui = context.ui as unknown as AgentSettingsUi;
   const required = requiredModelSelections(policy);
   const requiredKeys = new Set(required.map(selectionKey));
-  const selected = selectedByModel(policy.allowlist ?? required);
-  addRequiredSelections(selected, required);
   let mode = policy.allowlist ? "restricted" : "unrestricted";
   let routingMode: ModelRoutingMode =
     operatorSettings.modelIntelligence.routingMode ?? "current_default";
+  const selected = selectedByModel(
+    policy.allowlist ?? (routingMode === "explicit_required" ? [] : required),
+  );
+  if (routingMode !== "explicit_required")
+    addRequiredSelections(selected, required);
   const endpoints = structuredClone(operatorSettings.endpoints) as Record<
     string,
     EndpointLimit
@@ -740,7 +747,7 @@ async function editPolicy(
             createLevelSubmenu(
               model,
               selected,
-              requiredKeys,
+              routingMode === "explicit_required" ? new Set() : requiredKeys,
               routingMode,
               ui,
               listTheme,
@@ -762,6 +769,8 @@ async function editPolicy(
         (id, value) => {
           if (id === ROUTING_ID) {
             routingMode = value as ModelRoutingMode;
+            if (routingMode !== "explicit_required")
+              addRequiredSelections(selected, required);
             return;
           }
           if (id === FOUNDATION_ID) {
@@ -770,7 +779,7 @@ async function editPolicy(
           }
           if (id === MODE_ID) {
             mode = value;
-            if (mode === "restricted")
+            if (mode === "restricted" && routingMode !== "explicit_required")
               addRequiredSelections(selected, required);
             return;
           }

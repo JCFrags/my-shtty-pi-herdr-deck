@@ -131,6 +131,7 @@ import {
   type ResolvedSpawnPolicy,
 } from "./model-policy.js";
 import {
+  availableModelOptionsView,
   buildModelOptions,
   createAdvisoryModelReceipt,
   modelCapacityView,
@@ -3630,20 +3631,26 @@ export class Broker {
         const inheritedProjectKey = principal.agentId
           ? this.store.state.agents[principal.agentId]?.cwd
           : undefined;
-        result = await this.#modelOptions({
-          taskProfile: p.profileId,
-          ...(p.placement ? { placement: p.placement as AgentPlacement } : {}),
-          ...(p.modelProfileId
-            ? { modelProfileId: p.modelProfileId as ModelProfileId }
-            : {}),
-          ...(p.projectKey
-            ? { projectKey: p.projectKey }
-            : inheritedProjectKey
-              ? { projectKey: inheritedProjectKey }
+        result = availableModelOptionsView(
+          await this.#modelOptions({
+            taskProfile: p.profileId,
+            ...(p.placement
+              ? { placement: p.placement as AgentPlacement }
               : {}),
-          asOf: new Date(this.#now()).toISOString(),
-          limit: p.limit === undefined ? 10 : Number(p.limit),
-        });
+            ...(p.modelProfileId
+              ? { modelProfileId: p.modelProfileId as ModelProfileId }
+              : {}),
+            ...(p.projectKey
+              ? { projectKey: p.projectKey }
+              : inheritedProjectKey
+                ? { projectKey: inheritedProjectKey }
+                : {}),
+            asOf: new Date(this.#now()).toISOString(),
+            limit: MODEL_RANKING_POLICY.maxEligibleCandidates,
+          }),
+          this.#endpointPolicy,
+          p.limit === undefined ? 10 : Number(p.limit),
+        );
       } else if (request.method === "model.policy.get") {
         requirePermission(principal, "read:state");
         result = {
@@ -3704,19 +3711,6 @@ export class Broker {
         const nextPolicy = { ...this.#modelPolicy };
         if (allowlist) nextPolicy.allowlist = allowlist;
         else delete nextPolicy.allowlist;
-        const missingDefaults = requiredModelSelections(nextPolicy).filter(
-          (required) =>
-            allowlist &&
-            !allowlist.some((selection) =>
-              sameModelSelection(selection, required),
-            ),
-        );
-        if (missingDefaults.length > 0)
-          throw new OrchestratorError(
-            "INVALID_REQUEST",
-            "The model allowlist must include every effective default.",
-            { details: { missingDefaults } },
-          );
         const endpointsValue =
           p.endpoints === null ||
           (typeof p.endpoints === "object" &&
@@ -3739,6 +3733,23 @@ export class Broker {
               : "Agent settings are invalid.",
           );
         }
+        const missingDefaults = requiredModelSelections(nextPolicy).filter(
+          (required) =>
+            allowlist &&
+            !allowlist.some((selection) =>
+              sameModelSelection(selection, required),
+            ),
+        );
+        if (
+          validatedSettings.modelIntelligence?.routingMode !==
+            "explicit_required" &&
+          missingDefaults.length > 0
+        )
+          throw new OrchestratorError(
+            "INVALID_REQUEST",
+            "The model allowlist must include every effective default unless model routing requires an explicit selection.",
+            { details: { missingDefaults } },
+          );
         const capabilities = await this.#piCapabilities.snapshot();
         await Promise.all(
           (allowlist ?? []).map(
@@ -3874,10 +3885,13 @@ export class Broker {
                 sameModelSelection(selection, required),
               ),
           );
-          if (missingDefaults.length > 0)
+          if (
+            this.#modelIntelligence?.routingMode !== "explicit_required" &&
+            missingDefaults.length > 0
+          )
             throw new OrchestratorError(
               "INVALID_REQUEST",
-              "The model allowlist must include every effective default.",
+              "The model allowlist must include every effective default unless model routing requires an explicit selection.",
               { details: { missingDefaults } },
             );
         }

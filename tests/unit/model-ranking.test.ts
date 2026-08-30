@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  availableModelOptionsView,
   buildModelOptions,
   createAdvisoryModelReceipt,
   modelCapacityView,
@@ -55,8 +56,14 @@ const capabilities = {
 };
 const endpointPolicy = {
   endpoints: {
-    alpha_ep: { maxConcurrentAgents: 1 },
-    beta_ep: { maxConcurrentAgents: 3 },
+    alpha_ep: {
+      maxConcurrentAgents: 1,
+      resourceClass: "local_compute" as const,
+    },
+    beta_ep: {
+      maxConcurrentAgents: 3,
+      resourceClass: "remote_service" as const,
+    },
     gamma_ep: { maxConcurrentAgents: 2 },
   },
   mappings: [
@@ -120,7 +127,132 @@ test("model options rank only installed policy-eligible pairs with deterministic
     [alpha, beta],
   );
   assert.equal(view.candidates[1]?.tiedWithPrevious, true);
-  assert.deepEqual(view.currentSelection, beta);
+  assert.equal("currentSelection" in view, false);
+});
+
+test("public model options group choices and show capacity only for local compute", () => {
+  const view = availableModelOptionsView(options(), endpointPolicy, 1);
+  assert.equal(view.profileId, "scout");
+  assert.deepEqual(view.thinkingGuide, [
+    { thinkingLevel: "medium", useFor: "balanced default" },
+  ]);
+  assert.equal(view.availableModels.length, 1);
+  assert.equal(view.moreAvailable, 1);
+  assert.deepEqual(
+    {
+      rank: view.availableModels[0]?.rank,
+      provider: view.availableModels[0]?.provider,
+      modelId: view.availableModels[0]?.modelId,
+      recommended: view.availableModels[0]?.recommended,
+      capacity: view.availableModels[0]?.capacity,
+      thinking: view.availableModels[0]?.thinkingLevels[0]?.thinkingLevel,
+    },
+    {
+      rank: 1,
+      provider: alpha.provider,
+      modelId: alpha.modelId,
+      recommended: true,
+      capacity: { status: "ready", available: 1, limit: 1 },
+      thinking: "medium",
+    },
+  );
+  for (const rating of Object.values(
+    view.availableModels[0]?.thinkingLevels[0]?.ratings ?? {},
+  ))
+    assert.match(rating, /^(?:★{0,5})(?:☆{0,5}) [0-5]\/5$/u);
+  assert.equal("candidates" in view, false);
+  assert.equal("excluded" in view, false);
+  assert.equal("evidenceDigest" in view, false);
+  assert.equal("scorePpm" in (view.availableModels[0] ?? {}), false);
+
+  const remote = availableModelOptionsView(options(), endpointPolicy, 2);
+  assert.equal(remote.availableModels[1]?.modelId, "beta");
+  assert.equal(
+    Object.hasOwn(remote.availableModels[1] ?? {}, "capacity"),
+    false,
+  );
+
+  const busy = availableModelOptionsView(
+    options({
+      scheduler: {
+        queued: [],
+        active: [{ taskId: "task", endpointId: "alpha_ep" }],
+        provisioning: 0,
+      },
+    }),
+    endpointPolicy,
+    1,
+  );
+  assert.deepEqual(busy.availableModels[0]?.capacity, {
+    status: "will_queue",
+    available: 0,
+    limit: 1,
+  });
+});
+
+test("group limits keep all available thinking levels for a returned model", () => {
+  const alphaHigh = { ...alpha, thinkingLevel: "high" as const };
+  const grouped = availableModelOptionsView(
+    options({
+      capabilities: {
+        models: [
+          {
+            provider: alpha.provider,
+            modelId: alpha.modelId,
+            reasoning: true,
+            thinkingLevels: ["medium", "high"],
+          },
+          capabilities.models[1],
+          capabilities.models[2],
+        ],
+        thinkingLevels: ["medium", "high"],
+      },
+      policy: {
+        ...policy,
+        allowlist: [alpha, alphaHigh, beta],
+      },
+    }),
+    endpointPolicy,
+    1,
+  );
+  assert.equal(grouped.availableModels.length, 1);
+  assert.equal(grouped.moreAvailable, 1);
+  assert.deepEqual(
+    grouped.availableModels[0]?.thinkingLevels.map((level) => ({
+      rank: level.rank,
+      thinkingLevel: level.thinkingLevel,
+      recommended: level.recommended,
+    })),
+    [
+      { rank: 1, thinkingLevel: "high", recommended: true },
+      { rank: 2, thinkingLevel: "medium", recommended: false },
+    ],
+  );
+  assert.deepEqual(
+    grouped.thinkingGuide.map((guide) => guide.thinkingLevel),
+    ["medium", "high"],
+  );
+});
+
+test("explicit-required options do not require or disclose a configured default", () => {
+  const view = options({
+    policy: {
+      defaults: { global: beta },
+      allowlist: [alpha],
+      compatibility: { scout: ["subagent"] },
+    },
+    modelIntelligence: {
+      schemaVersion: 1,
+      routingMode: "explicit_required",
+      mappings: [],
+    },
+  });
+  assert.deepEqual(
+    view.candidates.map((candidate) => candidate.selection),
+    [alpha],
+  );
+  assert.equal(view.eligibleCount, 1);
+  assert.equal("currentSelection" in view, false);
 });
 
 test("rated automatic routing requires evidence and a unique leader", () => {

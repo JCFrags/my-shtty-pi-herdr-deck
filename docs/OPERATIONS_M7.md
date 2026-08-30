@@ -66,6 +66,21 @@ pi-herdr-orchestrator export --output ./private-export
 
 Export is additive. It copies only verified event and snapshot files and writes a mode-0600 manifest.
 
+### Broker request timeout recovery
+
+If the socket exists but `broker status` times out, check the exact recorded broker process before changing anything. Record its PID, Linux process-start identity, CPU, memory, event-log size, and snapshot size. A broker at one full CPU core with a large event log can be replaying an old subscriber cursor. Repeated Pi reloads or status calls can add work behind that replay. Do not delete, truncate, or rewrite the event log or snapshot, and do not start a second broker.
+
+Use a native stack sample when available. Repeated V8 JSON parse, stringify, or canonicalization frames on the broker main thread support the replay diagnosis. Do not run a full `events verify` while the broker is already starved; full verification intentionally reads the complete chain.
+
+Use the authorized Herdr restart path first. If an unresponsive broker cannot process the stop request, signal only the one process whose PID and `/proc` start identity still match the owner-only broker process record. Never use a process-name kill scan. Preserve the state files, start the exact reviewed build, and then verify:
+
+```bash
+pi-herdr-orchestrator broker status
+pi-herdr-orchestrator doctor --json
+```
+
+Finally, create one low-risk managed canary, wait for its structured terminal result, collect it, and close its temporary agent. A queued canary is not proof of creation; inspect scheduler capacity and existing task deadlines instead of deleting ambiguous Herdr resources.
+
 ## Deployment rehearsal
 
 The harness is dry-run by default:

@@ -70,7 +70,14 @@ function contextFor(
   } as unknown as PiContextLike;
 }
 
-function clientFor(requests: Array<{ method: string; params: unknown }>) {
+function clientFor(
+  requests: Array<{ method: string; params: unknown }>,
+  routingMode:
+    | "current_default"
+    | "advisory"
+    | "rated_auto"
+    | "explicit_required" = "current_default",
+) {
   const client: AgentSettingsClient = {
     connected: true,
     request: async (method, params) => {
@@ -89,6 +96,14 @@ function clientFor(requests: Array<{ method: string; params: unknown }>) {
                 modelId: luna.modelId,
                 thinkingLevel: "medium",
               },
+            },
+          },
+          operatorSettings: {
+            endpoints: {},
+            modelIntelligence: {
+              schemaVersion: 1,
+              routingMode,
+              mappings: [],
             },
           },
         };
@@ -159,6 +174,40 @@ test("agent settings saves exact per-model thinking selections as one batch", as
   );
   assert.equal(intelligence.profiles.implementer!.tieBandPpm, 20_000);
   assert.deepEqual(notifications, [
+    "Agent settings were saved for new agents.",
+  ]);
+});
+
+test("explicit-required settings start without a default and reject an empty restricted scope", async () => {
+  const requests: Array<{ method: string; params: unknown }> = [];
+  const notifications: string[] = [];
+  const context = contextFor((component) => {
+    component.handleInput?.("\x1b[B");
+    component.handleInput?.(" ");
+    for (let index = 0; index < 7; index++) component.handleInput?.("\x1b[B");
+    component.handleInput?.("\r");
+    component.handleInput?.("\x1b[A");
+    component.handleInput?.("\r");
+    component.handleInput?.(" ");
+    component.handleInput?.("\x1b[B");
+    component.handleInput?.("\x1b[B");
+    component.handleInput?.("\r");
+    component.handleInput?.("\x1b[B");
+    component.handleInput?.("\r");
+  }, notifications);
+
+  await openAgentSettings(clientFor(requests, "explicit_required"), context);
+
+  const batch = requests[2]?.params as { allowlist?: unknown };
+  assert.deepEqual(batch.allowlist, [
+    {
+      provider: sol.provider,
+      modelId: sol.modelId,
+      thinkingLevel: "medium",
+    },
+  ]);
+  assert.deepEqual(notifications, [
+    "Select at least one model and thinking level.",
     "Agent settings were saved for new agents.",
   ]);
 });

@@ -93,7 +93,6 @@ export interface ModelOptionsView {
   readonly mode: ModelRoutingMode;
   readonly taskProfile: string;
   readonly asOf: string;
-  readonly currentSelection: ModelSelection;
   readonly modelPolicyHash: string;
   readonly scoringPolicyDigest: string;
   readonly evidenceDigest: string;
@@ -104,6 +103,48 @@ export interface ModelOptionsView {
   readonly excludedCount: number;
   readonly exclusionsDigest: string;
   readonly sourceDates: readonly ModelSourceDate[];
+}
+
+export interface AvailableModelRatingsView {
+  readonly overall: string;
+  readonly taskFit: string;
+  readonly reliability: string;
+  readonly speed: string;
+  readonly value: string;
+}
+
+export interface AvailableThinkingGuideView {
+  readonly thinkingLevel: string;
+  readonly useFor: string;
+}
+
+export interface AvailableModelCapacityView {
+  readonly status: "ready" | "will_queue";
+  readonly available: number;
+  readonly limit: number;
+}
+
+export interface AvailableModelThinkingView {
+  readonly rank: number;
+  readonly thinkingLevel: string;
+  readonly recommended: boolean;
+  readonly ratings: AvailableModelRatingsView;
+}
+
+export interface AvailableModelOptionView {
+  readonly rank: number;
+  readonly provider: string;
+  readonly modelId: string;
+  readonly recommended: boolean;
+  readonly thinkingLevels: readonly AvailableModelThinkingView[];
+  readonly capacity?: AvailableModelCapacityView;
+}
+
+export interface AvailableModelOptionsView {
+  readonly profileId: string;
+  readonly thinkingGuide: readonly AvailableThinkingGuideView[];
+  readonly availableModels: readonly AvailableModelOptionView[];
+  readonly moreAvailable: number;
 }
 
 export interface AdvisoryModelReceipt {
@@ -158,6 +199,95 @@ function digest(domain: string, value: unknown): string {
 
 function divideHalfUp(numerator: bigint, denominator: bigint): number {
   return Number((numerator + denominator / 2n) / denominator);
+}
+
+function fiveStarDisplay(valuePpm: number): string {
+  const bounded = Math.max(0, Math.min(PPM, valuePpm));
+  const rating = Math.round((bounded * 5) / PPM);
+  return `${"★".repeat(rating)}${"☆".repeat(5 - rating)} ${rating}/5`;
+}
+
+const THINKING_GUIDANCE = Object.freeze({
+  off: "direct work; no extra reasoning",
+  minimal: "tiny edits and lookups",
+  low: "small, clear tasks",
+  medium: "balanced default",
+  high: "complex coding, debugging, or review",
+  xhigh: "hard, ambiguous work; slower",
+  max: "deepest reasoning; slowest",
+} as const);
+
+export function availableModelOptionsView(
+  options: ModelOptionsView,
+  endpointPolicy: EndpointPolicyConfig,
+  limit: number = MODEL_RANKING_POLICY.maxReturnedCandidates,
+): AvailableModelOptionsView {
+  if (
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > MODEL_RANKING_POLICY.maxReturnedCandidates
+  )
+    throw new Error("MODEL_OPTIONS_LIMIT_INVALID");
+  const groups = new Map<string, AvailableModelOptionView>();
+  for (const candidate of options.candidates) {
+    const key = [
+      candidate.selection.provider,
+      candidate.selection.modelId,
+    ].join("\u0000");
+    const thinking: AvailableModelThinkingView = {
+      rank: candidate.rank,
+      thinkingLevel: candidate.selection.thinkingLevel,
+      recommended: candidate.rank === 1,
+      ratings: {
+        overall: fiveStarDisplay(candidate.scorePpm),
+        taskFit: fiveStarDisplay(candidate.components.taskCapability),
+        reliability: fiveStarDisplay(candidate.components.protocolReliability),
+        speed: fiveStarDisplay(candidate.components.speed),
+        value: fiveStarDisplay(candidate.components.effectiveCost),
+      },
+    };
+    const current = groups.get(key);
+    if (current) {
+      groups.set(key, {
+        ...current,
+        recommended: current.recommended || thinking.recommended,
+        thinkingLevels: [...current.thinkingLevels, thinking],
+      });
+      continue;
+    }
+    const endpoint = endpointPolicy.endpoints?.[candidate.endpoint.endpointId];
+    groups.set(key, {
+      rank: groups.size + 1,
+      provider: candidate.selection.provider,
+      modelId: candidate.selection.modelId,
+      recommended: thinking.recommended,
+      thinkingLevels: [thinking],
+      ...(endpoint?.resourceClass === "local_compute"
+        ? {
+            capacity: {
+              status: candidate.endpoint.available > 0 ? "ready" : "will_queue",
+              available: candidate.endpoint.available,
+              limit: candidate.endpoint.limit,
+            } as const,
+          }
+        : {}),
+    });
+  }
+  const available = [...groups.values()];
+  const returned = available.slice(0, limit);
+  const presentLevels = new Set(
+    returned.flatMap((model) =>
+      model.thinkingLevels.map((thinking) => thinking.thinkingLevel),
+    ),
+  );
+  return {
+    profileId: options.taskProfile,
+    thinkingGuide: Object.entries(THINKING_GUIDANCE)
+      .filter(([thinkingLevel]) => presentLevels.has(thinkingLevel))
+      .map(([thinkingLevel, useFor]) => ({ thinkingLevel, useFor })),
+    availableModels: returned,
+    moreAvailable: available.length - returned.length,
+  };
 }
 
 function selectionKey(selection: ModelSelection): string {
@@ -310,13 +440,19 @@ export function buildModelOptions(
     limit > MODEL_RANKING_POLICY.maxEligibleCandidates
   )
     throw new Error("MODEL_OPTIONS_LIMIT_INVALID");
+  const routingMode = input.modelIntelligence?.routingMode ?? "current_default";
+  const policySelection =
+    input.selectedModel ??
+    (routingMode === "explicit_required"
+      ? input.policy.allowlist?.[0]
+      : undefined);
   const currentPolicy = resolveSpawnPolicy(
     {
       taskProfileId: input.taskProfile,
       ...(input.placement ? { placement: input.placement } : {}),
       ...(input.modelProfileId ? { modelProfileId: input.modelProfileId } : {}),
       ...(input.projectKey ? { projectKey: input.projectKey } : {}),
-      ...(input.selectedModel ? { model: input.selectedModel } : {}),
+      ...(policySelection ? { model: policySelection } : {}),
     },
     input.policy,
   );
@@ -457,10 +593,9 @@ export function buildModelOptions(
   return {
     schemaVersion: 1,
     scorerVersion: 1,
-    mode: input.modelIntelligence?.routingMode ?? "current_default",
+    mode: routingMode,
     taskProfile: input.taskProfile,
     asOf: input.asOf,
-    currentSelection: currentPolicy.effective.model,
     modelPolicyHash: currentPolicy.policyHash,
     scoringPolicyDigest,
     evidenceDigest: projection.evidenceDigest,

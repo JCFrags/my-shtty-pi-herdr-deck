@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { visibleWidth } from "@pi-herdr-deck/tui";
 import { registerParentTools } from "../../src/pi/tools.js";
 const inputs: Record<string, Record<string, unknown>> = {
   delegate_compact: {
@@ -25,7 +26,7 @@ const inputs: Record<string, Record<string, unknown>> = {
     budget: { wallTimeMs: 1000 },
     wait: false,
   },
-  agent_model_options: { profileId: "scout", limit: 5 },
+  agent_model_options: { profileId: "scout" },
   agent_list: { state: "stopped" },
   agent_get: { agentId: "child" },
   agent_prompt: {
@@ -102,14 +103,33 @@ const state = {
 test("all parent tools capture frozen methods and frame-owned idempotency", async () => {
   const tools: Array<{
     name: string;
+    label: string;
+    description: string;
     parameters: unknown;
     execute: (...args: never[]) => Promise<unknown>;
+    renderResult?: (
+      result: unknown,
+      options: { expanded: boolean },
+      theme: {
+        fg(color: string, text: string): string;
+        bold(text: string): string;
+      },
+      context: unknown,
+    ) => { render(width: number): string[] };
   }> = [];
   const calls: Array<{
     method: string;
     params: Record<string, unknown>;
     options?: Record<string, unknown>;
   }> = [];
+  const results = new Map<string, unknown>();
+  let invalidModelRating = false;
+  let invalidThinkingLevel = false;
+  let invalidThinkingOrder = false;
+  let extraModelOptionsField = false;
+  let extraModelOptionField = false;
+  let invalidModelRank = false;
+  let oversizedMoreAvailable = false;
   const api = {
     registerTool: (definition: (typeof tools)[number]) =>
       tools.push(definition),
@@ -127,6 +147,72 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
       options?: Record<string, unknown>,
     ) => {
       calls.push({ method, params, ...(options ? { options } : {}) });
+      if (method === "model.options")
+        return {
+          profileId: "scout",
+          thinkingGuide: [
+            { thinkingLevel: "medium", useFor: "balanced default" },
+            { thinkingLevel: "high", useFor: "complex coding or review" },
+          ],
+          availableModels: [
+            {
+              rank: invalidModelRank ? 2 : 1,
+              provider: "provider-a",
+              modelId: "model-ready",
+              recommended: true,
+              thinkingLevels: [
+                {
+                  rank: invalidThinkingOrder ? 3 : 1,
+                  thinkingLevel: invalidThinkingLevel ? "turbo" : "medium",
+                  recommended: !invalidThinkingOrder,
+                  ratings: {
+                    overall: invalidModelRating ? "★★★★★★ 6/5" : "★★★★☆ 4/5",
+                    taskFit: "★★★★★ 5/5",
+                    reliability: "★★★★☆ 4/5",
+                    speed: "★★★☆☆ 3/5",
+                    value: "★★☆☆☆ 2/5",
+                  },
+                },
+                {
+                  rank: invalidThinkingOrder ? 1 : 3,
+                  thinkingLevel: "high",
+                  recommended: invalidThinkingOrder,
+                  ratings: {
+                    overall: "★★★☆☆ 3/5",
+                    taskFit: "★★★★☆ 4/5",
+                    reliability: "★★★★☆ 4/5",
+                    speed: "★★☆☆☆ 2/5",
+                    value: "★★☆☆☆ 2/5",
+                  },
+                },
+              ],
+              capacity: { status: "ready", available: 2, limit: 4 },
+              ...(extraModelOptionField ? { scorePpm: 800_000 } : {}),
+            },
+            {
+              rank: 2,
+              provider: "openrouter",
+              modelId: "nvidia/nemotron-3-ultra-550b-a55b:free",
+              recommended: false,
+              thinkingLevels: [
+                {
+                  rank: 2,
+                  thinkingLevel: "high",
+                  recommended: false,
+                  ratings: {
+                    overall: "☆☆☆☆☆ 0/5",
+                    taskFit: "☆☆☆☆☆ 0/5",
+                    reliability: "★★☆☆☆ 2/5",
+                    speed: "★☆☆☆☆ 1/5",
+                    value: "★☆☆☆☆ 1/5",
+                  },
+                },
+              ],
+            },
+          ],
+          moreAvailable: oversizedMoreAvailable ? 255 : 3,
+          ...(extraModelOptionsField ? { candidates: [] } : {}),
+        };
       return method === "agent.wait"
         ? { state: "blocked" }
         : method === "coordination.wait" || method === "group.wait"
@@ -139,12 +225,17 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
   for (const [name, input] of Object.entries(inputs)) {
     const tool = tools.find((item) => item.name === name);
     assert.ok(tool, name);
-    await (tool.execute as unknown as (...args: unknown[]) => Promise<unknown>)(
-      "id",
-      { ...input, idempotencyKey: `idem-${name}` },
-      AbortSignal.timeout(1000),
-      undefined,
-      {},
+    results.set(
+      name,
+      await (
+        tool.execute as unknown as (...args: unknown[]) => Promise<unknown>
+      )(
+        "id",
+        { ...input, idempotencyKey: `idem-${name}` },
+        AbortSignal.timeout(1000),
+        undefined,
+        {},
+      ),
     );
   }
   assert.equal(calls.length, 27);
@@ -208,6 +299,334 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
     "scout",
     "test-runner",
   ]);
+  const modelOptionsTool = tools.find(
+    (item) => item.name === "agent_model_options",
+  );
+  const modelOptionsProperties = (
+    modelOptionsTool?.parameters as {
+      properties?: Record<string, { maximum?: number }>;
+    }
+  ).properties;
+  assert.equal(modelOptionsTool?.label, "Available Agent Models");
+  assert.match(
+    modelOptionsTool?.description ?? "",
+    /groups its thinking levels/u,
+  );
+  assert.match(
+    modelOptionsTool?.description ?? "",
+    /only for explicitly local/u,
+  );
+  assert.equal(modelOptionsProperties?.limit?.maximum, 16);
+  assert.equal(
+    calls.find((call) => call.method === "model.options")?.params.limit,
+    16,
+  );
+  const modelOptionsResult = results.get("agent_model_options") as {
+    content: Array<{ type: string; text: string }>;
+    details: Record<string, unknown> & {
+      availableModels: Array<Record<string, unknown>>;
+    };
+  };
+  const modelOptionsContent = modelOptionsResult.content[0]?.text ?? "";
+  assert.deepEqual(JSON.parse(modelOptionsContent), modelOptionsResult.details);
+  assert.match(modelOptionsContent, /model-ready/u);
+  assert.doesNotMatch(modelOptionsContent, /policy-blocked/u);
+  assert.doesNotMatch(modelOptionsContent, /Available agent models/u);
+  assert.equal(modelOptionsResult.details.availableModels.length, 2);
+  assert.equal(modelOptionsResult.details.moreAvailable, 3);
+  assert.deepEqual(modelOptionsResult.details.thinkingGuide, [
+    { thinkingLevel: "medium", useFor: "balanced default" },
+    { thinkingLevel: "high", useFor: "complex coding or review" },
+  ]);
+  assert.deepEqual(modelOptionsResult.details.availableModels[0], {
+    rank: 1,
+    provider: "provider-a",
+    modelId: "model-ready",
+    recommended: true,
+    thinkingLevels: [
+      {
+        rank: 1,
+        thinkingLevel: "medium",
+        recommended: true,
+        ratings: {
+          overall: "★★★★☆ 4/5",
+          taskFit: "★★★★★ 5/5",
+          reliability: "★★★★☆ 4/5",
+          speed: "★★★☆☆ 3/5",
+          value: "★★☆☆☆ 2/5",
+        },
+      },
+      {
+        rank: 3,
+        thinkingLevel: "high",
+        recommended: false,
+        ratings: {
+          overall: "★★★☆☆ 3/5",
+          taskFit: "★★★★☆ 4/5",
+          reliability: "★★★★☆ 4/5",
+          speed: "★★☆☆☆ 2/5",
+          value: "★★☆☆☆ 2/5",
+        },
+      },
+    ],
+    capacity: { status: "ready", available: 2, limit: 4 },
+  });
+  assert.equal(
+    Object.hasOwn(
+      modelOptionsResult.details.availableModels[1] ?? {},
+      "capacity",
+    ),
+    false,
+  );
+  assert.deepEqual(
+    (
+      modelOptionsResult.details.availableModels[1]?.thinkingLevels as Array<
+        Record<string, unknown>
+      >
+    )?.[0]?.ratings,
+    {
+      overall: "☆☆☆☆☆ 0/5",
+      taskFit: "☆☆☆☆☆ 0/5",
+      reliability: "★★☆☆☆ 2/5",
+      speed: "★☆☆☆☆ 1/5",
+      value: "★☆☆☆☆ 1/5",
+    },
+  );
+  assert.equal(
+    Object.hasOwn(
+      modelOptionsResult.details.availableModels[0] ?? {},
+      "scorePpm",
+    ),
+    false,
+  );
+  assert.equal(
+    Object.hasOwn(
+      modelOptionsResult.details.availableModels[0] ?? {},
+      "components",
+    ),
+    false,
+  );
+  assert.equal(Object.hasOwn(modelOptionsResult.details, "excluded"), false);
+  assert.equal(Object.hasOwn(modelOptionsResult.details, "sourceDates"), false);
+  const renderedModelOptions = modelOptionsTool?.renderResult?.(
+    modelOptionsResult,
+    { expanded: false },
+    { fg: (_color, text) => text, bold: (text) => text },
+    {},
+  );
+  const collapsedModelOptionLines = renderedModelOptions?.render(80) ?? [];
+  const collapsedModelOptions = collapsedModelOptionLines.join("\n");
+  assert.match(collapsedModelOptions, /5 available models/u);
+  assert.match(collapsedModelOptions, /#1 provider-a\/model-ready/u);
+  assert.match(collapsedModelOptions, /local · 2\/4 free/u);
+  assert.match(
+    collapsedModelOptions,
+    /medium · ★★★★☆ 4\/5 · balanced default/u,
+  );
+  assert.match(
+    collapsedModelOptions,
+    /high · ★★★☆☆ 3\/5 · complex coding or review/u,
+  );
+  assert.match(
+    collapsedModelOptions.replace(/\s+/gu, ""),
+    /openrouter\/nvidia\/nemotron-3-ultra-550b-a55b:free/u,
+  );
+  assert.match(collapsedModelOptions, /high · ☆☆☆☆☆ 0\/5/u);
+  assert.doesNotMatch(collapsedModelOptions, /will queue|slots/u);
+  assert.match(collapsedModelOptions, /3 more available/u);
+  for (const width of [24, 40, 80, 140]) {
+    const lines = renderedModelOptions?.render(width) ?? [];
+    assert.equal(lines.length, 8);
+    assert.equal(
+      lines.every((line) => visibleWidth(line) <= width),
+      true,
+    );
+    assert.match(lines.join("\n"), /local · 2\/4 free/u);
+  }
+  assert.doesNotMatch(collapsedModelOptions, /Task fit/u);
+  assert.doesNotMatch(collapsedModelOptions, /policy-blocked/u);
+  assert.equal(
+    collapsedModelOptionLines.some((line) =>
+      line.trimStart().startsWith("slots)"),
+    ),
+    false,
+  );
+  const hiddenModelOptionsDetails = {
+    ...modelOptionsResult.details,
+    availableModels: [
+      ...modelOptionsResult.details.availableModels,
+      ...[3, 4, 5].map((rank) => ({
+        ...modelOptionsResult.details.availableModels[0],
+        rank,
+        modelId: `model-${rank}`,
+        recommended: false,
+      })),
+    ],
+  };
+  const hiddenModelOptions = modelOptionsTool?.renderResult?.(
+    {
+      content: [
+        { type: "text", text: JSON.stringify(hiddenModelOptionsDetails) },
+      ],
+      details: hiddenModelOptionsDetails,
+    },
+    { expanded: false },
+    { fg: (_color, text) => text, bold: (text) => text },
+    {},
+  );
+  const hiddenModelOptionsText =
+    hiddenModelOptions?.render(80).join("\n") ?? "";
+  assert.match(hiddenModelOptionsText, /8 available models/u);
+  assert.match(hiddenModelOptionsText, /… 1 more returned model/u);
+  assert.doesNotMatch(hiddenModelOptionsText, /model-5/u);
+  const expandedModelOptions = modelOptionsTool?.renderResult?.(
+    modelOptionsResult,
+    { expanded: true },
+    { fg: (_color, text) => text, bold: (text) => text },
+    {},
+  );
+  const expandedModelOptionsText =
+    expandedModelOptions?.render(240).join("\n") ?? "";
+  assert.match(
+    expandedModelOptionsText,
+    /Task fit ★★★★★ 5\/5 · Reliability ★★★★☆ 4\/5/u,
+  );
+  assert.match(expandedModelOptionsText, /#1 provider-a\/model-ready/u);
+  assert.match(expandedModelOptionsText, /local · 2\/4 free/u);
+  await assert.rejects(
+    (
+      modelOptionsTool?.execute as unknown as (
+        ...args: unknown[]
+      ) => Promise<unknown>
+    )(
+      "invalid-model-limit",
+      { profileId: "scout", limit: 17 },
+      AbortSignal.timeout(1000),
+      undefined,
+      {},
+    ),
+    /INVALID_REQUEST/u,
+  );
+  assert.equal(calls.length, 27);
+  invalidModelRating = true;
+  await assert.rejects(
+    (
+      modelOptionsTool?.execute as unknown as (
+        ...args: unknown[]
+      ) => Promise<unknown>
+    )(
+      "invalid-model-rating",
+      { profileId: "scout", limit: 2 },
+      AbortSignal.timeout(1000),
+      undefined,
+      {},
+    ),
+    /MODEL_OPTIONS_RESPONSE_INVALID/u,
+  );
+  assert.equal(calls.length, 28);
+  invalidModelRating = false;
+  invalidThinkingLevel = true;
+  await assert.rejects(
+    (
+      modelOptionsTool?.execute as unknown as (
+        ...args: unknown[]
+      ) => Promise<unknown>
+    )(
+      "invalid-thinking-level",
+      { profileId: "scout", limit: 2 },
+      AbortSignal.timeout(1000),
+      undefined,
+      {},
+    ),
+    /MODEL_OPTIONS_RESPONSE_INVALID/u,
+  );
+  assert.equal(calls.length, 29);
+  invalidThinkingLevel = false;
+  extraModelOptionsField = true;
+  await assert.rejects(
+    (
+      modelOptionsTool?.execute as unknown as (
+        ...args: unknown[]
+      ) => Promise<unknown>
+    )(
+      "extra-model-options-field",
+      { profileId: "scout", limit: 2 },
+      AbortSignal.timeout(1000),
+      undefined,
+      {},
+    ),
+    /MODEL_OPTIONS_RESPONSE_INVALID/u,
+  );
+  assert.equal(calls.length, 30);
+  extraModelOptionsField = false;
+  extraModelOptionField = true;
+  await assert.rejects(
+    (
+      modelOptionsTool?.execute as unknown as (
+        ...args: unknown[]
+      ) => Promise<unknown>
+    )(
+      "extra-model-option-field",
+      { profileId: "scout", limit: 2 },
+      AbortSignal.timeout(1000),
+      undefined,
+      {},
+    ),
+    /MODEL_OPTIONS_RESPONSE_INVALID/u,
+  );
+  assert.equal(calls.length, 31);
+  extraModelOptionField = false;
+  invalidModelRank = true;
+  await assert.rejects(
+    (
+      modelOptionsTool?.execute as unknown as (
+        ...args: unknown[]
+      ) => Promise<unknown>
+    )(
+      "invalid-model-rank",
+      { profileId: "scout", limit: 2 },
+      AbortSignal.timeout(1000),
+      undefined,
+      {},
+    ),
+    /MODEL_OPTIONS_RESPONSE_INVALID/u,
+  );
+  assert.equal(calls.length, 32);
+  invalidModelRank = false;
+  oversizedMoreAvailable = true;
+  await assert.rejects(
+    (
+      modelOptionsTool?.execute as unknown as (
+        ...args: unknown[]
+      ) => Promise<unknown>
+    )(
+      "oversized-more-available",
+      { profileId: "scout", limit: 2 },
+      AbortSignal.timeout(1000),
+      undefined,
+      {},
+    ),
+    /MODEL_OPTIONS_RESPONSE_INVALID/u,
+  );
+  assert.equal(calls.length, 33);
+  oversizedMoreAvailable = false;
+  invalidThinkingOrder = true;
+  await assert.rejects(
+    (
+      modelOptionsTool?.execute as unknown as (
+        ...args: unknown[]
+      ) => Promise<unknown>
+    )(
+      "invalid-thinking-order",
+      { profileId: "scout", limit: 2 },
+      AbortSignal.timeout(1000),
+      undefined,
+      {},
+    ),
+    /MODEL_OPTIONS_RESPONSE_INVALID/u,
+  );
+  assert.equal(calls.length, 34);
+  invalidThinkingOrder = false;
   const agentListTool = tools.find((item) => item.name === "agent_list");
   const agentListProperties = (
     agentListTool?.parameters as {
@@ -229,7 +648,7 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
     ),
     /INVALID_REQUEST/,
   );
-  assert.equal(calls.length, 27);
+  assert.equal(calls.length, 34);
   const agentPromptTool = tools.find((item) => item.name === "agent_prompt");
   const agentPromptProperties = (
     agentPromptTool?.parameters as {
@@ -263,7 +682,7 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
     ),
     /INVALID_REQUEST/u,
   );
-  assert.equal(calls.length, 27);
+  assert.equal(calls.length, 34);
 });
 
 test("launch tools add lifecycle reminders only for created work", async () => {
