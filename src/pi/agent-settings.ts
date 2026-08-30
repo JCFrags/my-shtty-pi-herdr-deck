@@ -391,7 +391,11 @@ function createEndpointSubmenu(
         done(`${String(Object.keys(endpoints).length)} configured`);
         return;
       }
-      if (id !== "none") endpoints[id] = { maxConcurrentAgents: Number(value) };
+      if (id !== "none")
+        endpoints[id] = {
+          ...endpoints[id],
+          maxConcurrentAgents: Number(value),
+        };
     },
     () => done(undefined),
   );

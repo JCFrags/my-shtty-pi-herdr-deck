@@ -3646,8 +3646,10 @@ export class Broker {
                 ? { projectKey: inheritedProjectKey }
                 : {}),
             asOf: new Date(this.#now()).toISOString(),
-            limit: p.limit === undefined ? 10 : Number(p.limit),
+            limit: MODEL_RANKING_POLICY.maxEligibleCandidates,
           }),
+          this.#endpointPolicy,
+          p.limit === undefined ? 10 : Number(p.limit),
         );
       } else if (request.method === "model.policy.get") {
         requirePermission(principal, "read:state");

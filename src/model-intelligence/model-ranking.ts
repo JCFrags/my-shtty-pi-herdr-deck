@@ -113,18 +113,36 @@ export interface AvailableModelRatingsView {
   readonly value: string;
 }
 
+export interface AvailableThinkingGuideView {
+  readonly thinkingLevel: string;
+  readonly useFor: string;
+}
+
+export interface AvailableModelCapacityView {
+  readonly status: "ready" | "will_queue";
+  readonly available: number;
+  readonly limit: number;
+}
+
+export interface AvailableModelThinkingView {
+  readonly rank: number;
+  readonly thinkingLevel: string;
+  readonly recommended: boolean;
+  readonly ratings: AvailableModelRatingsView;
+}
+
 export interface AvailableModelOptionView {
   readonly rank: number;
   readonly provider: string;
   readonly modelId: string;
-  readonly thinkingLevel: string;
   readonly recommended: boolean;
-  readonly ratings: AvailableModelRatingsView;
-  readonly availability: string;
+  readonly thinkingLevels: readonly AvailableModelThinkingView[];
+  readonly capacity?: AvailableModelCapacityView;
 }
 
 export interface AvailableModelOptionsView {
   readonly profileId: string;
+  readonly thinkingGuide: readonly AvailableThinkingGuideView[];
   readonly availableModels: readonly AvailableModelOptionView[];
   readonly moreAvailable: number;
 }
@@ -189,15 +207,35 @@ function fiveStarDisplay(valuePpm: number): string {
   return `${"★".repeat(rating)}${"☆".repeat(5 - rating)} ${rating}/5`;
 }
 
+const THINKING_GUIDANCE = Object.freeze({
+  off: "direct work; no extra reasoning",
+  minimal: "tiny edits and lookups",
+  low: "small, clear tasks",
+  medium: "balanced default",
+  high: "complex coding, debugging, or review",
+  xhigh: "hard, ambiguous work; slower",
+  max: "deepest reasoning; slowest",
+} as const);
+
 export function availableModelOptionsView(
   options: ModelOptionsView,
+  endpointPolicy: EndpointPolicyConfig,
+  limit: number = MODEL_RANKING_POLICY.maxReturnedCandidates,
 ): AvailableModelOptionsView {
-  return {
-    profileId: options.taskProfile,
-    availableModels: options.candidates.map((candidate) => ({
+  if (
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > MODEL_RANKING_POLICY.maxReturnedCandidates
+  )
+    throw new Error("MODEL_OPTIONS_LIMIT_INVALID");
+  const groups = new Map<string, AvailableModelOptionView>();
+  for (const candidate of options.candidates) {
+    const key = [
+      candidate.selection.provider,
+      candidate.selection.modelId,
+    ].join("\u0000");
+    const thinking: AvailableModelThinkingView = {
       rank: candidate.rank,
-      provider: candidate.selection.provider,
-      modelId: candidate.selection.modelId,
       thinkingLevel: candidate.selection.thinkingLevel,
       recommended: candidate.rank === 1,
       ratings: {
@@ -207,15 +245,48 @@ export function availableModelOptionsView(
         speed: fiveStarDisplay(candidate.components.speed),
         value: fiveStarDisplay(candidate.components.effectiveCost),
       },
-      availability:
-        candidate.endpoint.available > 0
-          ? `ready (${candidate.endpoint.available}/${candidate.endpoint.limit} slots)`
-          : `will queue (0/${candidate.endpoint.limit} slots)`,
-    })),
-    moreAvailable: Math.max(
-      0,
-      options.eligibleCount - options.candidates.length,
+    };
+    const current = groups.get(key);
+    if (current) {
+      groups.set(key, {
+        ...current,
+        recommended: current.recommended || thinking.recommended,
+        thinkingLevels: [...current.thinkingLevels, thinking],
+      });
+      continue;
+    }
+    const endpoint = endpointPolicy.endpoints?.[candidate.endpoint.endpointId];
+    groups.set(key, {
+      rank: groups.size + 1,
+      provider: candidate.selection.provider,
+      modelId: candidate.selection.modelId,
+      recommended: thinking.recommended,
+      thinkingLevels: [thinking],
+      ...(endpoint?.resourceClass === "local_compute"
+        ? {
+            capacity: {
+              status: candidate.endpoint.available > 0 ? "ready" : "will_queue",
+              available: candidate.endpoint.available,
+              limit: candidate.endpoint.limit,
+            } as const,
+          }
+        : {}),
+    });
+  }
+  const available = [...groups.values()];
+  const returned = available.slice(0, limit);
+  const presentLevels = new Set(
+    returned.flatMap((model) =>
+      model.thinkingLevels.map((thinking) => thinking.thinkingLevel),
     ),
+  );
+  return {
+    profileId: options.taskProfile,
+    thinkingGuide: Object.entries(THINKING_GUIDANCE)
+      .filter(([thinkingLevel]) => presentLevels.has(thinkingLevel))
+      .map(([thinkingLevel, useFor]) => ({ thinkingLevel, useFor })),
+    availableModels: returned,
+    moreAvailable: available.length - returned.length,
   };
 }
 

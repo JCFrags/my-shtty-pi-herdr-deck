@@ -327,6 +327,9 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 32
+        },
+        "resourceClass": {
+          "enum": ["local_compute", "remote_service"]
         }
       }
     },

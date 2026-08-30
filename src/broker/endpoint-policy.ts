@@ -49,8 +49,11 @@ export interface ModelFoundationSourcesConfig {
 
 const ENDPOINT_ID_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/u;
 
+export type EndpointResourceClass = "local_compute" | "remote_service";
+
 export interface EndpointLimit {
   readonly maxConcurrentAgents: number;
+  readonly resourceClass?: EndpointResourceClass;
 }
 
 export interface EndpointMapping {
@@ -77,6 +80,7 @@ export interface EndpointPolicyConfig {
 export interface ResolvedEndpoint {
   readonly endpointId: string;
   readonly maxConcurrentAgents: number;
+  readonly resourceClass?: EndpointResourceClass;
   readonly mapping: "exact" | "provider" | "derived";
 }
 
@@ -129,17 +133,25 @@ export function validateEndpointPolicyConfig(
         throw new Error("scheduler.endpoints has an invalid endpoint ID.");
       const limit = object(rawLimit, `scheduler.endpoints.${endpointId}`);
       if (
-        Object.keys(limit).length !== 1 ||
+        Object.keys(limit).some(
+          (key) => key !== "maxConcurrentAgents" && key !== "resourceClass",
+        ) ||
         !Object.hasOwn(limit, "maxConcurrentAgents") ||
         !Number.isSafeInteger(limit.maxConcurrentAgents) ||
         Number(limit.maxConcurrentAgents) < 1 ||
-        Number(limit.maxConcurrentAgents) > MAX_ENDPOINT_CONCURRENCY
+        Number(limit.maxConcurrentAgents) > MAX_ENDPOINT_CONCURRENCY ||
+        (limit.resourceClass !== undefined &&
+          limit.resourceClass !== "local_compute" &&
+          limit.resourceClass !== "remote_service")
       )
         throw new Error(
-          `scheduler.endpoints.${endpointId}.maxConcurrentAgents is outside its safe bounds.`,
+          `scheduler.endpoints.${endpointId} is outside its safe bounds.`,
         );
       endpoints[endpointId] = {
         maxConcurrentAgents: Number(limit.maxConcurrentAgents),
+        ...(limit.resourceClass !== undefined
+          ? { resourceClass: limit.resourceClass as EndpointResourceClass }
+          : {}),
       };
     }
   }
@@ -440,6 +452,9 @@ export function resolveEndpoint(
   return {
     endpointId: mapping.endpointId,
     maxConcurrentAgents: limit.maxConcurrentAgents,
+    ...(limit.resourceClass !== undefined
+      ? { resourceClass: limit.resourceClass }
+      : {}),
     mapping: exact ? "exact" : "provider",
   };
 }

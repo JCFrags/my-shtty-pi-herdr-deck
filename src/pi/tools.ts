@@ -1273,17 +1273,32 @@ interface AvailableAgentModelRatings {
   readonly speed: string;
   readonly value: string;
 }
+interface AvailableAgentThinkingGuide {
+  readonly thinkingLevel: ThinkingLevel;
+  readonly useFor: string;
+}
+interface AvailableAgentModelCapacity {
+  readonly status: "ready" | "will_queue";
+  readonly available: number;
+  readonly limit: number;
+}
+interface AvailableAgentModelThinking {
+  readonly rank: number;
+  readonly thinkingLevel: ThinkingLevel;
+  readonly recommended: boolean;
+  readonly ratings: AvailableAgentModelRatings;
+}
 interface AvailableAgentModelOption {
   readonly rank: number;
   readonly provider: string;
   readonly modelId: string;
-  readonly thinkingLevel: string;
   readonly recommended: boolean;
-  readonly ratings: AvailableAgentModelRatings;
-  readonly availability: string;
+  readonly thinkingLevels: readonly AvailableAgentModelThinking[];
+  readonly capacity?: AvailableAgentModelCapacity;
 }
 interface AvailableAgentModelsDetails {
   readonly profileId: string;
+  readonly thinkingGuide: readonly AvailableAgentThinkingGuide[];
   readonly availableModels: readonly AvailableAgentModelOption[];
   readonly moreAvailable: number;
 }
@@ -1308,21 +1323,6 @@ function validStarRating(value: unknown): value is string {
   const empty = match[2]?.length ?? 0;
   return filled + empty === 5 && filled === Number(match[3]);
 }
-const MODEL_AVAILABILITY_PATTERN =
-  /^(ready|will queue) \(([0-9]+)\/([1-9][0-9]*) slots\)$/u;
-function validModelAvailability(value: unknown): value is string {
-  if (typeof value !== "string" || value.length > 64) return false;
-  const match = MODEL_AVAILABILITY_PATTERN.exec(value);
-  if (!match) return false;
-  const available = Number(match[2]);
-  const limit = Number(match[3]);
-  return (
-    Number.isSafeInteger(available) &&
-    Number.isSafeInteger(limit) &&
-    available <= limit &&
-    (match[1] === "ready" ? available > 0 : available === 0)
-  );
-}
 function ratingCategories(ratings: AvailableAgentModelRatings): string {
   return [
     `Task fit ${ratings.taskFit}`,
@@ -1339,6 +1339,54 @@ function safeModelOptionText(value: unknown, max = 256): value is string {
     return false;
   }
 }
+function parseModelRatings(value: unknown): AvailableAgentModelRatings {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+  const ratings = value as Record<string, unknown>;
+  if (
+    !hasExactKeys(ratings, [
+      "overall",
+      "taskFit",
+      "reliability",
+      "speed",
+      "value",
+    ]) ||
+    !["overall", "taskFit", "reliability", "speed", "value"].every((key) =>
+      validStarRating(ratings[key]),
+    )
+  )
+    throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+  return {
+    overall: ratings.overall as string,
+    taskFit: ratings.taskFit as string,
+    reliability: ratings.reliability as string,
+    speed: ratings.speed as string,
+    value: ratings.value as string,
+  };
+}
+function parseModelCapacity(value: unknown): AvailableAgentModelCapacity {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+  const capacity = value as Record<string, unknown>;
+  if (
+    !hasExactKeys(capacity, ["status", "available", "limit"]) ||
+    (capacity.status !== "ready" && capacity.status !== "will_queue") ||
+    !nonnegativeSafeInteger(capacity.available) ||
+    !Number.isSafeInteger(capacity.limit) ||
+    Number(capacity.limit) < 1 ||
+    Number(capacity.limit) > 32 ||
+    Number(capacity.available) > Number(capacity.limit) ||
+    (capacity.status === "ready"
+      ? Number(capacity.available) < 1
+      : Number(capacity.available) !== 0)
+  )
+    throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+  return {
+    status: capacity.status,
+    available: Number(capacity.available),
+    limit: Number(capacity.limit),
+  };
+}
 function availableAgentModelsResult(value: unknown): {
   content: Array<{ type: "text"; text: string }>;
   details: AvailableAgentModelsDetails;
@@ -1347,14 +1395,43 @@ function availableAgentModelsResult(value: unknown): {
     throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
   const source = value as Record<string, unknown>;
   if (
-    !hasExactKeys(source, ["profileId", "availableModels", "moreAvailable"]) ||
+    !hasExactKeys(source, [
+      "profileId",
+      "thinkingGuide",
+      "availableModels",
+      "moreAvailable",
+    ]) ||
     !safeModelOptionText(source.profileId) ||
+    !Array.isArray(source.thinkingGuide) ||
+    source.thinkingGuide.length > THINKING_LEVELS.length ||
     !Array.isArray(source.availableModels) ||
     source.availableModels.length > 16 ||
     !nonnegativeSafeInteger(source.moreAvailable) ||
     source.availableModels.length + source.moreAvailable > 256
   )
     throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+  const thinkingGuide = source.thinkingGuide.map(
+    (entry): AvailableAgentThinkingGuide => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry))
+        throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+      const guide = entry as Record<string, unknown>;
+      if (
+        !hasExactKeys(guide, ["thinkingLevel", "useFor"]) ||
+        !safeModelOptionText(guide.thinkingLevel, 32) ||
+        !THINKING_LEVELS.includes(guide.thinkingLevel as ThinkingLevel) ||
+        !safeModelOptionText(guide.useFor, 96)
+      )
+        throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+      return {
+        thinkingLevel: guide.thinkingLevel as ThinkingLevel,
+        useFor: guide.useFor,
+      };
+    },
+  );
+  const usedRanks = new Set<number>();
+  const usedModels = new Set<string>();
+  let pairCount = 0;
+  let previousGroupBestRank = 0;
   const availableModels = source.availableModels.map(
     (candidate, index): AvailableAgentModelOption => {
       if (
@@ -1364,61 +1441,110 @@ function availableAgentModelsResult(value: unknown): {
       )
         throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
       const option = candidate as Record<string, unknown>;
+      const expectedKeys = [
+        "rank",
+        "provider",
+        "modelId",
+        "recommended",
+        "thinkingLevels",
+        ...(Object.hasOwn(option, "capacity") ? ["capacity"] : []),
+      ];
       if (
-        !hasExactKeys(option, [
-          "rank",
-          "provider",
-          "modelId",
-          "thinkingLevel",
-          "recommended",
-          "ratings",
-          "availability",
-        ])
-      )
-        throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
-      const ratings = option.ratings;
-      if (
-        !ratings ||
-        typeof ratings !== "object" ||
-        Array.isArray(ratings) ||
-        Object.keys(ratings).length !== 5
-      )
-        throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
-      const rating = ratings as Record<string, unknown>;
-      if (
+        !hasExactKeys(option, expectedKeys) ||
         !Number.isSafeInteger(option.rank) ||
         Number(option.rank) !== index + 1 ||
         !safeModelOptionText(option.provider) ||
         !safeModelOptionText(option.modelId) ||
-        !safeModelOptionText(option.thinkingLevel, 32) ||
-        !THINKING_LEVELS.includes(option.thinkingLevel as ThinkingLevel) ||
         typeof option.recommended !== "boolean" ||
-        option.recommended !== (option.rank === 1) ||
-        !validModelAvailability(option.availability) ||
-        !["overall", "taskFit", "reliability", "speed", "value"].every((key) =>
-          validStarRating(rating[key]),
-        )
+        !Array.isArray(option.thinkingLevels) ||
+        option.thinkingLevels.length < 1 ||
+        option.thinkingLevels.length > THINKING_LEVELS.length
       )
         throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+      const modelKey = `${option.provider}\u0000${option.modelId}`;
+      if (usedModels.has(modelKey))
+        throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+      usedModels.add(modelKey);
+      const usedLevels = new Set<ThinkingLevel>();
+      const thinkingLevels = option.thinkingLevels.map(
+        (entry): AvailableAgentModelThinking => {
+          if (!entry || typeof entry !== "object" || Array.isArray(entry))
+            throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+          const thinking = entry as Record<string, unknown>;
+          if (
+            !hasExactKeys(thinking, [
+              "rank",
+              "thinkingLevel",
+              "recommended",
+              "ratings",
+            ]) ||
+            !Number.isSafeInteger(thinking.rank) ||
+            Number(thinking.rank) < 1 ||
+            Number(thinking.rank) > 256 ||
+            usedRanks.has(Number(thinking.rank)) ||
+            !safeModelOptionText(thinking.thinkingLevel, 32) ||
+            !THINKING_LEVELS.includes(
+              thinking.thinkingLevel as ThinkingLevel,
+            ) ||
+            usedLevels.has(thinking.thinkingLevel as ThinkingLevel) ||
+            typeof thinking.recommended !== "boolean" ||
+            thinking.recommended !== (thinking.rank === 1)
+          )
+            throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+          usedRanks.add(Number(thinking.rank));
+          usedLevels.add(thinking.thinkingLevel as ThinkingLevel);
+          pairCount++;
+          return {
+            rank: Number(thinking.rank),
+            thinkingLevel: thinking.thinkingLevel as ThinkingLevel,
+            recommended: thinking.recommended,
+            ratings: parseModelRatings(thinking.ratings),
+          };
+        },
+      );
+      if (
+        thinkingLevels.some(
+          (level, levelIndex) =>
+            levelIndex > 0 &&
+            level.rank <= (thinkingLevels[levelIndex - 1]?.rank ?? 0),
+        ) ||
+        (thinkingLevels[0]?.rank ?? 0) <= previousGroupBestRank ||
+        option.recommended !== thinkingLevels.some((level) => level.recommended)
+      )
+        throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+      previousGroupBestRank = thinkingLevels[0]!.rank;
       return {
         rank: Number(option.rank),
         provider: option.provider,
         modelId: option.modelId,
-        thinkingLevel: option.thinkingLevel,
         recommended: option.recommended,
-        ratings: {
-          overall: rating.overall as string,
-          taskFit: rating.taskFit as string,
-          reliability: rating.reliability as string,
-          speed: rating.speed as string,
-          value: rating.value as string,
-        },
-        availability: option.availability,
+        thinkingLevels,
+        ...(Object.hasOwn(option, "capacity")
+          ? { capacity: parseModelCapacity(option.capacity) }
+          : {}),
       };
     },
   );
+  if (pairCount > 256) throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+  const presentLevels = new Set(
+    availableModels.flatMap((model) =>
+      model.thinkingLevels.map((thinking) => thinking.thinkingLevel),
+    ),
+  );
+  const expectedGuide = THINKING_LEVELS.filter((level) =>
+    presentLevels.has(level),
+  );
+  if (
+    thinkingGuide.length !== expectedGuide.length ||
+    thinkingGuide.some(
+      (guide, index) => guide.thinkingLevel !== expectedGuide[index],
+    ) ||
+    (availableModels.length > 0 && !availableModels[0]?.recommended)
+  )
+    throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
   const details: AvailableAgentModelsDetails = {
     profileId: source.profileId,
+    thinkingGuide,
     availableModels,
     moreAvailable: source.moreAvailable,
   };
@@ -1440,9 +1566,15 @@ function oneLineComponent(lines: readonly string[]): Component {
     invalidate(): void {},
   };
 }
-function compactModelAvailability(value: string): string {
-  const match = MODEL_AVAILABILITY_PATTERN.exec(value);
-  return match ? `${match[1]} ${match[2]}/${match[3]}` : value;
+function compactLocalCapacity(
+  capacity: AvailableAgentModelCapacity,
+  theme: ToolRenderTheme,
+): string {
+  const text =
+    capacity.status === "ready"
+      ? `local · ${capacity.available}/${capacity.limit} free`
+      : "local · will queue";
+  return theme.fg(capacity.status === "ready" ? "success" : "warning", text);
 }
 function renderAvailableAgentModels(
   result: {
@@ -1459,45 +1591,39 @@ function renderAvailableAgentModels(
     ? details.availableModels
     : details.availableModels.slice(0, 4);
   const total = details.availableModels.length + details.moreAvailable;
+  const guidance = new Map(
+    details.thinkingGuide.map((entry) => [entry.thinkingLevel, entry.useFor]),
+  );
   const lines = [
-    theme.fg(
-      "success",
-      `✓ ${total} available model option${total === 1 ? "" : "s"}`,
-    ) + theme.fg("muted", ` for ${details.profileId}`),
+    theme.fg("success", `✓ ${total} available model${total === 1 ? "" : "s"}`) +
+      theme.fg("muted", ` for ${details.profileId}`),
   ];
-  for (const option of displayed) {
-    const marker = option.recommended ? theme.fg("accent", "→") : " ";
-    const capacity = compactModelAvailability(option.availability);
-    const availability = option.availability.startsWith("ready")
-      ? theme.fg("success", capacity)
-      : theme.fg("warning", capacity);
-    if (!expanded) {
+  for (const model of displayed) {
+    const marker = model.recommended ? theme.fg("accent", "→") : " ";
+    lines.push(
+      `${marker} ${theme.fg("accent", `#${model.rank}`)} ${theme.fg("muted", `${model.provider}/${model.modelId}`)}`,
+    );
+    if (model.capacity)
+      lines.push(`    ${compactLocalCapacity(model.capacity, theme)}`);
+    for (const thinking of model.thinkingLevels) {
+      const thinkingMarker = thinking.recommended
+        ? theme.fg("accent", "→")
+        : " ";
       lines.push(
-        `${marker} ${theme.fg("accent", `#${option.rank}`)} ${theme.fg("muted", `${option.provider}/${option.modelId}`)}`,
+        `    ${thinkingMarker} ${thinking.thinkingLevel} · ${theme.fg("accent", thinking.ratings.overall)} · ${guidance.get(thinking.thinkingLevel) ?? ""}`,
       );
-      lines.push(
-        `    ${availability} · ${option.thinkingLevel} · ${theme.fg("accent", option.ratings.overall)}`,
-      );
-      continue;
+      if (expanded)
+        lines.push(
+          `      ${theme.fg("dim", ratingCategories(thinking.ratings))}`,
+        );
     }
-    lines.push(
-      `${marker} ${theme.fg("accent", `#${option.rank}`)}${option.recommended ? theme.fg("accent", " Recommended") : ""}`,
-    );
-    lines.push(
-      `    ${theme.fg("dim", `Model: ${option.provider}/${option.modelId}`)}`,
-    );
-    lines.push(
-      `    Thinking: ${option.thinkingLevel} · Overall: ${theme.fg("accent", option.ratings.overall)}`,
-    );
-    lines.push(`    ${theme.fg("dim", ratingCategories(option.ratings))}`);
-    lines.push(`    Capacity: ${availability}`);
   }
   const hidden = details.availableModels.length - displayed.length;
   if (hidden > 0)
     lines.push(
       theme.fg(
         "dim",
-        `… ${hidden} more returned option${hidden === 1 ? "" : "s"}`,
+        `… ${hidden} more returned model${hidden === 1 ? "" : "s"}`,
       ),
     );
   if (details.moreAvailable > 0)
@@ -2317,7 +2443,7 @@ export function registerParentTools(
           : `Orchestrator ${tool}`,
       description:
         tool === "agent_model_options"
-          ? "List only model and thinking-level choices that Pi reports as available and the broker allows for this task profile. Results include simple five-star ratings and show whether a new agent can start now or will queue."
+          ? "List only Pi-available, broker-allowed models for this task profile. Each model groups its thinking levels with simple five-star ratings and selection guidance. Slot capacity appears only for explicitly local compute."
           : `Use broker method for ${tool}. The broker checks current state and parent scope on every call.`,
       parameters: parentInputSchema(tool as ParentToolName),
       ...(tool === "agent_model_options"

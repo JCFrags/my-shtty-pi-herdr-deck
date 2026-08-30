@@ -19,8 +19,14 @@ const selection = {
 
 const endpointConfig = {
   endpoints: {
-    "local-host": { maxConcurrentAgents: 1 },
-    "remote-host": { maxConcurrentAgents: 8 },
+    "local-host": {
+      maxConcurrentAgents: 1,
+      resourceClass: "local_compute" as const,
+    },
+    "remote-host": {
+      maxConcurrentAgents: 8,
+      resourceClass: "remote_service" as const,
+    },
   },
   mappings: [
     { provider: "local-provider", endpointId: "remote-host" },
@@ -113,6 +119,21 @@ test("endpoint configuration validates mappings and keeps scheduler scalars sepa
     () =>
       validateConfig({
         version: 1,
+        scheduler: {
+          endpoints: {
+            endpoint: {
+              maxConcurrentAgents: 1,
+              resourceClass: "desktop",
+            },
+          },
+        },
+      }),
+    /safe bounds/u,
+  );
+  assert.throws(
+    () =>
+      validateConfig({
+        version: 1,
         scheduler: { endpoints: endpointConfig.endpoints },
         modelIntelligence: {
           schemaVersion: 1,
@@ -196,6 +217,7 @@ test("exact endpoint mapping wins and provider fallback is stable", () => {
   assert.deepEqual(resolveEndpoint(selection, endpointConfig, 4), {
     endpointId: "local-host",
     maxConcurrentAgents: 1,
+    resourceClass: "local_compute",
     mapping: "exact",
   });
   assert.deepEqual(
@@ -203,6 +225,7 @@ test("exact endpoint mapping wins and provider fallback is stable", () => {
     {
       endpointId: "remote-host",
       maxConcurrentAgents: 8,
+      resourceClass: "remote_service",
       mapping: "provider",
     },
   );
