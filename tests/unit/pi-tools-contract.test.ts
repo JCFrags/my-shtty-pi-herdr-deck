@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { visibleWidth } from "@pi-herdr-deck/tui";
 import { registerParentTools } from "../../src/pi/tools.js";
 const inputs: Record<string, Record<string, unknown>> = {
   delegate_compact: {
@@ -167,8 +168,8 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
             },
             {
               rank: 2,
-              provider: "provider-a",
-              modelId: "model-busy",
+              provider: "openrouter",
+              modelId: "nvidia/nemotron-3-ultra-550b-a55b:free",
               thinkingLevel: "high",
               recommended: false,
               ratings: {
@@ -181,7 +182,7 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
               availability: "will queue (0/4 slots)",
             },
           ],
-          moreAvailable: oversizedMoreAvailable ? 255 : 0,
+          moreAvailable: oversizedMoreAvailable ? 255 : 3,
           ...(extraModelOptionsField ? { candidates: [] } : {}),
         };
       return method === "agent.wait"
@@ -291,16 +292,13 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
       availableModels: Array<Record<string, unknown>>;
     };
   };
-  assert.match(
-    modelOptionsResult.content[0]?.text ?? "",
-    /Available agent models/u,
-  );
-  assert.match(modelOptionsResult.content[0]?.text ?? "", /model-ready/u);
-  assert.doesNotMatch(
-    modelOptionsResult.content[0]?.text ?? "",
-    /policy-blocked/u,
-  );
+  const modelOptionsContent = modelOptionsResult.content[0]?.text ?? "";
+  assert.deepEqual(JSON.parse(modelOptionsContent), modelOptionsResult.details);
+  assert.match(modelOptionsContent, /model-ready/u);
+  assert.doesNotMatch(modelOptionsContent, /policy-blocked/u);
+  assert.doesNotMatch(modelOptionsContent, /Available agent models/u);
   assert.equal(modelOptionsResult.details.availableModels.length, 2);
+  assert.equal(modelOptionsResult.details.moreAvailable, 3);
   assert.deepEqual(modelOptionsResult.details.availableModels[0], {
     rank: 1,
     provider: "provider-a",
@@ -327,14 +325,6 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
     speed: "★☆☆☆☆ 1/5",
     value: "★☆☆☆☆ 1/5",
   });
-  assert.match(
-    modelOptionsResult.content[0]?.text ?? "",
-    /Overall ★★★★☆ 4\/5/u,
-  );
-  assert.match(
-    modelOptionsResult.content[0]?.text ?? "",
-    /Task fit ★★★★★ 5\/5 · Reliability ★★★★☆ 4\/5 · Speed ★★★☆☆ 3\/5 · Value ★★☆☆☆ 2\/5/u,
-  );
   assert.equal(
     Object.hasOwn(
       modelOptionsResult.details.availableModels[0] ?? {},
@@ -357,25 +347,80 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
     { fg: (_color, text) => text, bold: (text) => text },
     {},
   );
+  const collapsedModelOptionLines = renderedModelOptions?.render(80) ?? [];
+  const collapsedModelOptions = collapsedModelOptionLines.join("\n");
+  assert.match(collapsedModelOptions, /5 available model options/u);
+  assert.match(collapsedModelOptions, /#1 provider-a\/model-ready/u);
+  assert.match(collapsedModelOptions, /ready 2\/4 · medium · ★★★★☆ 4\/5/u);
   assert.match(
-    renderedModelOptions?.render(200).join("\n") ?? "",
-    /2 available model options/u,
+    collapsedModelOptions.replace(/\s+/gu, ""),
+    /openrouter\/nvidia\/nemotron-3-ultra-550b-a55b:free/u,
   );
-  const collapsedModelOptions =
-    renderedModelOptions?.render(200).join("\n") ?? "";
-  assert.match(collapsedModelOptions, /★★★★☆ 4\/5/u);
+  assert.match(collapsedModelOptions, /will queue 0\/4 · high · ☆☆☆☆☆ 0\/5/u);
+  assert.match(collapsedModelOptions, /3 more available/u);
+  for (const width of [24, 40, 80, 140]) {
+    const lines = renderedModelOptions?.render(width) ?? [];
+    assert.equal(lines.length, 6);
+    assert.equal(
+      lines.every((line) => visibleWidth(line) <= width),
+      true,
+    );
+    assert.equal(
+      lines.some((line) => line.trimStart().startsWith("slots)")),
+      false,
+    );
+    assert.match(lines.join("\n"), /will queue 0\/4/u);
+  }
   assert.doesNotMatch(collapsedModelOptions, /Task fit/u);
   assert.doesNotMatch(collapsedModelOptions, /policy-blocked/u);
+  assert.equal(
+    collapsedModelOptionLines.some((line) =>
+      line.trimStart().startsWith("slots)"),
+    ),
+    false,
+  );
+  const hiddenModelOptionsDetails = {
+    ...modelOptionsResult.details,
+    availableModels: [
+      ...modelOptionsResult.details.availableModels,
+      ...[3, 4, 5].map((rank) => ({
+        ...modelOptionsResult.details.availableModels[0],
+        rank,
+        modelId: `model-${rank}`,
+        recommended: false,
+      })),
+    ],
+  };
+  const hiddenModelOptions = modelOptionsTool?.renderResult?.(
+    {
+      content: [
+        { type: "text", text: JSON.stringify(hiddenModelOptionsDetails) },
+      ],
+      details: hiddenModelOptionsDetails,
+    },
+    { expanded: false },
+    { fg: (_color, text) => text, bold: (text) => text },
+    {},
+  );
+  const hiddenModelOptionsText =
+    hiddenModelOptions?.render(80).join("\n") ?? "";
+  assert.match(hiddenModelOptionsText, /8 available model options/u);
+  assert.match(hiddenModelOptionsText, /… 1 more returned option/u);
+  assert.doesNotMatch(hiddenModelOptionsText, /model-5/u);
   const expandedModelOptions = modelOptionsTool?.renderResult?.(
     modelOptionsResult,
     { expanded: true },
     { fg: (_color, text) => text, bold: (text) => text },
     {},
   );
+  const expandedModelOptionsText =
+    expandedModelOptions?.render(240).join("\n") ?? "";
   assert.match(
-    expandedModelOptions?.render(240).join("\n") ?? "",
+    expandedModelOptionsText,
     /Task fit ★★★★★ 5\/5 · Reliability ★★★★☆ 4\/5/u,
   );
+  assert.match(expandedModelOptionsText, /Model: provider-a\/model-ready/u);
+  assert.match(expandedModelOptionsText, /Capacity: ready 2\/4/u);
   await assert.rejects(
     (
       modelOptionsTool?.execute as unknown as (

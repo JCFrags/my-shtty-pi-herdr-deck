@@ -21,7 +21,12 @@ import {
   type ThinkingLevel,
 } from "../broker/model-policy.js";
 import { AGENT_STATES } from "../state/types.js";
-import { Text } from "@pi-herdr-deck/tui";
+import {
+  Text,
+  truncateToWidth,
+  visibleWidth,
+  type Component,
+} from "@pi-herdr-deck/tui";
 
 const MAX_BODY_BYTES = 262_144;
 const MAX_TEXT_BYTES = 16_384;
@@ -1223,7 +1228,7 @@ interface ToolDefinition {
     options: { expanded: boolean; isPartial?: boolean },
     theme: ToolRenderTheme,
     context: unknown,
-  ) => Text;
+  ) => Component;
 }
 export interface PiToolBinding {
   adapter: PiAdapter | undefined;
@@ -1303,11 +1308,11 @@ function validStarRating(value: unknown): value is string {
   const empty = match[2]?.length ?? 0;
   return filled + empty === 5 && filled === Number(match[3]);
 }
+const MODEL_AVAILABILITY_PATTERN =
+  /^(ready|will queue) \(([0-9]+)\/([1-9][0-9]*) slots\)$/u;
 function validModelAvailability(value: unknown): value is string {
   if (typeof value !== "string" || value.length > 64) return false;
-  const match = /^(ready|will queue) \(([0-9]+)\/([1-9][0-9]*) slots\)$/u.exec(
-    value,
-  );
+  const match = MODEL_AVAILABILITY_PATTERN.exec(value);
   if (!match) return false;
   const available = Number(match[2]);
   const limit = Number(match[3]);
@@ -1417,22 +1422,27 @@ function availableAgentModelsResult(value: unknown): {
     availableModels,
     moreAvailable: source.moreAvailable,
   };
-  const lines = [
-    `Available agent models for ${details.profileId}:`,
-    "Use provider, modelId, and thinkingLevel exactly as shown.",
-    ...availableModels.flatMap((option) => [
-      `${option.recommended ? "Recommended" : "-"} #${option.rank} ${option.provider}/${option.modelId} | thinking=${option.thinkingLevel} | Overall ${option.ratings.overall} | ${option.availability}`,
-      `  ${ratingCategories(option.ratings)}`,
-    ]),
-  ];
-  if (details.moreAvailable > 0)
-    lines.push(
-      `${details.moreAvailable} more available option${details.moreAvailable === 1 ? "" : "s"}; increase limit to see more.`,
-    );
   return {
-    content: [{ type: "text", text: lines.join("\n") }],
+    content: [{ type: "text", text: JSON.stringify(details) }],
     details,
   };
+}
+function oneLineComponent(lines: readonly string[]): Component {
+  return {
+    render(width: number): string[] {
+      const safeWidth = Math.max(1, Math.floor(width));
+      return lines.map((line) =>
+        visibleWidth(line) <= safeWidth
+          ? line
+          : `${truncateToWidth(line, Math.max(0, safeWidth - 1))}…`,
+      );
+    },
+    invalidate(): void {},
+  };
+}
+function compactModelAvailability(value: string): string {
+  const match = MODEL_AVAILABILITY_PATTERN.exec(value);
+  return match ? `${match[1]} ${match[2]}/${match[3]}` : value;
 }
 function renderAvailableAgentModels(
   result: {
@@ -1441,34 +1451,63 @@ function renderAvailableAgentModels(
   },
   expanded: boolean,
   theme: ToolRenderTheme,
-): Text {
+): Component {
   const details = result.details as AvailableAgentModelsDetails | undefined;
   if (!details || !Array.isArray(details.availableModels))
     return new Text(result.content[0]?.text ?? "", 0, 0);
   const displayed = expanded
     ? details.availableModels
-    : details.availableModels.slice(0, 5);
+    : details.availableModels.slice(0, 4);
   const total = details.availableModels.length + details.moreAvailable;
-  let text =
+  const lines = [
     theme.fg(
       "success",
       `✓ ${total} available model option${total === 1 ? "" : "s"}`,
-    ) + theme.fg("muted", ` for ${details.profileId}`);
+    ) + theme.fg("muted", ` for ${details.profileId}`),
+  ];
   for (const option of displayed) {
     const marker = option.recommended ? theme.fg("accent", "→") : " ";
+    const capacity = compactModelAvailability(option.availability);
     const availability = option.availability.startsWith("ready")
-      ? theme.fg("success", option.availability)
-      : theme.fg("warning", option.availability);
-    text += `\n${marker} ${theme.fg("accent", `#${option.rank}`)} ${theme.fg("muted", `${option.provider}/${option.modelId}`)} · ${option.thinkingLevel} · ${theme.fg("accent", option.ratings.overall)} · ${availability}`;
-    if (expanded)
-      text += `\n    ${theme.fg("dim", ratingCategories(option.ratings))}`;
+      ? theme.fg("success", capacity)
+      : theme.fg("warning", capacity);
+    if (!expanded) {
+      lines.push(
+        `${marker} ${theme.fg("accent", `#${option.rank}`)} ${theme.fg("muted", `${option.provider}/${option.modelId}`)}`,
+      );
+      lines.push(
+        `    ${availability} · ${option.thinkingLevel} · ${theme.fg("accent", option.ratings.overall)}`,
+      );
+      continue;
+    }
+    lines.push(
+      `${marker} ${theme.fg("accent", `#${option.rank}`)}${option.recommended ? theme.fg("accent", " Recommended") : ""}`,
+    );
+    lines.push(
+      `    ${theme.fg("dim", `Model: ${option.provider}/${option.modelId}`)}`,
+    );
+    lines.push(
+      `    Thinking: ${option.thinkingLevel} · Overall: ${theme.fg("accent", option.ratings.overall)}`,
+    );
+    lines.push(`    ${theme.fg("dim", ratingCategories(option.ratings))}`);
+    lines.push(`    Capacity: ${availability}`);
   }
   const hidden = details.availableModels.length - displayed.length;
   if (hidden > 0)
-    text += `\n${theme.fg("dim", `… ${hidden} more returned option${hidden === 1 ? "" : "s"}`)}`;
+    lines.push(
+      theme.fg(
+        "dim",
+        `… ${hidden} more returned option${hidden === 1 ? "" : "s"}`,
+      ),
+    );
   if (details.moreAvailable > 0)
-    text += `\n${theme.fg("warning", `${details.moreAvailable} more available; increase limit to see them.`)}`;
-  return new Text(text, 0, 0);
+    lines.push(
+      theme.fg(
+        "warning",
+        `${details.moreAvailable} more available; increase limit to see them.`,
+      ),
+    );
+  return oneLineComponent(lines);
 }
 function validateResultInput(input: Record<string, unknown>): void {
   assertExactObject(
