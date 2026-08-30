@@ -17,6 +17,7 @@ import type { PiBrokerClient } from "./broker-client.js";
 import type { PiApiLike, PiContextLike } from "./types.js";
 import { SHIPPED_TASK_PROFILES } from "../broker/model-policy.js";
 import { AGENT_STATES } from "../state/types.js";
+import { Text } from "@pi-herdr-deck/tui";
 
 const MAX_BODY_BYTES = 262_144;
 const MAX_TEXT_BYTES = 16_384;
@@ -702,7 +703,8 @@ function validateExactNested(
         (value as number) < 1 ||
         (key === "timeoutMs" && (value as number) > 1_800_000) ||
         (key === "maxBytes" && (value as number) > 262_144) ||
-        (key === "limit" && (value as number) > 500)
+        (key === "limit" &&
+          (value as number) > (tool === "agent_model_options" ? 16 : 500))
       )
         throw new Error("INVALID_REQUEST");
       continue;
@@ -779,7 +781,8 @@ function validateParentInput(
                 ? 120_000
                 : 1_800_000)) ||
         (key === "maxBytes" && (value as number) > 262_144) ||
-        (key === "limit" && (value as number) > 500) ||
+        (key === "limit" &&
+          (value as number) > (tool === "agent_model_options" ? 16 : 500)) ||
         (key === "durationMs" && (value as number) > 86_400_000) ||
         (key === "pollMs" && (value as number) > 60_000))
     )
@@ -1140,40 +1143,46 @@ function parentInputSchema(tool: ParentToolName): unknown {
       ...Object.fromEntries(
         parentInputKeys[tool].map((key) => [
           key,
-          key === "timeoutMs" &&
-          (tool === "agent_wait" || tool === "agent_prompt")
-            ? { type: "integer", minimum: 1, maximum: 30_000 }
-            : key === "timeoutMs" && tool === "agent_ask"
-              ? { type: "integer", minimum: 1, maximum: 120_000 }
-              : key === "mode" && tool === "group_wait"
-                ? { type: "string", enum: ["all", "any"] }
-                : key === "kind" && tool === "coordination_wait"
-                  ? {
-                      type: "string",
-                      enum: [
-                        "timer",
-                        "signal",
-                        "agent",
-                        "task",
-                        "result",
-                        "question",
-                        "group",
-                      ],
-                    }
-                  : key === "until" && tool !== "agent_wait"
+          key === "limit" && tool === "agent_model_options"
+            ? { type: "integer", minimum: 1, maximum: 16 }
+            : key === "timeoutMs" &&
+                (tool === "agent_wait" || tool === "agent_prompt")
+              ? { type: "integer", minimum: 1, maximum: 30_000 }
+              : key === "timeoutMs" && tool === "agent_ask"
+                ? { type: "integer", minimum: 1, maximum: 120_000 }
+                : key === "mode" && tool === "group_wait"
+                  ? { type: "string", enum: ["all", "any"] }
+                  : key === "kind" && tool === "coordination_wait"
                     ? {
-                        type: "array",
-                        minItems: 1,
-                        maxItems: 16,
-                        items: { type: "string", minLength: 1, maxLength: 64 },
+                        type: "string",
+                        enum: [
+                          "timer",
+                          "signal",
+                          "agent",
+                          "task",
+                          "result",
+                          "question",
+                          "group",
+                        ],
                       }
-                    : key === "followUps"
+                    : key === "until" && tool !== "agent_wait"
                       ? {
                           type: "array",
-                          maxItems: 3,
-                          items: boundedString(MAX_TEXT_BYTES),
+                          minItems: 1,
+                          maxItems: 16,
+                          items: {
+                            type: "string",
+                            minLength: 1,
+                            maxLength: 64,
+                          },
                         }
-                      : schemaForKey(key),
+                      : key === "followUps"
+                        ? {
+                            type: "array",
+                            maxItems: 3,
+                            items: boundedString(MAX_TEXT_BYTES),
+                          }
+                        : schemaForKey(key),
         ]),
       ),
       idempotencyKey: { type: "string", minLength: 1, maxLength: 256 },
@@ -1182,6 +1191,10 @@ function parentInputSchema(tool: ParentToolName): unknown {
   };
 }
 
+interface ToolRenderTheme {
+  fg(color: string, text: string): string;
+  bold(text: string): string;
+}
 interface ToolDefinition {
   name: string;
   label: string;
@@ -1198,6 +1211,15 @@ interface ToolDefinition {
     details?: unknown;
     isError?: boolean;
   }>;
+  renderResult?: (
+    result: {
+      content: Array<{ type: string; text?: string }>;
+      details?: unknown;
+    },
+    options: { expanded: boolean; isPartial?: boolean },
+    theme: ToolRenderTheme,
+    context: unknown,
+  ) => Text;
 }
 export interface PiToolBinding {
   adapter: PiAdapter | undefined;
@@ -1234,6 +1256,165 @@ function textResult(value: unknown): {
     content: [{ type: "text", text: JSON.stringify(details) }],
     details,
   };
+}
+interface AvailableAgentModelOption {
+  readonly rank: number;
+  readonly provider: string;
+  readonly modelId: string;
+  readonly thinkingLevel: string;
+  readonly recommended: boolean;
+  readonly startAvailability: "ready" | "will_queue";
+  readonly availableSlots: number;
+  readonly maxConcurrent: number;
+}
+interface AvailableAgentModelsDetails {
+  readonly profileId: string;
+  readonly mode: string;
+  readonly asOf: string;
+  readonly availableModels: readonly AvailableAgentModelOption[];
+  readonly shownAvailableOptions: number;
+  readonly totalAvailableOptions: number;
+  readonly truncated: boolean;
+}
+function nonnegativeSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) >= 0;
+}
+function safeModelOptionText(value: unknown, max = 256): value is string {
+  try {
+    assertInputString(value, max);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function availableAgentModelsResult(value: unknown): {
+  content: Array<{ type: "text"; text: string }>;
+  details: AvailableAgentModelsDetails;
+} {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+  const source = value as Record<string, unknown>;
+  if (
+    !safeModelOptionText(source.taskProfile) ||
+    !safeModelOptionText(source.mode) ||
+    !safeModelOptionText(source.asOf) ||
+    !Array.isArray(source.candidates) ||
+    source.candidates.length > 16
+  )
+    throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+  const availableModels = source.candidates.map(
+    (candidate): AvailableAgentModelOption => {
+      if (
+        !candidate ||
+        typeof candidate !== "object" ||
+        Array.isArray(candidate)
+      )
+        throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+      const option = candidate as Record<string, unknown>;
+      const selection = option.selection;
+      const endpoint = option.endpoint;
+      if (
+        !selection ||
+        typeof selection !== "object" ||
+        Array.isArray(selection) ||
+        !endpoint ||
+        typeof endpoint !== "object" ||
+        Array.isArray(endpoint) ||
+        !Number.isSafeInteger(option.rank) ||
+        Number(option.rank) < 1
+      )
+        throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+      const selected = selection as Record<string, unknown>;
+      const capacity = endpoint as Record<string, unknown>;
+      if (
+        !safeModelOptionText(selected.provider) ||
+        !safeModelOptionText(selected.modelId) ||
+        !safeModelOptionText(selected.thinkingLevel, 32) ||
+        !nonnegativeSafeInteger(capacity.available) ||
+        !nonnegativeSafeInteger(capacity.limit) ||
+        capacity.limit < 1 ||
+        capacity.available > capacity.limit
+      )
+        throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+      return {
+        rank: Number(option.rank),
+        provider: selected.provider,
+        modelId: selected.modelId,
+        thinkingLevel: selected.thinkingLevel,
+        recommended: option.rank === 1,
+        startAvailability: capacity.available > 0 ? "ready" : "will_queue",
+        availableSlots: capacity.available,
+        maxConcurrent: capacity.limit,
+      };
+    },
+  );
+  const eligibleCount =
+    Number.isSafeInteger(source.eligibleCount) &&
+    Number(source.eligibleCount) >= availableModels.length
+      ? Number(source.eligibleCount)
+      : availableModels.length;
+  const details: AvailableAgentModelsDetails = {
+    profileId: source.taskProfile,
+    mode: source.mode,
+    asOf: source.asOf,
+    availableModels,
+    shownAvailableOptions: availableModels.length,
+    totalAvailableOptions: eligibleCount,
+    truncated: availableModels.length < eligibleCount,
+  };
+  const lines = [
+    `Available agent models for ${details.profileId}:`,
+    "Use provider, modelId, and thinkingLevel exactly as shown.",
+    ...availableModels.map(
+      (option) =>
+        `${option.recommended ? "★" : "-"} #${option.rank} ${option.provider}/${option.modelId} | thinking=${option.thinkingLevel} | ${option.startAvailability === "ready" ? `ready (${option.availableSlots}/${option.maxConcurrent} slots)` : "will queue (no free slot)"}`,
+    ),
+  ];
+  if (details.truncated)
+    lines.push(
+      `Showing ${details.shownAvailableOptions} of ${details.totalAvailableOptions} available options.`,
+    );
+  return {
+    content: [{ type: "text", text: lines.join("\n") }],
+    details,
+  };
+}
+function renderAvailableAgentModels(
+  result: {
+    content: Array<{ type: string; text?: string }>;
+    details?: unknown;
+  },
+  expanded: boolean,
+  theme: ToolRenderTheme,
+): Text {
+  const details = result.details as AvailableAgentModelsDetails | undefined;
+  if (!details || !Array.isArray(details.availableModels))
+    return new Text(result.content[0]?.text ?? "", 0, 0);
+  const displayed = expanded
+    ? details.availableModels
+    : details.availableModels.slice(0, 5);
+  let text =
+    theme.fg(
+      "success",
+      `✓ ${details.totalAvailableOptions} available model option${details.totalAvailableOptions === 1 ? "" : "s"}`,
+    ) + theme.fg("muted", ` for ${details.profileId}`);
+  for (const option of displayed) {
+    const marker = option.recommended ? theme.fg("accent", "★") : " ";
+    const capacity =
+      option.startAvailability === "ready"
+        ? theme.fg(
+            "success",
+            `${option.availableSlots}/${option.maxConcurrent} slots`,
+          )
+        : theme.fg("warning", "will queue");
+    text += `\n${marker} ${theme.fg("accent", `#${option.rank}`)} ${theme.fg("muted", `${option.provider}/${option.modelId}`)} · ${option.thinkingLevel} · ${capacity}`;
+  }
+  const hidden = details.availableModels.length - displayed.length;
+  if (hidden > 0)
+    text += `\n${theme.fg("dim", `… ${hidden} more available option${hidden === 1 ? "" : "s"}`)}`;
+  if (details.truncated)
+    text += `\n${theme.fg("warning", `Showing ${details.shownAvailableOptions} of ${details.totalAvailableOptions}; increase limit to see more.`)}`;
+  return new Text(text, 0, 0);
 }
 function validateResultInput(input: Record<string, unknown>): void {
   assertExactObject(
@@ -2037,21 +2218,49 @@ export function registerParentTools(
   for (const tool of PARENT_TOOL_NAMES) {
     register(api, {
       name: tool,
-      label: `Orchestrator ${tool}`,
-      description: `Use broker method for ${tool}. The broker checks current state and parent scope on every call.`,
+      label:
+        tool === "agent_model_options"
+          ? "Available Agent Models"
+          : `Orchestrator ${tool}`,
+      description:
+        tool === "agent_model_options"
+          ? "List only model and thinking-level choices that Pi reports as available and the broker allows for this task profile. Results are ranked and show whether a new agent can start now or will queue."
+          : `Use broker method for ${tool}. The broker checks current state and parent scope on every call.`,
       parameters: parentInputSchema(tool as ParentToolName),
+      ...(tool === "agent_model_options"
+        ? {
+            renderResult(
+              result: {
+                content: Array<{ type: string; text?: string }>;
+                details?: unknown;
+              },
+              options: { expanded: boolean },
+              theme: ToolRenderTheme,
+            ) {
+              return renderAvailableAgentModels(
+                result,
+                options.expanded,
+                theme,
+              );
+            },
+          }
+        : {}),
       async execute(_id, params, signal) {
         const { idempotencyKey, ...provided } = params;
+        const modelOptionsInput =
+          tool === "agent_model_options" && provided.limit === undefined
+            ? { ...provided, limit: 16 }
+            : provided;
         const raw =
-          tool === "coordination_wait" && provided.kind === "timer"
+          tool === "coordination_wait" && modelOptionsInput.kind === "timer"
             ? {
-                ...provided,
+                ...modelOptionsInput,
                 startedAt:
-                  typeof provided.startedAt === "string"
-                    ? provided.startedAt
+                  typeof modelOptionsInput.startedAt === "string"
+                    ? modelOptionsInput.startedAt
                     : new Date().toISOString(),
               }
-            : provided;
+            : modelOptionsInput;
         if (idempotencyKey !== undefined)
           assertInputString(idempotencyKey, 256);
         if (
@@ -2153,13 +2362,14 @@ export function registerParentTools(
             isError: true,
           };
         }
-        return textResult(
-          withLaunchLifecycleReminder(
-            tool as ParentToolName,
-            raw,
-            response.result,
-          ),
+        const result = withLaunchLifecycleReminder(
+          tool as ParentToolName,
+          raw,
+          response.result,
         );
+        return tool === "agent_model_options"
+          ? availableAgentModelsResult(result)
+          : textResult(result);
       },
     });
   }

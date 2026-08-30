@@ -25,7 +25,7 @@ const inputs: Record<string, Record<string, unknown>> = {
     budget: { wallTimeMs: 1000 },
     wait: false,
   },
-  agent_model_options: { profileId: "scout", limit: 5 },
+  agent_model_options: { profileId: "scout" },
   agent_list: { state: "stopped" },
   agent_get: { agentId: "child" },
   agent_prompt: {
@@ -102,14 +102,26 @@ const state = {
 test("all parent tools capture frozen methods and frame-owned idempotency", async () => {
   const tools: Array<{
     name: string;
+    label: string;
+    description: string;
     parameters: unknown;
     execute: (...args: never[]) => Promise<unknown>;
+    renderResult?: (
+      result: unknown,
+      options: { expanded: boolean },
+      theme: {
+        fg(color: string, text: string): string;
+        bold(text: string): string;
+      },
+      context: unknown,
+    ) => { render(width: number): string[] };
   }> = [];
   const calls: Array<{
     method: string;
     params: Record<string, unknown>;
     options?: Record<string, unknown>;
   }> = [];
+  const results = new Map<string, unknown>();
   const api = {
     registerTool: (definition: (typeof tools)[number]) =>
       tools.push(definition),
@@ -127,6 +139,47 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
       options?: Record<string, unknown>,
     ) => {
       calls.push({ method, params, ...(options ? { options } : {}) });
+      if (method === "model.options")
+        return {
+          schemaVersion: 1,
+          scorerVersion: 1,
+          mode: "explicit_required",
+          taskProfile: "scout",
+          asOf: "2026-08-29T00:00:00.000Z",
+          eligibleCount: 2,
+          candidates: [
+            {
+              rank: 1,
+              selection: {
+                provider: "provider-a",
+                modelId: "model-ready",
+                thinkingLevel: "medium",
+              },
+              endpoint: { available: 2, limit: 4 },
+            },
+            {
+              rank: 2,
+              selection: {
+                provider: "provider-a",
+                modelId: "model-busy",
+                thinkingLevel: "high",
+              },
+              endpoint: { available: 0, limit: 4 },
+            },
+          ],
+          excluded: [
+            {
+              selection: {
+                provider: "provider-b",
+                modelId: "policy-blocked",
+                thinkingLevel: "off",
+              },
+              reason: "policy_allowlist",
+            },
+          ],
+          excludedCount: 1,
+          sourceDates: [],
+        };
       return method === "agent.wait"
         ? { state: "blocked" }
         : method === "coordination.wait" || method === "group.wait"
@@ -139,12 +192,17 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
   for (const [name, input] of Object.entries(inputs)) {
     const tool = tools.find((item) => item.name === name);
     assert.ok(tool, name);
-    await (tool.execute as unknown as (...args: unknown[]) => Promise<unknown>)(
-      "id",
-      { ...input, idempotencyKey: `idem-${name}` },
-      AbortSignal.timeout(1000),
-      undefined,
-      {},
+    results.set(
+      name,
+      await (
+        tool.execute as unknown as (...args: unknown[]) => Promise<unknown>
+      )(
+        "id",
+        { ...input, idempotencyKey: `idem-${name}` },
+        AbortSignal.timeout(1000),
+        undefined,
+        {},
+      ),
     );
   }
   assert.equal(calls.length, 27);
@@ -208,6 +266,82 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
     "scout",
     "test-runner",
   ]);
+  const modelOptionsTool = tools.find(
+    (item) => item.name === "agent_model_options",
+  );
+  const modelOptionsProperties = (
+    modelOptionsTool?.parameters as {
+      properties?: Record<string, { maximum?: number }>;
+    }
+  ).properties;
+  assert.equal(modelOptionsTool?.label, "Available Agent Models");
+  assert.match(modelOptionsTool?.description ?? "", /only model/u);
+  assert.equal(modelOptionsProperties?.limit?.maximum, 16);
+  assert.equal(
+    calls.find((call) => call.method === "model.options")?.params.limit,
+    16,
+  );
+  const modelOptionsResult = results.get("agent_model_options") as {
+    content: Array<{ type: string; text: string }>;
+    details: Record<string, unknown> & {
+      availableModels: Array<Record<string, unknown>>;
+    };
+  };
+  assert.match(
+    modelOptionsResult.content[0]?.text ?? "",
+    /Available agent models/u,
+  );
+  assert.match(modelOptionsResult.content[0]?.text ?? "", /model-ready/u);
+  assert.doesNotMatch(
+    modelOptionsResult.content[0]?.text ?? "",
+    /policy-blocked/u,
+  );
+  assert.equal(modelOptionsResult.details.availableModels.length, 2);
+  assert.deepEqual(modelOptionsResult.details.availableModels[0], {
+    rank: 1,
+    provider: "provider-a",
+    modelId: "model-ready",
+    thinkingLevel: "medium",
+    recommended: true,
+    startAvailability: "ready",
+    availableSlots: 2,
+    maxConcurrent: 4,
+  });
+  assert.equal(
+    modelOptionsResult.details.availableModels[1]?.startAvailability,
+    "will_queue",
+  );
+  assert.equal(Object.hasOwn(modelOptionsResult.details, "excluded"), false);
+  assert.equal(Object.hasOwn(modelOptionsResult.details, "sourceDates"), false);
+  const renderedModelOptions = modelOptionsTool?.renderResult?.(
+    modelOptionsResult,
+    { expanded: false },
+    { fg: (_color, text) => text, bold: (text) => text },
+    {},
+  );
+  assert.match(
+    renderedModelOptions?.render(200).join("\n") ?? "",
+    /2 available model options/u,
+  );
+  assert.doesNotMatch(
+    renderedModelOptions?.render(200).join("\n") ?? "",
+    /policy-blocked/u,
+  );
+  await assert.rejects(
+    (
+      modelOptionsTool?.execute as unknown as (
+        ...args: unknown[]
+      ) => Promise<unknown>
+    )(
+      "invalid-model-limit",
+      { profileId: "scout", limit: 17 },
+      AbortSignal.timeout(1000),
+      undefined,
+      {},
+    ),
+    /INVALID_REQUEST/u,
+  );
+  assert.equal(calls.length, 27);
   const agentListTool = tools.find((item) => item.name === "agent_list");
   const agentListProperties = (
     agentListTool?.parameters as {
