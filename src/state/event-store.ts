@@ -522,7 +522,9 @@ export class EventStore {
     )
       return this.#events.filter((event) => event.seq > fromSeq);
     const result: StoredEvent[] = [];
+    let index = 0;
     let previous: StoredEvent | undefined;
+    const fullAudit = fromSeq === Number.MAX_SAFE_INTEGER;
     const expectedFile = this.#fileIdentity;
     if (!expectedFile)
       throw new OrchestratorError(
@@ -543,19 +545,37 @@ export class EventStore {
             "STATE_CORRUPT",
             "Noncanonical event line.",
           );
+        index++;
+        // Startup already binds the owner-only file identity and verifies the
+        // current chain tail. A suffix replay only needs to hash the requested
+        // suffix back to that trusted tail. Parsing and rehashing an unrelated
+        // historical prefix can otherwise hold the broker mutation queue for
+        // minutes once heartbeat history becomes large. Full audit still
+        // verifies every event.
+        if (!fullAudit && index <= fromSeq) continue;
         let event: StoredEvent;
         try {
           event = JSON.parse(line) as StoredEvent;
         } catch {
           throw new OrchestratorError("STATE_CORRUPT", "Invalid event JSON.");
         }
-        this.verifyEvent(event, previous);
+        if (event.seq !== index)
+          throw new OrchestratorError(
+            "STATE_CORRUPT",
+            "Event sequence does not match its line.",
+          );
+        const verifiedPrevious =
+          !fullAudit && previous === undefined && fromSeq > 0
+            ? ({ seq: event.seq - 1, hash: event.prevHash } as StoredEvent)
+            : previous;
+        this.verifyEvent(event, verifiedPrevious);
         previous = event;
-        if (event.seq > fromSeq) result.push(event);
+        if (!fullAudit) result.push(event);
       }
       const closedFile = this.#identityFrom(await lstat(this.path));
       if (
         !this.#sameIdentity(expectedFile, closedFile, true) ||
+        index !== this.#lastSeq ||
         (previous?.seq ?? 0) !== this.#lastSeq ||
         (previous?.hash ?? "0".repeat(64)) !== this.#lastHash
       )

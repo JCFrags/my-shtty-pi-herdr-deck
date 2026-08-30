@@ -101,7 +101,7 @@ test("disk history remains available below the replay ring floor", async () => {
   const root = await mkdtemp(join(tmpdir(), "orch-history-"));
   const store = new EventStore(join(root, "events.jsonl"));
   await store.open();
-  for (let index = 0; index < 1_001; index++)
+  for (let index = 0; index < 2_001; index++)
     await store.append({
       type: "audit.action",
       actor: {
@@ -111,7 +111,21 @@ test("disk history remains available below the replay ring floor", async () => {
       payload: { action: "fixture" },
     });
   assert.equal(store.events.length, 1_000);
-  assert.equal((await store.readEventsFrom(0)).length, 1_001);
+  assert.equal((await store.readEventsFrom(0)).length, 2_001);
+
+  const originalParse = JSON.parse;
+  let parsedLines = 0;
+  JSON.parse = ((...args: Parameters<typeof JSON.parse>) => {
+    parsedLines++;
+    return originalParse(...args);
+  }) as typeof JSON.parse;
+  try {
+    assert.equal((await store.readEventsFrom(1_000)).length, 1_001);
+  } finally {
+    JSON.parse = originalParse;
+  }
+  assert.equal(parsedLines, 1_001);
+  assert.equal((await store.verifyDisk()).valid, true);
 });
 
 test("snapshots verify their checksum and state cursor", async () => {
