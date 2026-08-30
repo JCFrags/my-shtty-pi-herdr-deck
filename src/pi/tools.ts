@@ -15,7 +15,11 @@ import type { PiAdapter } from "./adapter.js";
 import type { CorrelationState } from "./correlation.js";
 import type { PiBrokerClient } from "./broker-client.js";
 import type { PiApiLike, PiContextLike } from "./types.js";
-import { SHIPPED_TASK_PROFILES } from "../broker/model-policy.js";
+import {
+  SHIPPED_TASK_PROFILES,
+  THINKING_LEVELS,
+  type ThinkingLevel,
+} from "../broker/model-policy.js";
 import { AGENT_STATES } from "../state/types.js";
 import { Text } from "@pi-herdr-deck/tui";
 
@@ -1257,12 +1261,20 @@ function textResult(value: unknown): {
     details,
   };
 }
+interface AvailableAgentModelRatings {
+  readonly overall: number;
+  readonly taskFit: number;
+  readonly reliability: number;
+  readonly speed: number;
+  readonly value: number;
+}
 interface AvailableAgentModelOption {
   readonly rank: number;
   readonly provider: string;
   readonly modelId: string;
   readonly thinkingLevel: string;
   readonly recommended: boolean;
+  readonly ratings: AvailableAgentModelRatings;
   readonly startAvailability: "ready" | "will_queue";
   readonly availableSlots: number;
   readonly maxConcurrent: number;
@@ -1276,8 +1288,34 @@ interface AvailableAgentModelsDetails {
   readonly totalAvailableOptions: number;
   readonly truncated: boolean;
 }
+const MODEL_RATING_PPM = 1_000_000;
 function nonnegativeSafeInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && Number(value) >= 0;
+}
+function validRatingPpm(
+  value: unknown,
+  allowNegative = false,
+): value is number {
+  return (
+    Number.isSafeInteger(value) &&
+    Number(value) >= (allowNegative ? -MODEL_RATING_PPM : 0) &&
+    Number(value) <= MODEL_RATING_PPM
+  );
+}
+function fiveStarRating(valuePpm: number): number {
+  const bounded = Math.max(0, Math.min(MODEL_RATING_PPM, valuePpm));
+  return Math.round((bounded * 5) / MODEL_RATING_PPM);
+}
+function starRating(rating: number): string {
+  return `${"★".repeat(rating)}${"☆".repeat(5 - rating)} ${rating}/5`;
+}
+function ratingCategories(ratings: AvailableAgentModelRatings): string {
+  return [
+    `Task fit ${starRating(ratings.taskFit)}`,
+    `Reliability ${starRating(ratings.reliability)}`,
+    `Speed ${starRating(ratings.speed)}`,
+    `Value ${starRating(ratings.value)}`,
+  ].join(" · ");
 }
 function safeModelOptionText(value: unknown, max = 256): value is string {
   try {
@@ -1313,6 +1351,7 @@ function availableAgentModelsResult(value: unknown): {
       const option = candidate as Record<string, unknown>;
       const selection = option.selection;
       const endpoint = option.endpoint;
+      const components = option.components;
       if (
         !selection ||
         typeof selection !== "object" ||
@@ -1320,20 +1359,30 @@ function availableAgentModelsResult(value: unknown): {
         !endpoint ||
         typeof endpoint !== "object" ||
         Array.isArray(endpoint) ||
+        !components ||
+        typeof components !== "object" ||
+        Array.isArray(components) ||
         !Number.isSafeInteger(option.rank) ||
-        Number(option.rank) < 1
+        Number(option.rank) < 1 ||
+        !validRatingPpm(option.scorePpm, true)
       )
         throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
       const selected = selection as Record<string, unknown>;
       const capacity = endpoint as Record<string, unknown>;
+      const scores = components as Record<string, unknown>;
       if (
         !safeModelOptionText(selected.provider) ||
         !safeModelOptionText(selected.modelId) ||
         !safeModelOptionText(selected.thinkingLevel, 32) ||
+        !THINKING_LEVELS.includes(selected.thinkingLevel as ThinkingLevel) ||
         !nonnegativeSafeInteger(capacity.available) ||
         !nonnegativeSafeInteger(capacity.limit) ||
         capacity.limit < 1 ||
-        capacity.available > capacity.limit
+        capacity.available > capacity.limit ||
+        !validRatingPpm(scores.taskCapability) ||
+        !validRatingPpm(scores.protocolReliability) ||
+        !validRatingPpm(scores.speed) ||
+        !validRatingPpm(scores.effectiveCost)
       )
         throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
       return {
@@ -1342,6 +1391,13 @@ function availableAgentModelsResult(value: unknown): {
         modelId: selected.modelId,
         thinkingLevel: selected.thinkingLevel,
         recommended: option.rank === 1,
+        ratings: {
+          overall: fiveStarRating(option.scorePpm),
+          taskFit: fiveStarRating(scores.taskCapability),
+          reliability: fiveStarRating(scores.protocolReliability),
+          speed: fiveStarRating(scores.speed),
+          value: fiveStarRating(scores.effectiveCost),
+        },
         startAvailability: capacity.available > 0 ? "ready" : "will_queue",
         availableSlots: capacity.available,
         maxConcurrent: capacity.limit,
@@ -1365,10 +1421,10 @@ function availableAgentModelsResult(value: unknown): {
   const lines = [
     `Available agent models for ${details.profileId}:`,
     "Use provider, modelId, and thinkingLevel exactly as shown.",
-    ...availableModels.map(
-      (option) =>
-        `${option.recommended ? "★" : "-"} #${option.rank} ${option.provider}/${option.modelId} | thinking=${option.thinkingLevel} | ${option.startAvailability === "ready" ? `ready (${option.availableSlots}/${option.maxConcurrent} slots)` : "will queue (no free slot)"}`,
-    ),
+    ...availableModels.flatMap((option) => [
+      `${option.recommended ? "Recommended" : "-"} #${option.rank} ${option.provider}/${option.modelId} | thinking=${option.thinkingLevel} | Overall ${starRating(option.ratings.overall)} | ${option.startAvailability === "ready" ? `ready (${option.availableSlots}/${option.maxConcurrent} slots)` : "will queue (no free slot)"}`,
+      `  ${ratingCategories(option.ratings)}`,
+    ]),
   ];
   if (details.truncated)
     lines.push(
@@ -1399,7 +1455,7 @@ function renderAvailableAgentModels(
       `✓ ${details.totalAvailableOptions} available model option${details.totalAvailableOptions === 1 ? "" : "s"}`,
     ) + theme.fg("muted", ` for ${details.profileId}`);
   for (const option of displayed) {
-    const marker = option.recommended ? theme.fg("accent", "★") : " ";
+    const marker = option.recommended ? theme.fg("accent", "→") : " ";
     const capacity =
       option.startAvailability === "ready"
         ? theme.fg(
@@ -1407,7 +1463,10 @@ function renderAvailableAgentModels(
             `${option.availableSlots}/${option.maxConcurrent} slots`,
           )
         : theme.fg("warning", "will queue");
-    text += `\n${marker} ${theme.fg("accent", `#${option.rank}`)} ${theme.fg("muted", `${option.provider}/${option.modelId}`)} · ${option.thinkingLevel} · ${capacity}`;
+    const overall = theme.fg("accent", starRating(option.ratings.overall));
+    text += `\n${marker} ${theme.fg("accent", `#${option.rank}`)} ${theme.fg("muted", `${option.provider}/${option.modelId}`)} · ${option.thinkingLevel} · ${overall} · ${capacity}`;
+    if (expanded)
+      text += `\n    ${theme.fg("dim", ratingCategories(option.ratings))}`;
   }
   const hidden = details.availableModels.length - displayed.length;
   if (hidden > 0)
@@ -2224,7 +2283,7 @@ export function registerParentTools(
           : `Orchestrator ${tool}`,
       description:
         tool === "agent_model_options"
-          ? "List only model and thinking-level choices that Pi reports as available and the broker allows for this task profile. Results are ranked and show whether a new agent can start now or will queue."
+          ? "List only model and thinking-level choices that Pi reports as available and the broker allows for this task profile. Results include simple five-star ratings and show whether a new agent can start now or will queue."
           : `Use broker method for ${tool}. The broker checks current state and parent scope on every call.`,
       parameters: parentInputSchema(tool as ParentToolName),
       ...(tool === "agent_model_options"

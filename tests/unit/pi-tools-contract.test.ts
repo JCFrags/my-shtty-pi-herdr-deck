@@ -122,6 +122,8 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
     options?: Record<string, unknown>;
   }> = [];
   const results = new Map<string, unknown>();
+  let invalidModelRating = false;
+  let invalidThinkingLevel = false;
   const api = {
     registerTool: (definition: (typeof tools)[number]) =>
       tools.push(definition),
@@ -153,9 +155,17 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
               selection: {
                 provider: "provider-a",
                 modelId: "model-ready",
-                thinkingLevel: "medium",
+                thinkingLevel: invalidThinkingLevel ? "turbo" : "medium",
               },
               endpoint: { available: 2, limit: 4 },
+              scorePpm: invalidModelRating ? 1_000_001 : 820_000,
+              components: {
+                taskCapability: 900_000,
+                protocolReliability: 800_000,
+                speed: 620_000,
+                effectiveCost: 410_000,
+                preference: 700_000,
+              },
             },
             {
               rank: 2,
@@ -165,6 +175,14 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
                 thinkingLevel: "high",
               },
               endpoint: { available: 0, limit: 4 },
+              scorePpm: -100_000,
+              components: {
+                taskCapability: 0,
+                protocolReliability: 400_000,
+                speed: 200_000,
+                effectiveCost: 100_000,
+                preference: 500_000,
+              },
             },
           ],
           excluded: [
@@ -303,6 +321,13 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
     modelId: "model-ready",
     thinkingLevel: "medium",
     recommended: true,
+    ratings: {
+      overall: 4,
+      taskFit: 5,
+      reliability: 4,
+      speed: 3,
+      value: 2,
+    },
     startAvailability: "ready",
     availableSlots: 2,
     maxConcurrent: 4,
@@ -310,6 +335,35 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
   assert.equal(
     modelOptionsResult.details.availableModels[1]?.startAvailability,
     "will_queue",
+  );
+  assert.deepEqual(modelOptionsResult.details.availableModels[1]?.ratings, {
+    overall: 0,
+    taskFit: 0,
+    reliability: 2,
+    speed: 1,
+    value: 1,
+  });
+  assert.match(
+    modelOptionsResult.content[0]?.text ?? "",
+    /Overall ★★★★☆ 4\/5/u,
+  );
+  assert.match(
+    modelOptionsResult.content[0]?.text ?? "",
+    /Task fit ★★★★★ 5\/5 · Reliability ★★★★☆ 4\/5 · Speed ★★★☆☆ 3\/5 · Value ★★☆☆☆ 2\/5/u,
+  );
+  assert.equal(
+    Object.hasOwn(
+      modelOptionsResult.details.availableModels[0] ?? {},
+      "scorePpm",
+    ),
+    false,
+  );
+  assert.equal(
+    Object.hasOwn(
+      modelOptionsResult.details.availableModels[0] ?? {},
+      "components",
+    ),
+    false,
   );
   assert.equal(Object.hasOwn(modelOptionsResult.details, "excluded"), false);
   assert.equal(Object.hasOwn(modelOptionsResult.details, "sourceDates"), false);
@@ -323,9 +377,20 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
     renderedModelOptions?.render(200).join("\n") ?? "",
     /2 available model options/u,
   );
-  assert.doesNotMatch(
-    renderedModelOptions?.render(200).join("\n") ?? "",
-    /policy-blocked/u,
+  const collapsedModelOptions =
+    renderedModelOptions?.render(200).join("\n") ?? "";
+  assert.match(collapsedModelOptions, /★★★★☆ 4\/5/u);
+  assert.doesNotMatch(collapsedModelOptions, /Task fit/u);
+  assert.doesNotMatch(collapsedModelOptions, /policy-blocked/u);
+  const expandedModelOptions = modelOptionsTool?.renderResult?.(
+    modelOptionsResult,
+    { expanded: true },
+    { fg: (_color, text) => text, bold: (text) => text },
+    {},
+  );
+  assert.match(
+    expandedModelOptions?.render(240).join("\n") ?? "",
+    /Task fit ★★★★★ 5\/5 · Reliability ★★★★☆ 4\/5/u,
   );
   await assert.rejects(
     (
@@ -342,6 +407,39 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
     /INVALID_REQUEST/u,
   );
   assert.equal(calls.length, 27);
+  invalidModelRating = true;
+  await assert.rejects(
+    (
+      modelOptionsTool?.execute as unknown as (
+        ...args: unknown[]
+      ) => Promise<unknown>
+    )(
+      "invalid-model-rating",
+      { profileId: "scout", limit: 2 },
+      AbortSignal.timeout(1000),
+      undefined,
+      {},
+    ),
+    /MODEL_OPTIONS_RESPONSE_INVALID/u,
+  );
+  assert.equal(calls.length, 28);
+  invalidModelRating = false;
+  invalidThinkingLevel = true;
+  await assert.rejects(
+    (
+      modelOptionsTool?.execute as unknown as (
+        ...args: unknown[]
+      ) => Promise<unknown>
+    )(
+      "invalid-thinking-level",
+      { profileId: "scout", limit: 2 },
+      AbortSignal.timeout(1000),
+      undefined,
+      {},
+    ),
+    /MODEL_OPTIONS_RESPONSE_INVALID/u,
+  );
+  assert.equal(calls.length, 29);
   const agentListTool = tools.find((item) => item.name === "agent_list");
   const agentListProperties = (
     agentListTool?.parameters as {
@@ -363,7 +461,7 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
     ),
     /INVALID_REQUEST/,
   );
-  assert.equal(calls.length, 27);
+  assert.equal(calls.length, 29);
   const agentPromptTool = tools.find((item) => item.name === "agent_prompt");
   const agentPromptProperties = (
     agentPromptTool?.parameters as {
@@ -397,7 +495,7 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
     ),
     /INVALID_REQUEST/u,
   );
-  assert.equal(calls.length, 27);
+  assert.equal(calls.length, 29);
 });
 
 test("launch tools add lifecycle reminders only for created work", async () => {
