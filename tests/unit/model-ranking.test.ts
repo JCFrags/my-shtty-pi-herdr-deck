@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  availableModelOptionsView,
   buildModelOptions,
   createAdvisoryModelReceipt,
   modelCapacityView,
@@ -121,6 +122,45 @@ test("model options rank only installed policy-eligible pairs with deterministic
   );
   assert.equal(view.candidates[1]?.tiedWithPrevious, true);
   assert.equal("currentSelection" in view, false);
+});
+
+test("public model options expose only available choices and five-star displays", () => {
+  const view = availableModelOptionsView(options({ limit: 1 }));
+  assert.equal(view.profileId, "scout");
+  assert.equal(view.availableModels.length, 1);
+  assert.equal(view.moreAvailable, 1);
+  assert.deepEqual(
+    {
+      provider: view.availableModels[0]?.provider,
+      modelId: view.availableModels[0]?.modelId,
+      thinkingLevel: view.availableModels[0]?.thinkingLevel,
+      recommended: view.availableModels[0]?.recommended,
+      availability: view.availableModels[0]?.availability,
+    },
+    {
+      ...alpha,
+      recommended: true,
+      availability: "ready (1/1 slots)",
+    },
+  );
+  for (const rating of Object.values(view.availableModels[0]?.ratings ?? {}))
+    assert.match(rating, /^(?:★{0,5})(?:☆{0,5}) [0-5]\/5$/u);
+  assert.equal("candidates" in view, false);
+  assert.equal("excluded" in view, false);
+  assert.equal("evidenceDigest" in view, false);
+  assert.equal("scorePpm" in (view.availableModels[0] ?? {}), false);
+
+  const busy = availableModelOptionsView(
+    options({
+      limit: 1,
+      scheduler: {
+        queued: [],
+        active: [{ taskId: "task", endpointId: "alpha_ep" }],
+        provisioning: 0,
+      },
+    }),
+  );
+  assert.equal(busy.availableModels[0]?.availability, "will queue (0/1 slots)");
 });
 
 test("explicit-required options do not require or disclose a configured default", () => {

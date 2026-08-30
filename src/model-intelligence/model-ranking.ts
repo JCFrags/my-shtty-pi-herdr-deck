@@ -105,6 +105,30 @@ export interface ModelOptionsView {
   readonly sourceDates: readonly ModelSourceDate[];
 }
 
+export interface AvailableModelRatingsView {
+  readonly overall: string;
+  readonly taskFit: string;
+  readonly reliability: string;
+  readonly speed: string;
+  readonly value: string;
+}
+
+export interface AvailableModelOptionView {
+  readonly rank: number;
+  readonly provider: string;
+  readonly modelId: string;
+  readonly thinkingLevel: string;
+  readonly recommended: boolean;
+  readonly ratings: AvailableModelRatingsView;
+  readonly availability: string;
+}
+
+export interface AvailableModelOptionsView {
+  readonly profileId: string;
+  readonly availableModels: readonly AvailableModelOptionView[];
+  readonly moreAvailable: number;
+}
+
 export interface AdvisoryModelReceipt {
   readonly schemaVersion: 1;
   readonly scorerVersion: 1;
@@ -157,6 +181,42 @@ function digest(domain: string, value: unknown): string {
 
 function divideHalfUp(numerator: bigint, denominator: bigint): number {
   return Number((numerator + denominator / 2n) / denominator);
+}
+
+function fiveStarDisplay(valuePpm: number): string {
+  const bounded = Math.max(0, Math.min(PPM, valuePpm));
+  const rating = Math.round((bounded * 5) / PPM);
+  return `${"★".repeat(rating)}${"☆".repeat(5 - rating)} ${rating}/5`;
+}
+
+export function availableModelOptionsView(
+  options: ModelOptionsView,
+): AvailableModelOptionsView {
+  return {
+    profileId: options.taskProfile,
+    availableModels: options.candidates.map((candidate) => ({
+      rank: candidate.rank,
+      provider: candidate.selection.provider,
+      modelId: candidate.selection.modelId,
+      thinkingLevel: candidate.selection.thinkingLevel,
+      recommended: candidate.rank === 1,
+      ratings: {
+        overall: fiveStarDisplay(candidate.scorePpm),
+        taskFit: fiveStarDisplay(candidate.components.taskCapability),
+        reliability: fiveStarDisplay(candidate.components.protocolReliability),
+        speed: fiveStarDisplay(candidate.components.speed),
+        value: fiveStarDisplay(candidate.components.effectiveCost),
+      },
+      availability:
+        candidate.endpoint.available > 0
+          ? `ready (${candidate.endpoint.available}/${candidate.endpoint.limit} slots)`
+          : `will queue (0/${candidate.endpoint.limit} slots)`,
+    })),
+    moreAvailable: Math.max(
+      0,
+      options.eligibleCount - options.candidates.length,
+    ),
+  };
 }
 
 function selectionKey(selection: ModelSelection): string {

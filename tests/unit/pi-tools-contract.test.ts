@@ -124,6 +124,10 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
   const results = new Map<string, unknown>();
   let invalidModelRating = false;
   let invalidThinkingLevel = false;
+  let extraModelOptionsField = false;
+  let extraModelOptionField = false;
+  let invalidModelRank = false;
+  let oversizedMoreAvailable = false;
   const api = {
     registerTool: (definition: (typeof tools)[number]) =>
       tools.push(definition),
@@ -143,60 +147,42 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
       calls.push({ method, params, ...(options ? { options } : {}) });
       if (method === "model.options")
         return {
-          schemaVersion: 1,
-          scorerVersion: 1,
-          mode: "explicit_required",
-          taskProfile: "scout",
-          asOf: "2026-08-29T00:00:00.000Z",
-          eligibleCount: 2,
-          candidates: [
+          profileId: "scout",
+          availableModels: [
             {
-              rank: 1,
-              selection: {
-                provider: "provider-a",
-                modelId: "model-ready",
-                thinkingLevel: invalidThinkingLevel ? "turbo" : "medium",
+              rank: invalidModelRank ? 2 : 1,
+              provider: "provider-a",
+              modelId: "model-ready",
+              thinkingLevel: invalidThinkingLevel ? "turbo" : "medium",
+              recommended: true,
+              ratings: {
+                overall: invalidModelRating ? "★★★★★★ 6/5" : "★★★★☆ 4/5",
+                taskFit: "★★★★★ 5/5",
+                reliability: "★★★★☆ 4/5",
+                speed: "★★★☆☆ 3/5",
+                value: "★★☆☆☆ 2/5",
               },
-              endpoint: { available: 2, limit: 4 },
-              scorePpm: invalidModelRating ? 1_000_001 : 820_000,
-              components: {
-                taskCapability: 900_000,
-                protocolReliability: 800_000,
-                speed: 620_000,
-                effectiveCost: 410_000,
-                preference: 700_000,
-              },
+              availability: "ready (2/4 slots)",
+              ...(extraModelOptionField ? { scorePpm: 800_000 } : {}),
             },
             {
               rank: 2,
-              selection: {
-                provider: "provider-a",
-                modelId: "model-busy",
-                thinkingLevel: "high",
+              provider: "provider-a",
+              modelId: "model-busy",
+              thinkingLevel: "high",
+              recommended: false,
+              ratings: {
+                overall: "☆☆☆☆☆ 0/5",
+                taskFit: "☆☆☆☆☆ 0/5",
+                reliability: "★★☆☆☆ 2/5",
+                speed: "★☆☆☆☆ 1/5",
+                value: "★☆☆☆☆ 1/5",
               },
-              endpoint: { available: 0, limit: 4 },
-              scorePpm: -100_000,
-              components: {
-                taskCapability: 0,
-                protocolReliability: 400_000,
-                speed: 200_000,
-                effectiveCost: 100_000,
-                preference: 500_000,
-              },
+              availability: "will queue (0/4 slots)",
             },
           ],
-          excluded: [
-            {
-              selection: {
-                provider: "provider-b",
-                modelId: "policy-blocked",
-                thinkingLevel: "off",
-              },
-              reason: "policy_allowlist",
-            },
-          ],
-          excludedCount: 1,
-          sourceDates: [],
+          moreAvailable: oversizedMoreAvailable ? 255 : 0,
+          ...(extraModelOptionsField ? { candidates: [] } : {}),
         };
       return method === "agent.wait"
         ? { state: "blocked" }
@@ -322,26 +308,24 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
     thinkingLevel: "medium",
     recommended: true,
     ratings: {
-      overall: 4,
-      taskFit: 5,
-      reliability: 4,
-      speed: 3,
-      value: 2,
+      overall: "★★★★☆ 4/5",
+      taskFit: "★★★★★ 5/5",
+      reliability: "★★★★☆ 4/5",
+      speed: "★★★☆☆ 3/5",
+      value: "★★☆☆☆ 2/5",
     },
-    startAvailability: "ready",
-    availableSlots: 2,
-    maxConcurrent: 4,
+    availability: "ready (2/4 slots)",
   });
   assert.equal(
-    modelOptionsResult.details.availableModels[1]?.startAvailability,
-    "will_queue",
+    modelOptionsResult.details.availableModels[1]?.availability,
+    "will queue (0/4 slots)",
   );
   assert.deepEqual(modelOptionsResult.details.availableModels[1]?.ratings, {
-    overall: 0,
-    taskFit: 0,
-    reliability: 2,
-    speed: 1,
-    value: 1,
+    overall: "☆☆☆☆☆ 0/5",
+    taskFit: "☆☆☆☆☆ 0/5",
+    reliability: "★★☆☆☆ 2/5",
+    speed: "★☆☆☆☆ 1/5",
+    value: "★☆☆☆☆ 1/5",
   });
   assert.match(
     modelOptionsResult.content[0]?.text ?? "",
@@ -440,6 +424,75 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
     /MODEL_OPTIONS_RESPONSE_INVALID/u,
   );
   assert.equal(calls.length, 29);
+  invalidThinkingLevel = false;
+  extraModelOptionsField = true;
+  await assert.rejects(
+    (
+      modelOptionsTool?.execute as unknown as (
+        ...args: unknown[]
+      ) => Promise<unknown>
+    )(
+      "extra-model-options-field",
+      { profileId: "scout", limit: 2 },
+      AbortSignal.timeout(1000),
+      undefined,
+      {},
+    ),
+    /MODEL_OPTIONS_RESPONSE_INVALID/u,
+  );
+  assert.equal(calls.length, 30);
+  extraModelOptionsField = false;
+  extraModelOptionField = true;
+  await assert.rejects(
+    (
+      modelOptionsTool?.execute as unknown as (
+        ...args: unknown[]
+      ) => Promise<unknown>
+    )(
+      "extra-model-option-field",
+      { profileId: "scout", limit: 2 },
+      AbortSignal.timeout(1000),
+      undefined,
+      {},
+    ),
+    /MODEL_OPTIONS_RESPONSE_INVALID/u,
+  );
+  assert.equal(calls.length, 31);
+  extraModelOptionField = false;
+  invalidModelRank = true;
+  await assert.rejects(
+    (
+      modelOptionsTool?.execute as unknown as (
+        ...args: unknown[]
+      ) => Promise<unknown>
+    )(
+      "invalid-model-rank",
+      { profileId: "scout", limit: 2 },
+      AbortSignal.timeout(1000),
+      undefined,
+      {},
+    ),
+    /MODEL_OPTIONS_RESPONSE_INVALID/u,
+  );
+  assert.equal(calls.length, 32);
+  invalidModelRank = false;
+  oversizedMoreAvailable = true;
+  await assert.rejects(
+    (
+      modelOptionsTool?.execute as unknown as (
+        ...args: unknown[]
+      ) => Promise<unknown>
+    )(
+      "oversized-more-available",
+      { profileId: "scout", limit: 2 },
+      AbortSignal.timeout(1000),
+      undefined,
+      {},
+    ),
+    /MODEL_OPTIONS_RESPONSE_INVALID/u,
+  );
+  assert.equal(calls.length, 33);
+  oversizedMoreAvailable = false;
   const agentListTool = tools.find((item) => item.name === "agent_list");
   const agentListProperties = (
     agentListTool?.parameters as {
@@ -461,7 +514,7 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
     ),
     /INVALID_REQUEST/,
   );
-  assert.equal(calls.length, 29);
+  assert.equal(calls.length, 33);
   const agentPromptTool = tools.find((item) => item.name === "agent_prompt");
   const agentPromptProperties = (
     agentPromptTool?.parameters as {
@@ -495,7 +548,7 @@ test("all parent tools capture frozen methods and frame-owned idempotency", asyn
     ),
     /INVALID_REQUEST/u,
   );
-  assert.equal(calls.length, 29);
+  assert.equal(calls.length, 33);
 });
 
 test("launch tools add lifecycle reminders only for created work", async () => {

@@ -175,12 +175,38 @@ test("explicit-required settings accept any nonempty scope and model options hid
       { profileId: "implementer", limit: 16 },
       paths.sessionKey,
     )) as Record<string, unknown> & {
-      candidates: Array<{ selection: ModelSelection }>;
+      availableModels: Array<
+        ModelSelection & {
+          ratings: Record<string, string>;
+          availability: string;
+        }
+      >;
     };
+    assert.deepEqual(Object.keys(modelOptions).sort(), [
+      "availableModels",
+      "moreAvailable",
+      "profileId",
+    ]);
     assert.equal("currentSelection" in modelOptions, false);
+    assert.equal("candidates" in modelOptions, false);
+    assert.equal("excluded" in modelOptions, false);
     assert.deepEqual(
-      modelOptions.candidates.map((candidate) => candidate.selection),
+      modelOptions.availableModels.map(
+        ({ provider, modelId, thinkingLevel }) => ({
+          provider,
+          modelId,
+          thinkingLevel,
+        }),
+      ),
       [sol],
+    );
+    assert.match(
+      modelOptions.availableModels[0]?.ratings.overall ?? "",
+      /^(?:★{0,5})(?:☆{0,5}) [0-5]\/5$/u,
+    );
+    assert.match(
+      modelOptions.availableModels[0]?.availability ?? "",
+      /^(?:ready|will queue) \([0-9]+\/[1-9][0-9]* slots\)$/u,
     );
   } finally {
     await broker.stop().catch(() => undefined);
@@ -249,16 +275,16 @@ test("broker persists one validated operator settings batch before runtime apply
       { profileId: "implementer", limit: 16 },
       paths.sessionKey,
     )) as {
-      candidates: Array<{
-        selection: ModelSelection;
-        endpoint: { limit: number };
+      availableModels: Array<{
+        modelId: string;
+        availability: string;
       }>;
     };
     assert.equal(
-      modelOptions.candidates.find(
-        (candidate) => candidate.selection.modelId === luna.modelId,
-      )?.endpoint.limit,
-      2,
+      modelOptions.availableModels.find(
+        (candidate) => candidate.modelId === luna.modelId,
+      )?.availability,
+      "ready (2/2 slots)",
     );
 
     rejectPersistence = true;
@@ -305,10 +331,10 @@ test("broker persists one validated operator settings batch before runtime apply
       paths.sessionKey,
     )) as typeof modelOptions;
     assert.equal(
-      afterFailureOptions.candidates.find(
-        (candidate) => candidate.selection.modelId === luna.modelId,
-      )?.endpoint.limit,
-      2,
+      afterFailureOptions.availableModels.find(
+        (candidate) => candidate.modelId === luna.modelId,
+      )?.availability,
+      "ready (2/2 slots)",
     );
   } finally {
     await broker.stop().catch(() => undefined);

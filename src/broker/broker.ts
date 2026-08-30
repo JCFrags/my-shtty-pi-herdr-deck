@@ -131,6 +131,7 @@ import {
   type ResolvedSpawnPolicy,
 } from "./model-policy.js";
 import {
+  availableModelOptionsView,
   buildModelOptions,
   createAdvisoryModelReceipt,
   modelCapacityView,
@@ -3630,20 +3631,24 @@ export class Broker {
         const inheritedProjectKey = principal.agentId
           ? this.store.state.agents[principal.agentId]?.cwd
           : undefined;
-        result = await this.#modelOptions({
-          taskProfile: p.profileId,
-          ...(p.placement ? { placement: p.placement as AgentPlacement } : {}),
-          ...(p.modelProfileId
-            ? { modelProfileId: p.modelProfileId as ModelProfileId }
-            : {}),
-          ...(p.projectKey
-            ? { projectKey: p.projectKey }
-            : inheritedProjectKey
-              ? { projectKey: inheritedProjectKey }
+        result = availableModelOptionsView(
+          await this.#modelOptions({
+            taskProfile: p.profileId,
+            ...(p.placement
+              ? { placement: p.placement as AgentPlacement }
               : {}),
-          asOf: new Date(this.#now()).toISOString(),
-          limit: p.limit === undefined ? 10 : Number(p.limit),
-        });
+            ...(p.modelProfileId
+              ? { modelProfileId: p.modelProfileId as ModelProfileId }
+              : {}),
+            ...(p.projectKey
+              ? { projectKey: p.projectKey }
+              : inheritedProjectKey
+                ? { projectKey: inheritedProjectKey }
+                : {}),
+            asOf: new Date(this.#now()).toISOString(),
+            limit: p.limit === undefined ? 10 : Number(p.limit),
+          }),
+        );
       } else if (request.method === "model.policy.get") {
         requirePermission(principal, "read:state");
         result = {

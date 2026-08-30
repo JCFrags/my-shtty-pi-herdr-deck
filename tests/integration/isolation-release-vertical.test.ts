@@ -666,9 +666,11 @@ test("production agent.spawn preserves explicit worktree through exact receipts"
       profileId: "implementer",
       limit: 5,
     })) as Record<string, unknown>;
-    assert.equal(modelOptions.mode, "current_default");
-    assert.ok(Array.isArray(modelOptions.candidates));
-    assert.ok(modelOptions.candidates.length >= 1);
+    assert.equal(modelOptions.profileId, "implementer");
+    assert.ok(Array.isArray(modelOptions.availableModels));
+    assert.ok(modelOptions.availableModels.length >= 1);
+    assert.equal("candidates" in modelOptions, false);
+    assert.equal("excluded" in modelOptions, false);
     const responsePromise = h.client.request("agent.spawn", {
       task: {
         title: "owned-spawn-worktree",

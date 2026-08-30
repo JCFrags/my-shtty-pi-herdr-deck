@@ -1262,11 +1262,11 @@ function textResult(value: unknown): {
   };
 }
 interface AvailableAgentModelRatings {
-  readonly overall: number;
-  readonly taskFit: number;
-  readonly reliability: number;
-  readonly speed: number;
-  readonly value: number;
+  readonly overall: string;
+  readonly taskFit: string;
+  readonly reliability: string;
+  readonly speed: string;
+  readonly value: string;
 }
 interface AvailableAgentModelOption {
   readonly rank: number;
@@ -1275,46 +1275,55 @@ interface AvailableAgentModelOption {
   readonly thinkingLevel: string;
   readonly recommended: boolean;
   readonly ratings: AvailableAgentModelRatings;
-  readonly startAvailability: "ready" | "will_queue";
-  readonly availableSlots: number;
-  readonly maxConcurrent: number;
+  readonly availability: string;
 }
 interface AvailableAgentModelsDetails {
   readonly profileId: string;
-  readonly mode: string;
-  readonly asOf: string;
   readonly availableModels: readonly AvailableAgentModelOption[];
-  readonly shownAvailableOptions: number;
-  readonly totalAvailableOptions: number;
-  readonly truncated: boolean;
+  readonly moreAvailable: number;
 }
-const MODEL_RATING_PPM = 1_000_000;
 function nonnegativeSafeInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && Number(value) >= 0;
 }
-function validRatingPpm(
-  value: unknown,
-  allowNegative = false,
-): value is number {
+function hasExactKeys(
+  value: Record<string, unknown>,
+  keys: readonly string[],
+): boolean {
+  const actual = Object.keys(value);
   return (
-    Number.isSafeInteger(value) &&
-    Number(value) >= (allowNegative ? -MODEL_RATING_PPM : 0) &&
-    Number(value) <= MODEL_RATING_PPM
+    actual.length === keys.length &&
+    keys.every((key) => Object.hasOwn(value, key))
   );
 }
-function fiveStarRating(valuePpm: number): number {
-  const bounded = Math.max(0, Math.min(MODEL_RATING_PPM, valuePpm));
-  return Math.round((bounded * 5) / MODEL_RATING_PPM);
+function validStarRating(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const match = /^(★{0,5})(☆{0,5}) ([0-5])\/5$/u.exec(value);
+  if (!match) return false;
+  const filled = match[1]?.length ?? 0;
+  const empty = match[2]?.length ?? 0;
+  return filled + empty === 5 && filled === Number(match[3]);
 }
-function starRating(rating: number): string {
-  return `${"★".repeat(rating)}${"☆".repeat(5 - rating)} ${rating}/5`;
+function validModelAvailability(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > 64) return false;
+  const match = /^(ready|will queue) \(([0-9]+)\/([1-9][0-9]*) slots\)$/u.exec(
+    value,
+  );
+  if (!match) return false;
+  const available = Number(match[2]);
+  const limit = Number(match[3]);
+  return (
+    Number.isSafeInteger(available) &&
+    Number.isSafeInteger(limit) &&
+    available <= limit &&
+    (match[1] === "ready" ? available > 0 : available === 0)
+  );
 }
 function ratingCategories(ratings: AvailableAgentModelRatings): string {
   return [
-    `Task fit ${starRating(ratings.taskFit)}`,
-    `Reliability ${starRating(ratings.reliability)}`,
-    `Speed ${starRating(ratings.speed)}`,
-    `Value ${starRating(ratings.value)}`,
+    `Task fit ${ratings.taskFit}`,
+    `Reliability ${ratings.reliability}`,
+    `Speed ${ratings.speed}`,
+    `Value ${ratings.value}`,
   ].join(" · ");
 }
 function safeModelOptionText(value: unknown, max = 256): value is string {
@@ -1333,15 +1342,16 @@ function availableAgentModelsResult(value: unknown): {
     throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
   const source = value as Record<string, unknown>;
   if (
-    !safeModelOptionText(source.taskProfile) ||
-    !safeModelOptionText(source.mode) ||
-    !safeModelOptionText(source.asOf) ||
-    !Array.isArray(source.candidates) ||
-    source.candidates.length > 16
+    !hasExactKeys(source, ["profileId", "availableModels", "moreAvailable"]) ||
+    !safeModelOptionText(source.profileId) ||
+    !Array.isArray(source.availableModels) ||
+    source.availableModels.length > 16 ||
+    !nonnegativeSafeInteger(source.moreAvailable) ||
+    source.availableModels.length + source.moreAvailable > 256
   )
     throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
-  const availableModels = source.candidates.map(
-    (candidate): AvailableAgentModelOption => {
+  const availableModels = source.availableModels.map(
+    (candidate, index): AvailableAgentModelOption => {
       if (
         !candidate ||
         typeof candidate !== "object" ||
@@ -1349,86 +1359,75 @@ function availableAgentModelsResult(value: unknown): {
       )
         throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
       const option = candidate as Record<string, unknown>;
-      const selection = option.selection;
-      const endpoint = option.endpoint;
-      const components = option.components;
       if (
-        !selection ||
-        typeof selection !== "object" ||
-        Array.isArray(selection) ||
-        !endpoint ||
-        typeof endpoint !== "object" ||
-        Array.isArray(endpoint) ||
-        !components ||
-        typeof components !== "object" ||
-        Array.isArray(components) ||
-        !Number.isSafeInteger(option.rank) ||
-        Number(option.rank) < 1 ||
-        !validRatingPpm(option.scorePpm, true)
+        !hasExactKeys(option, [
+          "rank",
+          "provider",
+          "modelId",
+          "thinkingLevel",
+          "recommended",
+          "ratings",
+          "availability",
+        ])
       )
         throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
-      const selected = selection as Record<string, unknown>;
-      const capacity = endpoint as Record<string, unknown>;
-      const scores = components as Record<string, unknown>;
+      const ratings = option.ratings;
       if (
-        !safeModelOptionText(selected.provider) ||
-        !safeModelOptionText(selected.modelId) ||
-        !safeModelOptionText(selected.thinkingLevel, 32) ||
-        !THINKING_LEVELS.includes(selected.thinkingLevel as ThinkingLevel) ||
-        !nonnegativeSafeInteger(capacity.available) ||
-        !nonnegativeSafeInteger(capacity.limit) ||
-        capacity.limit < 1 ||
-        capacity.available > capacity.limit ||
-        !validRatingPpm(scores.taskCapability) ||
-        !validRatingPpm(scores.protocolReliability) ||
-        !validRatingPpm(scores.speed) ||
-        !validRatingPpm(scores.effectiveCost)
+        !ratings ||
+        typeof ratings !== "object" ||
+        Array.isArray(ratings) ||
+        Object.keys(ratings).length !== 5
+      )
+        throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
+      const rating = ratings as Record<string, unknown>;
+      if (
+        !Number.isSafeInteger(option.rank) ||
+        Number(option.rank) !== index + 1 ||
+        !safeModelOptionText(option.provider) ||
+        !safeModelOptionText(option.modelId) ||
+        !safeModelOptionText(option.thinkingLevel, 32) ||
+        !THINKING_LEVELS.includes(option.thinkingLevel as ThinkingLevel) ||
+        typeof option.recommended !== "boolean" ||
+        option.recommended !== (option.rank === 1) ||
+        !validModelAvailability(option.availability) ||
+        !["overall", "taskFit", "reliability", "speed", "value"].every((key) =>
+          validStarRating(rating[key]),
+        )
       )
         throw new Error("MODEL_OPTIONS_RESPONSE_INVALID");
       return {
         rank: Number(option.rank),
-        provider: selected.provider,
-        modelId: selected.modelId,
-        thinkingLevel: selected.thinkingLevel,
-        recommended: option.rank === 1,
+        provider: option.provider,
+        modelId: option.modelId,
+        thinkingLevel: option.thinkingLevel,
+        recommended: option.recommended,
         ratings: {
-          overall: fiveStarRating(option.scorePpm),
-          taskFit: fiveStarRating(scores.taskCapability),
-          reliability: fiveStarRating(scores.protocolReliability),
-          speed: fiveStarRating(scores.speed),
-          value: fiveStarRating(scores.effectiveCost),
+          overall: rating.overall as string,
+          taskFit: rating.taskFit as string,
+          reliability: rating.reliability as string,
+          speed: rating.speed as string,
+          value: rating.value as string,
         },
-        startAvailability: capacity.available > 0 ? "ready" : "will_queue",
-        availableSlots: capacity.available,
-        maxConcurrent: capacity.limit,
+        availability: option.availability,
       };
     },
   );
-  const eligibleCount =
-    Number.isSafeInteger(source.eligibleCount) &&
-    Number(source.eligibleCount) >= availableModels.length
-      ? Number(source.eligibleCount)
-      : availableModels.length;
   const details: AvailableAgentModelsDetails = {
-    profileId: source.taskProfile,
-    mode: source.mode,
-    asOf: source.asOf,
+    profileId: source.profileId,
     availableModels,
-    shownAvailableOptions: availableModels.length,
-    totalAvailableOptions: eligibleCount,
-    truncated: availableModels.length < eligibleCount,
+    moreAvailable: source.moreAvailable,
   };
   const lines = [
     `Available agent models for ${details.profileId}:`,
     "Use provider, modelId, and thinkingLevel exactly as shown.",
     ...availableModels.flatMap((option) => [
-      `${option.recommended ? "Recommended" : "-"} #${option.rank} ${option.provider}/${option.modelId} | thinking=${option.thinkingLevel} | Overall ${starRating(option.ratings.overall)} | ${option.startAvailability === "ready" ? `ready (${option.availableSlots}/${option.maxConcurrent} slots)` : "will queue (no free slot)"}`,
+      `${option.recommended ? "Recommended" : "-"} #${option.rank} ${option.provider}/${option.modelId} | thinking=${option.thinkingLevel} | Overall ${option.ratings.overall} | ${option.availability}`,
       `  ${ratingCategories(option.ratings)}`,
     ]),
   ];
-  if (details.truncated)
+  if (details.moreAvailable > 0)
     lines.push(
-      `Showing ${details.shownAvailableOptions} of ${details.totalAvailableOptions} available options.`,
+      `${details.moreAvailable} more available option${details.moreAvailable === 1 ? "" : "s"}; increase limit to see more.`,
     );
   return {
     content: [{ type: "text", text: lines.join("\n") }],
@@ -1449,30 +1448,26 @@ function renderAvailableAgentModels(
   const displayed = expanded
     ? details.availableModels
     : details.availableModels.slice(0, 5);
+  const total = details.availableModels.length + details.moreAvailable;
   let text =
     theme.fg(
       "success",
-      `✓ ${details.totalAvailableOptions} available model option${details.totalAvailableOptions === 1 ? "" : "s"}`,
+      `✓ ${total} available model option${total === 1 ? "" : "s"}`,
     ) + theme.fg("muted", ` for ${details.profileId}`);
   for (const option of displayed) {
     const marker = option.recommended ? theme.fg("accent", "→") : " ";
-    const capacity =
-      option.startAvailability === "ready"
-        ? theme.fg(
-            "success",
-            `${option.availableSlots}/${option.maxConcurrent} slots`,
-          )
-        : theme.fg("warning", "will queue");
-    const overall = theme.fg("accent", starRating(option.ratings.overall));
-    text += `\n${marker} ${theme.fg("accent", `#${option.rank}`)} ${theme.fg("muted", `${option.provider}/${option.modelId}`)} · ${option.thinkingLevel} · ${overall} · ${capacity}`;
+    const availability = option.availability.startsWith("ready")
+      ? theme.fg("success", option.availability)
+      : theme.fg("warning", option.availability);
+    text += `\n${marker} ${theme.fg("accent", `#${option.rank}`)} ${theme.fg("muted", `${option.provider}/${option.modelId}`)} · ${option.thinkingLevel} · ${theme.fg("accent", option.ratings.overall)} · ${availability}`;
     if (expanded)
       text += `\n    ${theme.fg("dim", ratingCategories(option.ratings))}`;
   }
   const hidden = details.availableModels.length - displayed.length;
   if (hidden > 0)
-    text += `\n${theme.fg("dim", `… ${hidden} more available option${hidden === 1 ? "" : "s"}`)}`;
-  if (details.truncated)
-    text += `\n${theme.fg("warning", `Showing ${details.shownAvailableOptions} of ${details.totalAvailableOptions}; increase limit to see more.`)}`;
+    text += `\n${theme.fg("dim", `… ${hidden} more returned option${hidden === 1 ? "" : "s"}`)}`;
+  if (details.moreAvailable > 0)
+    text += `\n${theme.fg("warning", `${details.moreAvailable} more available; increase limit to see them.`)}`;
   return new Text(text, 0, 0);
 }
 function validateResultInput(input: Record<string, unknown>): void {
